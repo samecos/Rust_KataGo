@@ -149,6 +149,37 @@ fn gtp_search_commands_smoke() {
 }
 
 #[test]
+fn gtp_set_position_and_raw_nn() {
+    let replies = gtp_session(&[
+        "boardsize 19",
+        "clear_board",
+        "set_position B D4 W Q16",
+        "showboard",
+        "kata-raw-nn 0",
+    ]);
+    assert!(replies.contains('X'), "set_position 黑子 X: {replies:?}");
+    assert!(replies.contains('O'), "set_position 白子 O");
+    // kata-raw-nn：dummy 后端输出统一策略，但字段结构必须完整。
+    assert!(replies.contains("whiteWin"), "raw-nn 应含 whiteWin: {replies:?}");
+    assert!(replies.contains("policyPass"), "raw-nn 应含 policyPass");
+}
+
+#[test]
+fn gtp_analysis_commands_smoke() {
+    // lz-analyze / kata-analyze：dummy 后端也应持续产出 info 行（此处只测不崩溃、
+    // 首个分析行出现即可；interval 用厘秒，取小值快速返回）。
+    let replies = gtp_session(&[
+        "boardsize 19",
+        "clear_board",
+        "lz-analyze B 10 minmoves 0 maxmoves 1",
+    ]);
+    assert!(
+        replies.contains("info move") || replies.contains("play"),
+        "lz-analyze 应产出分析行: {replies:?}"
+    );
+}
+
+#[test]
 fn gtp_time_controls() {
     let replies = gtp_session(&[
         "boardsize 19",
