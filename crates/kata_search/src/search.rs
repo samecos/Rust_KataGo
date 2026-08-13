@@ -6465,6 +6465,29 @@ impl<'a> Search<'a> {
                 parent_weight_per_visit,
                 true,
             );
+            if std::env::var("KATA_DEBUG_SELECT").is_ok() && is_root {
+                let mut special = String::new();
+                for (i, &v) in active_policy_probs.iter().enumerate().take(policy_size as usize)
+                {
+                    if v > 0.003 {
+                        let loc =
+                            nn_pos::pos_to_loc(i as i32, 19, 19, self.nn_x_len, self.nn_y_len);
+                        special.push_str(&format!(" pos{}->loc{}={:.4}", i, loc, v));
+                    }
+                }
+                eprintln!(
+                    "[select] root nchildren={} best_new={} prob={} fpu={:.4} sel={:.4} maxsel={:.4} pol288={:.6} pol361={:.6} special:{}",
+                    num_children_found,
+                    best_new_move_loc,
+                    best_new_nn_policy_prob,
+                    fpu_value,
+                    selection_value,
+                    max_selection_value,
+                    active_policy_probs[288],
+                    active_policy_probs[361],
+                    special
+                );
+            }
             if selection_value > max_selection_value {
                 max_selection_value = selection_value;
                 *best_child_idx = *num_children_found;

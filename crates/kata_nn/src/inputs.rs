@@ -2747,6 +2747,411 @@ mod tests {
         assert!(row_global[18].abs() <= 1.0);
     }
 
+    // ------------------------------------------------------------------
+    // V7 global-feature regression tests.
+    //
+    // All expected values below are hand-computed from the C++ reference
+    // `NNInputs::fillRowV7` in `cpp/neuralnet/nninputs.cpp` (official KataGo
+    // v1.17.2, the C++ version this crate mirrors). The global-features
+    // section is nninputs.cpp:2598-2731. Note that V7 has NO prisoner feature
+    // and NO handicap-stone feature: captures and handicap stones enter the
+    // net only through the spatial stone/area features, and the only
+    // handicap-related global features are the playout-doubling pair at
+    // indices 15-16. The "draw equivalent wins for white" value enters the
+    // inputs only through `BoardHistory::currentSelfKomi` ->
+    // `whiteKomiAdjustmentForDraws` (boardhistory.cpp:570-589), i.e. as an
+    // additive komi adjustment, not as a separate global feature.
+    // ------------------------------------------------------------------
+
+    fn assert_global_vec_eq(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for i in 0..actual.len() {
+            assert!(
+                (actual[i] - expected[i]).abs() < 1e-5,
+                "global[{i}]: actual {} != expected {}",
+                actual[i],
+                expected[i]
+            );
+        }
+    }
+
+    /// Expected V7 global vector for a 19x19 empty board, `Rules::default()`
+    /// (positional ko / area scoring / tax none / suicide legal), komi 7.5,
+    /// black to play. Derivation (nninputs.cpp:2598-2731):
+    /// - [0..4]: no move history -> no pass flags.
+    /// - [5]: `selfKomi / 20.0f` (nninputs.cpp:2602-2609). Black to play with
+    ///   komi 7.5 -> `currentSelfKomi` = -7.5 (draw adjustment is 0: komi is
+    ///   not an integer, boardhistory.cpp:570-589) -> -7.5/20 = -0.375.
+    /// - [6],[7]: positional ko -> 1.0, 0.5 (nninputs.cpp:2612-2620).
+    /// - [8]: multi-stone suicide legal -> 1.0 (nninputs.cpp:2624-2626).
+    /// - [9]: area scoring -> 0.0 (nninputs.cpp:2628-2633).
+    /// - [10],[11]: tax none -> 0.0 (nninputs.cpp:2634-2643).
+    /// - [12],[13]: encore phase 0 -> 0.0 (nninputs.cpp:2645-2649).
+    /// - [14]: a pass does not end the phase -> 0.0 (nninputs.cpp:2651-2653).
+    /// - [15],[16]: playout doubling advantage 0 -> 0.0 (nninputs.cpp:2655-2661).
+    /// - [17]: no button -> 0.0 (nninputs.cpp:2663-2665).
+    /// - [18]: score-belief parity wave (nninputs.cpp:2696-2729). 19x19 board
+    ///   area is odd -> drawable komis are odd; with selfKomi = -7.5:
+    ///   komiFloor = floor((selfKomi-1)/2)*2+1 = floor(-8.5/2)*2+1 = -5*2+1 = -9;
+    ///   delta = -7.5-(-9) = 1.5 -> wave = delta-2 = -0.5.
+    fn v7_empty_19x19_komi75_black_global() -> [f32; NUM_FEATURES_GLOBAL_V7 as usize] {
+        [
+            0.0, 0.0, 0.0, 0.0, 0.0, // [0..4] pass flags
+            -0.375,                  // [5] komi
+            1.0, 0.5,                // [6..7] ko rule
+            1.0,                     // [8] suicide
+            0.0,                     // [9] scoring
+            0.0, 0.0,                // [10..11] tax
+            0.0, 0.0,                // [12..13] encore
+            0.0,                     // [14] pass ends phase
+            0.0, 0.0,                // [15..16] playout doubling
+            0.0,                     // [17] button
+            -0.5,                    // [18] parity wave
+        ]
+    }
+
+    #[test]
+    fn test_fill_row_v7_global_empty_19x19_komi75_black() {
+        let board = Board::new(19, 19);
+        let hist = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+        let params = MiscNNInputParams::default();
+        let nn_x_len = 19;
+        let nn_y_len = 19;
+        let mut row_bin = vec![0.0f32; (NUM_FEATURES_SPATIAL_V7 * nn_x_len * nn_y_len) as usize];
+        let mut row_global = vec![0.0f32; NUM_FEATURES_GLOBAL_V7 as usize];
+
+        fill_row_v7(
+            &board,
+            &hist,
+            P_BLACK,
+            &params,
+            nn_x_len,
+            nn_y_len,
+            false,
+            &mut row_bin,
+            &mut row_global,
+        );
+
+        assert_global_vec_eq(&row_global, &v7_empty_19x19_komi75_black_global());
+        // On an empty board all spatial features except "on board" are zero.
+        // NCHW layout (use_nhwc = false): feature f at position pos lives at
+        // f * (nnXLen * nnYLen) + pos.
+        let plane_area = (nn_x_len * nn_y_len) as usize;
+        for pos in 0..plane_area {
+            assert_eq!(row_bin[pos], 1.0, "pos {pos}");
+        }
+        assert!(row_bin[plane_area..].iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_fill_row_v7_global_empty_19x19_komi0() {
+        // Same position as above but with komi 0.0. Hand-computed:
+        // - [5]: selfKomi = 0 (draw adjustment 0.5-0.5 = 0, komi is an
+        //   integer so gameResultWillBeInteger() is true, boardhistory.cpp:575)
+        //   -> 0.0/20 = 0.0.
+        // - [18]: komiFloor = floor((0-1)/2)*2+1 = floor(-0.5)*2+1 = -1;
+        //   delta = 0-(-1) = 1.0 -> wave = 1.0-1.0 = 0.0.
+        // All other entries are identical to the komi-7.5 case.
+        let expected: [f32; NUM_FEATURES_GLOBAL_V7 as usize] = [
+            0.0, 0.0, 0.0, 0.0, 0.0, // [0..4] pass flags
+            0.0,                     // [5] komi
+            1.0, 0.5,                // [6..7] ko rule
+            1.0,                     // [8] suicide
+            0.0,                     // [9] scoring
+            0.0, 0.0,                // [10..11] tax
+            0.0, 0.0,                // [12..13] encore
+            0.0,                     // [14] pass ends phase
+            0.0, 0.0,                // [15..16] playout doubling
+            0.0,                     // [17] button
+            0.0,                     // [18] parity wave
+        ];
+
+        let mut rules = Rules::default();
+        rules.set_komi(0.0);
+        let board = Board::new(19, 19);
+        let hist = BoardHistory::new(board.clone(), P_BLACK, rules, 0);
+        let params = MiscNNInputParams::default();
+        let nn_x_len = 19;
+        let nn_y_len = 19;
+        let mut row_bin = vec![0.0f32; (NUM_FEATURES_SPATIAL_V7 * nn_x_len * nn_y_len) as usize];
+        let mut row_global = vec![0.0f32; NUM_FEATURES_GLOBAL_V7 as usize];
+
+        fill_row_v7(
+            &board,
+            &hist,
+            P_BLACK,
+            &params,
+            nn_x_len,
+            nn_y_len,
+            false,
+            &mut row_bin,
+            &mut row_global,
+        );
+
+        assert_global_vec_eq(&row_global, &expected);
+        // And it must differ from the komi-7.5 vector (indices 5 and 18).
+        let komi75 = v7_empty_19x19_komi75_black_global();
+        assert!(
+            !row_global
+                .iter()
+                .zip(komi75.iter())
+                .all(|(a, b)| (a - b).abs() < 1e-5),
+            "komi 0 global vector must differ from the komi 7.5 vector"
+        );
+        assert_ne!(komi75[5], expected[5]);
+        assert_ne!(komi75[18], expected[18]);
+    }
+
+    #[test]
+    fn test_fill_row_v7_global_simple_ko_no_suicide_matches_cpp() {
+        // Simple-ko / no-suicide rules on the empty board produce exactly the
+        // vector observed from the real inference pipeline
+        // [0,0,0,0,0,-0.38,0,0,0,0,0,0,0,0,0,0,0,0,-0.5]. C++ fillRowV7
+        // produces the same vector for these rules: index 18 = -0.5 is the
+        // score-belief parity wave (nninputs.cpp:2696-2729), NOT
+        // `drawEquivalentWinsForWhite - 0.5` (which is only ever added into
+        // the komi via `whiteKomiAdjustmentForDraws`, boardhistory.cpp:575,
+        // and is 0.0 for the default draw-equivalent value 0.5).
+        let rules = Rules::new(
+            KoRule::Simple,
+            ScoringRule::Area,
+            TaxRule::None,
+            false, // multi-stone suicide not legal
+            false, // no button
+            kata_game::rules::WhiteHandicapBonusRule::Zero,
+            false, // friendly pass not ok
+            7.5,   // komi
+        );
+        let board = Board::new(19, 19);
+        let hist = BoardHistory::new(board.clone(), P_BLACK, rules, 0);
+        let params = MiscNNInputParams::default();
+        let nn_x_len = 19;
+        let nn_y_len = 19;
+        let mut row_bin = vec![0.0f32; (NUM_FEATURES_SPATIAL_V7 * nn_x_len * nn_y_len) as usize];
+        let mut row_global = vec![0.0f32; NUM_FEATURES_GLOBAL_V7 as usize];
+
+        fill_row_v7(
+            &board,
+            &hist,
+            P_BLACK,
+            &params,
+            nn_x_len,
+            nn_y_len,
+            false,
+            &mut row_bin,
+            &mut row_global,
+        );
+
+        assert_global_vec_eq(
+            &row_global,
+            &[
+                0.0, 0.0, 0.0, 0.0, 0.0, // [0..4] pass flags
+                -0.375,                  // [5] komi = -7.5/20
+                0.0, 0.0,                // [6..7] simple ko
+                0.0,                     // [8] suicide not legal
+                0.0,                     // [9] area scoring
+                0.0, 0.0,                // [10..11] tax none
+                0.0, 0.0,                // [12..13] encore
+                0.0,                     // [14] pass ends phase
+                0.0, 0.0,                // [15..16] playout doubling
+                0.0,                     // [17] button
+                -0.5,                    // [18] parity wave
+            ],
+        );
+    }
+
+    #[test]
+    fn test_fill_row_v7_global_capture_has_no_prisoner_feature() {
+        // V7 encodes captures only through the board-area spatial features
+        // (nninputs.cpp:2373-2461); there is no prisoner feature in any input
+        // version. Black captures a white stone at the corner:
+        //   W(0,0), B(1,0), W(18,18), B(0,1), W(17,17), B(1,1) captures (0,0),
+        //   W(16,16).
+        // After this it is black to play, so pla = black, opp = white; the
+        // captured point becomes black territory -> spatial feature 18 there.
+        let mut board = Board::new(19, 19);
+        let mut hist = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+        let moves_played: &[(i32, i32, Player)] = &[
+            (0, 0, P_WHITE),
+            (1, 0, P_BLACK),
+            (18, 18, P_WHITE),
+            (0, 1, P_BLACK),
+            (17, 17, P_WHITE),
+            (1, 1, P_BLACK),
+            (16, 16, P_WHITE),
+        ];
+        for &(x, y, pla) in moves_played {
+            let loc = location::get_loc(x, y, 19);
+            assert!(hist.make_board_move_tolerant(&mut board, loc, pla));
+        }
+        assert_eq!(board.num_white_captures, 1);
+
+        let params = MiscNNInputParams::default();
+        let nn_x_len = 19;
+        let nn_y_len = 19;
+        let mut row_bin = vec![0.0f32; (NUM_FEATURES_SPATIAL_V7 * nn_x_len * nn_y_len) as usize];
+        let mut row_global = vec![0.0f32; NUM_FEATURES_GLOBAL_V7 as usize];
+
+        fill_row_v7(
+            &board,
+            &hist,
+            P_BLACK,
+            &params,
+            nn_x_len,
+            nn_y_len,
+            false,
+            &mut row_bin,
+            &mut row_global,
+        );
+
+        // No global feature changes: komi and rules are unchanged, the most
+        // recent move (W at (16,16)) is a stone not a pass, and a pass still
+        // does not end the phase.
+        assert_global_vec_eq(&row_global, &v7_empty_19x19_komi75_black_global());
+
+        // The captured point is empty on the board but black's (pla's) area:
+        // feature 18 = 1, feature 19 (opp area) = 0. NCHW layout.
+        let pos = nn_pos::loc_to_pos(location::get_loc(0, 0, 19), 19, nn_x_len, nn_y_len);
+        let plane_area = nn_x_len * nn_y_len;
+        let idx = |feature: i32| (feature * plane_area + pos) as usize;
+        assert_eq!(row_bin[idx(0)], 1.0); // on board
+        assert_eq!(row_bin[idx(1)], 0.0); // not a pla (black) stone
+        assert_eq!(row_bin[idx(2)], 0.0); // not an opp (white) stone
+        assert_eq!(row_bin[idx(18)], 1.0); // pla's (black's) area
+        assert_eq!(row_bin[idx(19)], 0.0); // not opp's area
+    }
+
+    #[test]
+    fn test_fill_row_v7_global_handicap_stones() {
+        // A 5-stone handicap (four corner star points + tengen) is encoded
+        // only as ordinary black stones in the spatial features: V7 has no
+        // handicap-stone global feature. With default params the global
+        // vector is therefore identical to the empty-board case.
+        let handicap_locs = [
+            location::get_loc(3, 3, 19),
+            location::get_loc(3, 15, 19),
+            location::get_loc(15, 3, 19),
+            location::get_loc(15, 15, 19),
+            location::get_loc(9, 9, 19), // tengen
+        ];
+        let mut board = Board::new(19, 19);
+        let placements: Vec<Move> = handicap_locs
+            .iter()
+            .map(|&loc| Move::new(loc, P_BLACK))
+            .collect();
+        assert!(board.set_stones_tolerant(&placements) == 0);
+
+        let hist = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+        let nn_x_len = 19;
+        let nn_y_len = 19;
+        let mut row_bin = vec![0.0f32; (NUM_FEATURES_SPATIAL_V7 * nn_x_len * nn_y_len) as usize];
+
+        // Default params: playout doubling advantage 0.
+        let mut row_global = vec![0.0f32; NUM_FEATURES_GLOBAL_V7 as usize];
+        fill_row_v7(
+            &board,
+            &hist,
+            P_BLACK,
+            &MiscNNInputParams::default(),
+            nn_x_len,
+            nn_y_len,
+            false,
+            &mut row_bin,
+            &mut row_global,
+        );
+        assert_global_vec_eq(&row_global, &v7_empty_19x19_komi75_black_global());
+        // NCHW layout (use_nhwc = false): feature f at position pos lives at
+        // f * (nnXLen * nnYLen) + pos.
+        let plane_area = nn_x_len * nn_y_len;
+        for &loc in &handicap_locs {
+            let pos = nn_pos::loc_to_pos(loc, 19, nn_x_len, nn_y_len);
+            let idx = |feature: i32| (feature * plane_area + pos) as usize;
+            assert_eq!(row_bin[idx(0)], 1.0); // on board
+            assert_eq!(row_bin[idx(1)], 1.0); // pla (black) stone
+        }
+
+        // The only handicap-related global features are the playout-doubling
+        // pair (nninputs.cpp:2655-2661): nonzero advantage sets [15] = 1 and
+        // [16] = 0.5 * advantage.
+        let mut params = MiscNNInputParams::default();
+        params.playout_doubling_advantage = 0.4;
+        let mut row_global2 = vec![0.0f32; NUM_FEATURES_GLOBAL_V7 as usize];
+        fill_row_v7(
+            &board,
+            &hist,
+            P_BLACK,
+            &params,
+            nn_x_len,
+            nn_y_len,
+            false,
+            &mut row_bin,
+            &mut row_global2,
+        );
+        let mut expected = v7_empty_19x19_komi75_black_global();
+        expected[15] = 1.0;
+        expected[16] = 0.2;
+        assert_global_vec_eq(&row_global2, &expected);
+    }
+
+    #[test]
+    fn test_fill_row_v7_global_draw_equivalent_adjusts_komi() {
+        // Where "draw equivalent wins for white" actually enters the V7
+        // inputs: `currentSelfKomi` adds `drawEquivalentWinsForWhite - 0.5`
+        // when the game result can be an integer (boardhistory.cpp:570-589),
+        // and that adjusted komi is what feature [5] encodes. Territory
+        // scoring with integer komi 7.0, draw-equivalent 0.75, white to play:
+        //   selfKomi = 7.0 + (0.75 - 0.5) = 7.25 -> [5] = 7.25/20 = 0.3625.
+        // Territory scoring in the normal phase also sets [9] = 1 and does
+        // not compute the parity wave, so [18] stays 0 (nninputs.cpp:2696).
+        let rules = Rules::new(
+            KoRule::Positional,
+            ScoringRule::Territory,
+            TaxRule::None,
+            true,  // multi-stone suicide legal
+            false, // no button
+            kata_game::rules::WhiteHandicapBonusRule::Zero,
+            false, // friendly pass not ok
+            7.0,   // komi
+        );
+        let board = Board::new(19, 19);
+        let hist = BoardHistory::new(board.clone(), P_WHITE, rules, 0);
+        let mut params = MiscNNInputParams::default();
+        params.draw_equivalent_wins_for_white = 0.75;
+        let nn_x_len = 19;
+        let nn_y_len = 19;
+        let mut row_bin = vec![0.0f32; (NUM_FEATURES_SPATIAL_V7 * nn_x_len * nn_y_len) as usize];
+        let mut row_global = vec![0.0f32; NUM_FEATURES_GLOBAL_V7 as usize];
+
+        fill_row_v7(
+            &board,
+            &hist,
+            P_WHITE,
+            &params,
+            nn_x_len,
+            nn_y_len,
+            false,
+            &mut row_bin,
+            &mut row_global,
+        );
+
+        assert_global_vec_eq(
+            &row_global,
+            &[
+                0.0, 0.0, 0.0, 0.0, 0.0, // [0..4] pass flags
+                0.3625,                  // [5] komi (7.0 + 0.25)/20
+                1.0, 0.5,                // [6..7] ko rule
+                1.0,                     // [8] suicide
+                1.0,                     // [9] territory scoring
+                0.0, 0.0,                // [10..11] tax none
+                0.0, 0.0,                // [12..13] encore
+                0.0,                     // [14] pass ends phase
+                0.0, 0.0,                // [15..16] playout doubling
+                0.0,                     // [17] button
+                0.0,                     // [18] no parity wave for territory
+            ],
+        );
+    }
+
     fn idx_v3(pos: i32, feature: i32) -> usize {
         (pos * NUM_FEATURES_SPATIAL_V3 + feature) as usize
     }

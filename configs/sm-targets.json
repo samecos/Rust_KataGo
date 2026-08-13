@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "comment": "SM 目标配置：编译期按此列表为每个架构生成 PTX/cubin，运行时按设备能力选择最优后端；plan JSON 为 autotune 产物（M4）。",
+  "targets": [
+    {
+      "id": "sm_120",
+      "compute_capability": "12.0",
+      "nvcc_ptx_arch": "compute_120",
+      "nvcc_cubin_arch": "sm_120",
+      "features": ["tensor_fp16", "persisting_l2"],
+      "kernels": ["gemm_m16n8k16", "flash_attn_both16", "conv3x3_im2col", "elementwise_half2"],
+      "plan_hint": "plans/sm120/rtx5070ti-b16-s2.json"
+    },
+    {
+      "id": "sm_89",
+      "compute_capability": "8.9",
+      "nvcc_ptx_arch": "compute_89",
+      "nvcc_cubin_arch": "sm_89",
+      "features": ["tensor_fp16"],
+      "kernels": ["gemm_m16n8k16", "elementwise_half2"]
+    }
+  ],
+  "default_targets": ["sm_120"]
+}

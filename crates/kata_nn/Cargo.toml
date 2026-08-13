@@ -11,6 +11,9 @@ default = []
 # Enables the TensorRT backend module. Real inference still requires the
 # NVIDIA TensorRT native libraries to be available at build/link time.
 trt = []
+# Enables the hand-written CUDA backend (kernels compiled by nvcc at build
+# time according to configs/sm-targets.json; requires a CUDA toolkit).
+cuda = ["dep:cudarc"]
 
 [dependencies]
 flate2 = { workspace = true }
@@ -21,11 +24,14 @@ parking_lot = { workspace = true }
 prost = "0.13"
 serde = { workspace = true }
 thiserror = { workspace = true }
+cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system", "nvrtc"] }
 
 [build-dependencies]
 cc = "1"
 prost-build = "0.13"
 protoc-bin-vendored = "3"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 kata_data = { path = "../kata_data" }
