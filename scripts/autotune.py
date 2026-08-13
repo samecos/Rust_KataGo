@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BIN = ROOT / "target" / "release" / "katago-rs"
 MODEL = "D:/code/b11fix.onnx"
+MODEL_SHA256 = "f2fc09fdf58a3e8a4b97addceab0c853874c52709152e61935b6ac6b9f474f94"
 CFG = ROOT / "configs" / "gtp_smoke.cfg"
 
 # 10 个决策组（有序，后组不得改写前组的配置键）——与 fork 对齐。
@@ -112,7 +113,7 @@ def main() -> int:
         "schema": 1,
         "kind": "cuda-tactic-plan",
         "status": "draft",
-        "target": {"architecture": "sm120", "model_sha256": "TBD", "batches": [16]},
+        "target": {"architecture": "sm120", "model_sha256": MODEL_SHA256, "batches": [16]},
         "apply": {"per_batch_tactic_overrides": {"16": incumbent}},
         "selection": "history-ordered accumulated coordinate winners; ABBA",
     }, indent=2, ensure_ascii=False), encoding="utf-8")
