@@ -39,8 +39,9 @@ extern "C" __global__ void add_residual_f16_kernel(const __half* __restrict__ in
 
 // RMSNorm：每行 ncols 个元素，out = in / sqrt(mean(x^2) + eps) * scale。
 // 每 block 处理一行：128 线程，FP32 累加（先线程内串行、再跨线程归约）。
+// scale 为 f32（执行器上传 f32 参数；主机包装按需转换）。
 extern "C" __global__ void rms_norm_f16_kernel(const __half* __restrict__ in,
-                                               const __half* __restrict__ scale,
+                                               const float* __restrict__ scale,
                                                __half* __restrict__ out,
                                                float eps, int ncols) {
     int row = blockIdx.x;
@@ -68,22 +69,20 @@ extern "C" __global__ void rms_norm_f16_kernel(const __half* __restrict__ in,
     __syncthreads();
     float rstd = s_warpsum[1];
     for (int i = threadIdx.x; i < ncols; i += blockDim.x) {
-        float v = __half2float(x[i]) * rstd * __half2float(scale[i]);
+        float v = __half2float(x[i]) * rstd * scale[i];
         y[i] = __float2half(v);
     }
 }
 
-// SwiGLU：out = x_up * sigmoid(x_gate) * 0.5? 否——本模型 FFN 为
-// silu(gate)*up（SiLU 门控）。此处提供逐元素 SwiGLU：
-// out[i] = up[i] * silu(gate[i])。
+// SwiGLU（原位 gate）：gate[i] = up[i] * silu(gate[i])。
+// 本模型 FFN 为 silu(gate)*up（SiLU 门控）。
 extern "C" __global__ void swiglu_f16_kernel(const __half* __restrict__ up,
-                                             const __half* __restrict__ gate,
-                                             __half* __restrict__ out, int n) {
+                                             __half* __restrict__ gate, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float g = __half2float(gate[i]);
     g = g / (1.0f + expf(-g));
-    out[i] = __float2half(__half2float(up[i]) * g);
+    gate[i] = __float2half(__half2float(up[i]) * g);
 }
 
 // f16 -> f32（head 输出用）。

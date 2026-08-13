@@ -329,17 +329,16 @@ mod imp {
         assert_eq!(scale.len(), ncols);
         let rows = x.len() / ncols;
         let xh: Vec<u16> = x.iter().map(|&v| f32_to_f16_bits(v)).collect();
-        let sh: Vec<u16> = scale.iter().map(|&v| f32_to_f16_bits(v)).collect();
         let f = self.get_func("rms_norm_f16_kernel")?;
         let stream = self.device.default_stream();
         let mut d_x: CudaSlice<u16> =
             unsafe { stream.alloc(x.len()) }.map_err(|e| e.to_string())?;
-        let mut d_s: CudaSlice<u16> =
+        let mut d_s: CudaSlice<f32> =
             unsafe { stream.alloc(ncols) }.map_err(|e| e.to_string())?;
         let mut d_y: CudaSlice<u16> =
             stream.alloc_zeros(x.len()).map_err(|e| e.to_string())?;
         stream.memcpy_htod(xh.as_slice(), &mut d_x).map_err(|e| e.to_string())?;
-        stream.memcpy_htod(sh.as_slice(), &mut d_s).map_err(|e| e.to_string())?;
+        stream.memcpy_htod(scale, &mut d_s).map_err(|e| e.to_string())?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (rows as u32, 1, 1),
             block_dim: (128, 1, 1),
@@ -400,6 +399,7 @@ mod imp {
             block_dim: (block, 1, 1),
             shared_mem_bytes: 0,
         };
+        let scale = 1.0 / (d as f32).sqrt();
         unsafe {
             stream
                 .launch_builder(&f)
@@ -409,6 +409,7 @@ mod imp {
                 .arg(&mut d_o)
                 .arg(&(s as i32))
                 .arg(&(d as i32))
+                .arg(&scale)
                 .launch(cfg)
         }
         .map_err(|e| format!("attention launch failed: {e}"))?;
@@ -432,3 +433,337 @@ impl CudaRuntime {
 
 #[cfg(feature = "cuda")]
 pub use imp::{f16_to_f32_bits, f32_to_f16_bits, CudaRuntime};
+
+// ---------------------------------------------------------------------------
+// Backend trait 对接：把 cuda_exec 的整图执行器接入 NN 求值器
+// ---------------------------------------------------------------------------
+#[cfg(feature = "cuda")]
+mod backend_impl {
+    use super::imp::CudaRuntime;
+    use crate::backend::{
+        Backend, ComputeContext, ComputeHandle, Enabled, InputBuffers, LoadedModel, NNOutput,
+        NNResultBuf, NeuralNetError,
+    };
+    use crate::backends::cuda_exec::CudaModel;
+    use crate::desc::ModelDesc;
+    use kata_core::config::Config;
+    use kata_core::logger::Logger;
+    use kata_game::symmetry::{copy_inputs_with_symmetry, copy_outputs_with_symmetry, invert};
+    use std::any::Any;
+    use std::sync::Arc;
+
+    /// CUDA 后端（手写 kernel，sm-targets.json 选择编译目标）。
+    pub struct CudaBackend;
+
+    /// 已加载模型：层图权重常驻设备 + 运行时（设备/模块）。
+    pub struct CudaLoadedModel {
+        model_desc: ModelDesc,
+        model: Arc<CudaModel>,
+        rt: Arc<CudaRuntime>,
+    }
+
+    impl LoadedModel for CudaLoadedModel {
+        fn model_desc(&self) -> &ModelDesc {
+            &self.model_desc
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// 跨线程共享的推理上下文：模型 + 运行时 + 棋盘尺寸。
+    pub struct CudaComputeContext {
+        model: Arc<CudaModel>,
+        rt: Arc<CudaRuntime>,
+        nn_x_len: i32,
+        nn_y_len: i32,
+    }
+
+    impl ComputeContext for CudaComputeContext {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// 每线程计算句柄（本实现无需 per-thread 状态，共享模型/运行时）。
+    pub struct CudaComputeHandle {
+        model: Arc<CudaModel>,
+        rt: Arc<CudaRuntime>,
+        nn_x_len: i32,
+        nn_y_len: i32,
+        max_batch_size: i32,
+        inputs_use_nhwc: bool,
+    }
+
+    impl ComputeHandle for CudaComputeHandle {
+        fn is_using_fp16(&self) -> bool {
+            true
+        }
+        fn set_is_warmup(&mut self, _is_warmup: bool) -> bool {
+            false
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    pub struct CudaInputBuffers;
+
+    impl InputBuffers for CudaInputBuffers {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    impl Backend for CudaBackend {
+        fn global_initialize(&self) {}
+        fn global_cleanup(&self) {}
+
+        fn print_devices(&self) {
+            println!("Hand-written CUDA backend (cuda_exec + embedded PTX, SM120-first)");
+        }
+
+        fn load_model_file(
+            &self,
+            file: &str,
+            _expected_sha256: &str,
+        ) -> Result<Box<dyn LoadedModel>, NeuralNetError> {
+            let bytes = std::fs::read(file)
+                .map_err(|e| NeuralNetError(format!("could not read {file}: {e}")))?;
+            let parsed = crate::onnx_model::parse_onnx_model(&bytes)
+                .map_err(|e| NeuralNetError(format!("onnx metadata parse failed: {e}")))?;
+            let graph = crate::onnx_parser::parse_layer_graph(&bytes)
+                .map_err(|e| NeuralNetError(format!("layer graph parse failed: {e}")))?;
+            let rt = Arc::new(
+                CudaRuntime::new().map_err(|e| NeuralNetError(format!("CUDA init failed: {e}")))?,
+            );
+            let model = Arc::new(
+                CudaModel::load(&graph, &rt)
+                    .map_err(|e| NeuralNetError(format!("CUDA model upload failed: {e}")))?,
+            );
+            Ok(Box::new(CudaLoadedModel {
+                model_desc: parsed.model_desc,
+                model,
+                rt,
+            }))
+        }
+
+        fn create_compute_context(
+            &self,
+            _gpu_idxs: &[i32],
+            _logger: &Logger,
+            nn_x_len: i32,
+            nn_y_len: i32,
+            _home_data_dir_override: &str,
+            _use_fp16_mode: Enabled,
+            loaded_model: &dyn LoadedModel,
+            _cfg: &Config,
+        ) -> Result<Box<dyn ComputeContext>, NeuralNetError> {
+            let model = loaded_model
+                .as_any()
+                .downcast_ref::<CudaLoadedModel>()
+                .ok_or_else(|| NeuralNetError("Wrong loaded model type".to_string()))?;
+            Ok(Box::new(CudaComputeContext {
+                model: model.model.clone(),
+                rt: model.rt.clone(),
+                nn_x_len,
+                nn_y_len,
+            }))
+        }
+
+        fn create_compute_handle(
+            &self,
+            ctx: &dyn ComputeContext,
+            _loaded_model: &dyn LoadedModel,
+            _logger: &Logger,
+            max_batch_size: i32,
+            _require_exact_nn_len: bool,
+            inputs_use_nhwc: bool,
+            _gpu_idx_for_this_thread: i32,
+            _server_thread_idx: i32,
+        ) -> Result<Box<dyn ComputeHandle>, NeuralNetError> {
+            let c = ctx
+                .as_any()
+                .downcast_ref::<CudaComputeContext>()
+                .ok_or_else(|| NeuralNetError("Wrong compute context type".to_string()))?;
+            Ok(Box::new(CudaComputeHandle {
+                model: c.model.clone(),
+                rt: c.rt.clone(),
+                nn_x_len: c.nn_x_len,
+                nn_y_len: c.nn_y_len,
+                max_batch_size,
+                inputs_use_nhwc,
+            }))
+        }
+
+        fn is_using_fp16(&self, handle: &dyn ComputeHandle) -> bool {
+            handle.is_using_fp16()
+        }
+
+        fn set_is_warmup(&self, handle: &mut dyn ComputeHandle, is_warmup: bool) -> bool {
+            handle.set_is_warmup(is_warmup)
+        }
+
+        fn create_input_buffers(
+            &self,
+            _loaded_model: &dyn LoadedModel,
+            _max_batch_size: i32,
+            _nn_x_len: i32,
+            _nn_y_len: i32,
+        ) -> Result<Box<dyn InputBuffers>, NeuralNetError> {
+            Ok(Box::new(CudaInputBuffers))
+        }
+
+        fn get_output(
+            &self,
+            handle: &dyn ComputeHandle,
+            _buffers: &dyn InputBuffers,
+            num_batch_elts: i32,
+            input_bufs: &mut [&mut NNResultBuf],
+            outputs: &mut [&mut NNOutput],
+        ) -> Result<(), NeuralNetError> {
+            let h = handle
+                .as_any()
+                .downcast_ref::<CudaComputeHandle>()
+                .ok_or_else(|| NeuralNetError("Wrong compute handle type".to_string()))?;
+
+            let n = num_batch_elts as usize;
+            if n == 0 {
+                return Ok(());
+            }
+            if n > h.max_batch_size as usize {
+                return Err(NeuralNetError(format!(
+                    "batch size {n} exceeds handle max {}",
+                    h.max_batch_size
+                )));
+            }
+            let nn_x_len = h.nn_x_len;
+            let nn_y_len = h.nn_y_len;
+            let policy_area = (nn_x_len * nn_y_len) as usize;
+            if policy_area != 361 {
+                return Err(NeuralNetError(format!(
+                    "CUDA backend only supports the 19x19 board (got {nn_x_len}x{nn_y_len})"
+                )));
+            }
+
+            // --- 填输入（NCHW spatial + global，空间特征带对称性） ----------
+            const NUM_SPATIAL_CHANNELS: i32 = 22;
+            const NUM_GLOBAL_CHANNELS: usize = 19;
+            let single_spatial = (NUM_SPATIAL_CHANNELS * nn_x_len * nn_y_len) as usize;
+
+            let mut spatial_host = vec![0.0f32; n * single_spatial];
+            let mut global_host = vec![0.0f32; n * NUM_GLOBAL_CHANNELS];
+            for i in 0..n {
+                let sym_idx = input_bufs[i].symmetry;
+                let sp_off = i * single_spatial;
+                copy_inputs_with_symmetry(
+                    &input_bufs[i].row_spatial_buf,
+                    &mut spatial_host[sp_off..sp_off + single_spatial],
+                    1,
+                    nn_y_len,
+                    nn_x_len,
+                    NUM_SPATIAL_CHANNELS,
+                    h.inputs_use_nhwc,
+                    sym_idx,
+                );
+                let gl_off = i * NUM_GLOBAL_CHANNELS;
+                let gb = &input_bufs[i].row_global_buf;
+                let copy_len = NUM_GLOBAL_CHANNELS.min(gb.len());
+                global_host[gl_off..gl_off + copy_len].copy_from_slice(&gb[..copy_len]);
+            }
+
+            // --- 上传 + 前向 -------------------------------------------------
+            let stream = h.rt.device.default_stream();
+            let mut d_spatial: cudarc::driver::CudaSlice<f32> =
+                unsafe { stream.alloc(spatial_host.len()) }
+                    .map_err(|e| NeuralNetError(format!("alloc spatial: {e}")))?;
+            let mut d_global: cudarc::driver::CudaSlice<f32> =
+                unsafe { stream.alloc(global_host.len()) }
+                    .map_err(|e| NeuralNetError(format!("alloc global: {e}")))?;
+            stream
+                .memcpy_htod(spatial_host.as_slice(), &mut d_spatial)
+                .map_err(|e| NeuralNetError(format!("upload spatial: {e}")))?;
+            stream
+                .memcpy_htod(global_host.as_slice(), &mut d_global)
+                .map_err(|e| NeuralNetError(format!("upload global: {e}")))?;
+
+            let outs = h
+                .model
+                .apply(&h.rt, &d_spatial, &d_global, n)
+                .map_err(|e| NeuralNetError(format!("CUDA forward failed: {e}")))?;
+            let host = outs
+                .to_host(&h.rt)
+                .map_err(|e| NeuralNetError(format!("CUDA download failed: {e}")))?;
+
+            // --- 解码 v15 输出（与 trt.rs generic_get_output 同口径） --------
+            let single_policy = 6 * (policy_area + 1);
+            let mut tmp_policy_base = vec![0.0f32; policy_area];
+            let mut tmp_policy_opt = vec![0.0f32; policy_area];
+            let mut tmp_ownership = vec![0.0f32; policy_area];
+
+            for i in 0..n {
+                let sym_idx = input_bufs[i].symmetry;
+                let inv_sym = if sym_idx != 0 { invert(sym_idx) } else { 0 };
+
+                // Policy：通道 0 基策略 + 通道 5 乐观策略，pass 位 361。
+                let p_off = i * single_policy;
+                let base_src = &host.policy[p_off..p_off + policy_area];
+                let opt_src = &host.policy[p_off + 5 * policy_area..p_off + 6 * policy_area];
+                if inv_sym != 0 {
+                    copy_outputs_with_symmetry(base_src, &mut tmp_policy_base, 1, nn_y_len, nn_x_len, inv_sym);
+                    copy_outputs_with_symmetry(opt_src, &mut tmp_policy_opt, 1, nn_y_len, nn_x_len, inv_sym);
+                } else {
+                    tmp_policy_base.copy_from_slice(base_src);
+                    tmp_policy_opt.copy_from_slice(opt_src);
+                }
+                let optimism = input_bufs[i].policy_optimism as f32;
+                for pos in 0..policy_area {
+                    outputs[i].policy_probs[pos] =
+                        tmp_policy_base[pos] + (tmp_policy_opt[pos] - tmp_policy_base[pos]) * optimism;
+                }
+                let base_pass = host.policy[p_off + policy_area];
+                let opt_pass = host.policy[p_off + 5 * policy_area + policy_area];
+                outputs[i].policy_probs[policy_area] = base_pass + (opt_pass - base_pass) * optimism;
+
+                // Value：3 通道。
+                let v_off = i * 3;
+                outputs[i].white_win_prob = host.value[v_off];
+                outputs[i].white_loss_prob = host.value[v_off + 1];
+                outputs[i].white_no_result_prob = host.value[v_off + 2];
+
+                // Score value（misc 前 4 个）。
+                let m_off = i * 10;
+                outputs[i].white_score_mean = host.misc[m_off];
+                outputs[i].white_score_mean_sq = host.misc[m_off + 1];
+                outputs[i].white_lead = host.misc[m_off + 2];
+                outputs[i].var_time_left = host.misc[m_off + 3];
+
+                // Shortterm 误差（moremisc 前 2 个）。
+                let mm_off = i * 8;
+                outputs[i].shortterm_winloss_error = host.moremisc[mm_off];
+                outputs[i].shortterm_score_error = host.moremisc[mm_off + 1];
+
+                // Ownership。
+                if input_bufs[i].include_owner_map {
+                    let o_off = i * policy_area;
+                    let src = &host.ownership[o_off..o_off + policy_area];
+                    if inv_sym != 0 {
+                        copy_outputs_with_symmetry(src, &mut tmp_ownership, 1, nn_y_len, nn_x_len, inv_sym);
+                    } else {
+                        tmp_ownership.copy_from_slice(src);
+                    }
+                    outputs[i].white_owner_map = Some(tmp_ownership.clone().into_boxed_slice());
+                }
+
+                outputs[i].nn_x_len = nn_x_len;
+                outputs[i].nn_y_len = nn_y_len;
+                outputs[i].policy_optimism_used = input_bufs[i].policy_optimism as f32;
+            }
+
+            Ok(())
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+pub use backend_impl::CudaBackend;

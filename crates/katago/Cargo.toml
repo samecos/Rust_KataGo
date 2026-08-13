@@ -28,6 +28,9 @@ serde_json = { workspace = true }
 [features]
 # Enables the TensorRT backend (requires local CUDA + TensorRT SDK at build time).
 trt = ["kata_nn/trt"]
+# Enables the hand-written CUDA backend (`cudabackend` nnBackend value;
+# kernels are compiled to PTX by nvcc at build time).
+cuda = ["kata_nn/cuda", "kata_program/cuda"]
 
 [dev-dependencies]
 tempfile = "3"

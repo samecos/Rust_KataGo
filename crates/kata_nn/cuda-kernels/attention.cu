@@ -1,7 +1,10 @@
 // 注意力 kernel v1（正确优先版本；M4 换 FlashAttention 风格 both16 tile 版）。
 //
 // 输入 Q/K/V：[B*H, S, D] 行主序 FP16（S=361, H=12, D=32），non-causal 无掩码。
-// 计算：out[i,:] = Σ_j softmax_j(Q_i·K_j / sqrt(D)) · V[j,:]
+// 计算：out[i,:] = Σ_j softmax_j(Q_i·K_j · scale) · V[j,:]
+//
+// `scale` 由调用方指定：ONNX 图里 q/k 各乘 qk_scale=1/∜d，乘积即 1/√d；
+// 传统 1/√d 语义则传 rsqrtf(d)（两者数值等价，缩放挪到 score 上做）。
 //
 // 每个 block 处理一个查询行 i：blockDim = S（向上取 384），
 // 线程 j 先算 score_j，shared 树归约做两遍 softmax 归一，再算输出。
@@ -16,7 +19,7 @@ extern "C" __global__ void attention_row_kernel(
     const __half* __restrict__ k,   // [B*H, S, D]
     const __half* __restrict__ v,   // [B*H, S, D]
     __half* __restrict__ out,       // [B*H, S, D]
-    int s, int d) {
+    int s, int d, float scale) {
     const int i = blockIdx.x;   // query 行
     const int bh = blockIdx.y;  // batch*head
     const int j = threadIdx.x;  // key 索引
@@ -29,14 +32,14 @@ extern "C" __global__ void attention_row_kernel(
 
     const __half* qrow = q + ((size_t)bh * s + i) * d;
 
-    // --- score_j = Q_i · K_j / sqrt(D) ---
+    // --- score_j = Q_i · K_j * scale ---
     float score = 0.0f;
     if (j < s) {
         const __half* krow = k + ((size_t)bh * s + j) * d;
         for (int dd = 0; dd < d; ++dd) {
             score += __half2float(qrow[dd]) * __half2float(krow[dd]);
         }
-        score *= rsqrtf((float)d);
+        score *= scale;
     }
     s_score[j] = (j < s) ? score : -1e30f;
     s_red[j] = s_score[j];

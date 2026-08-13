@@ -109,6 +109,12 @@ fn gtp_private_kata_commands() {
         "kata-list-params",
         "kata-set-param analysisWideRootNoise 0.1",
         "kata-get-param analysisWideRootNoise",
+        "kata-set-param maxVisits 321",
+        "kata-get-param maxVisits",
+        "kata-get-params",
+        "kata-get-param bogusKey",
+        "kata-set-param bogusKey 1",
+        "kata-set-param avoidRepeatedPatternUtility 0.5",
         "kata-get-models",
         "kata-list_time_settings",
         "gomill-cpu_time",
@@ -119,6 +125,35 @@ fn gtp_private_kata_commands() {
     assert!(
         replies.contains("analysisWideRootNoise"),
         "kata-list-params 应含参数名"
+    );
+    assert!(
+        replies.contains("cpuctExploration"),
+        "kata-list-params 应含 changeable 参数名: {replies:?}"
+    );
+    let lines: Vec<&str> = replies.lines().map(|l| l.trim()).collect();
+    assert!(
+        lines.iter().any(|l| *l == "0.1"),
+        "kata-set-param analysisWideRootNoise 应生效: {replies:?}"
+    );
+    assert!(
+        lines.iter().any(|l| *l == "321"),
+        "kata-set-param maxVisits 应生效: {replies:?}"
+    );
+    assert!(
+        replies.contains("\"maxVisits\":321"),
+        "kata-get-params 应含修改后的值: {replies:?}"
+    );
+    assert!(
+        replies.contains("Invalid parameter: bogusKey"),
+        "非法参数名应报错: {replies:?}"
+    );
+    assert!(
+        replies.contains("Unrecognized or non-overridable parameter"),
+        "不可覆盖键应报错: {replies:?}"
+    );
+    assert!(
+        replies.contains("Cannot be overridden in kata-set-param"),
+        "禁改键应报错: {replies:?}"
     );
     assert!(replies.contains('['), "kata-get-models 应返回 JSON 数组");
     assert!(replies.contains("byoyomi"), "时间类型列表: {replies:?}");

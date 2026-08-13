@@ -136,6 +136,8 @@ pub struct GtpEngine {
     current_rules: Rules,
     genmove_params: SearchParams,
     analysis_params: SearchParams,
+    initial_genmove_params: SearchParams,
+    initial_analysis_params: SearchParams,
     is_genmove_params: bool,
 
     b_time_controls: TimeControls,
@@ -268,40 +270,8 @@ impl GtpEngine {
         }
 
         let has_human_model = human_model_file.is_some();
-        let mut initial_genmove_params =
-            setup::load_single_params_with_human(&cfg, SetupFor::Gtp, has_human_model)?;
-        let mut initial_analysis_params = initial_genmove_params.clone();
-
-        if !cfg.contains("conservativePass") {
-            initial_genmove_params.conservative_pass = true;
-        }
-        if !cfg.contains("fillDameBeforePass") {
-            initial_genmove_params.fill_dame_before_pass = true;
-        }
-
-        let analysis_wide_root_noise = if cfg.contains("analysisWideRootNoise") {
-            cfg.get_double("analysisWideRootNoise", 0.0, 5.0)
-                .map_err(to_string_error)?
-        } else {
-            0.04
-        };
-        let analysis_ignore_pre_root_history = if cfg.contains("analysisIgnorePreRootHistory") {
-            cfg.get_bool("analysisIgnorePreRootHistory")
-                .map_err(to_string_error)?
-        } else {
-            true
-        };
-        let genmove_anti_mirror = if cfg.contains("genmoveAntiMirror") {
-            cfg.get_bool("genmoveAntiMirror").map_err(to_string_error)?
-        } else if cfg.contains("antiMirror") {
-            cfg.get_bool("antiMirror").map_err(to_string_error)?
-        } else {
-            true
-        };
-
-        initial_genmove_params.anti_mirror = genmove_anti_mirror;
-        initial_analysis_params.wide_root_noise = analysis_wide_root_noise;
-        initial_analysis_params.ignore_pre_root_history = analysis_ignore_pre_root_history;
+        let (initial_genmove_params, initial_analysis_params) =
+            load_genmove_and_analysis_params(&cfg, has_human_model)?;
 
         let pondering_enabled = if cfg.contains("ponderingEnabled") {
             cfg.get_bool("ponderingEnabled").unwrap_or(false)
@@ -520,6 +490,8 @@ impl GtpEngine {
             current_rules: initial_rules,
             genmove_params: initial_genmove_params.clone(),
             analysis_params: initial_analysis_params.clone(),
+            initial_genmove_params,
+            initial_analysis_params,
             is_genmove_params: true,
             b_time_controls: TimeControls::new(),
             w_time_controls: TimeControls::new(),
@@ -612,7 +584,8 @@ impl GtpEngine {
             &cfg,
         )));
 
-        let params = SearchParams::new();
+        let params = setup::load_single_params_with_human(&cfg, SetupFor::Gtp, false)
+            .expect("failed to load test search params");
         let mut bot = AsyncBot::new_with_human(params.clone(), nn_eval, None, logger, "test-seed");
 
         let rules = Rules::default();
@@ -632,6 +605,8 @@ impl GtpEngine {
             current_rules: rules,
             genmove_params: params.clone(),
             analysis_params: params.clone(),
+            initial_genmove_params: params.clone(),
+            initial_analysis_params: params.clone(),
             is_genmove_params: true,
             b_time_controls: TimeControls::new(),
             w_time_controls: TimeControls::new(),
@@ -864,6 +839,98 @@ impl GtpEngine {
         if let Some(he) = self.human_eval {
             he.clear_cache();
         }
+    }
+
+    /// Apply `kata-set-param` / `kata-set-params` overrides, mirroring C++
+    /// `gtp.cpp` kata-set-param handling: validate on a clean config first
+    /// (every key must be a recognized, overridable parameter), then enshrine
+    /// into the real config, re-parse, and propagate to the bot.
+    fn apply_param_overrides(
+        &mut self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), StringError> {
+        // These have special handling and cannot be changed this way.
+        if overrides.contains_key("dynamicPlayoutDoublingAdvantageCapPerOppLead") {
+            return Err(StringError::new(
+                "Cannot be overridden in kata-set-param: dynamicPlayoutDoublingAdvantageCapPerOppLead",
+            ));
+        }
+        if overrides.contains_key("avoidRepeatedPatternUtility") {
+            return Err(StringError::new(
+                "Cannot be overridden in kata-set-param: avoidRepeatedPatternUtility",
+            ));
+        }
+
+        // Validate that every key is used/recognized by loading a clean config
+        // containing only the overrides (plus the required numSearchThreads).
+        {
+            let mut clean_cfg = ConfigParser::new(true, false);
+            clean_cfg.override_keys_map(overrides);
+            if !clean_cfg.contains("numSearchThreads") {
+                clean_cfg.override_key(
+                    "numSearchThreads",
+                    &global::int_to_string(self.genmove_params.num_threads),
+                );
+            }
+            // These have engine-level handling and are accepted even though they
+            // are not SearchParams fields.
+            clean_cfg.mark_key_used("allowResignation");
+            clean_cfg.mark_key_used("ponderingEnabled");
+            clean_cfg.mark_key_used("delayMoveScale");
+            clean_cfg.mark_key_used("delayMoveMax");
+
+            let _ = load_genmove_and_analysis_params(&clean_cfg, self.human_eval.is_some())
+                .map_err(|e| StringError::new(e.message))?;
+            for unused in clean_cfg.unused_keys() {
+                return Err(StringError::new(format!(
+                    "Unrecognized or non-overridable parameter in kata-set-params: {}",
+                    unused
+                )));
+            }
+        }
+
+        // Enshrine the new settings into the real config permanently and re-parse.
+        self.cfg.mark_all_keys_used_with_prefix("");
+        self.cfg.override_keys_map(overrides);
+        let (new_genmove, new_analysis) =
+            load_genmove_and_analysis_params(&self.cfg, self.human_eval.is_some())?;
+
+        SearchParams::fail_if_params_differ_on_unchangeable_parameter(
+            &self.initial_genmove_params,
+            &new_genmove,
+        )?;
+        SearchParams::fail_if_params_differ_on_unchangeable_parameter(
+            &self.initial_analysis_params,
+            &new_analysis,
+        )?;
+
+        if self.cfg.contains("allowResignation") {
+            self.allow_resignation = self
+                .cfg
+                .get_bool("allowResignation")
+                .map_err(to_string_error)?;
+        }
+        if self.cfg.contains("delayMoveScale") {
+            self.delay_move_scale = self
+                .cfg
+                .get_double("delayMoveScale", 0.0, 10000.0)
+                .map_err(to_string_error)?;
+        }
+        if self.cfg.contains("delayMoveMax") {
+            self.delay_move_max = self
+                .cfg
+                .get_double("delayMoveMax", 0.0, 1000000.0)
+                .map_err(to_string_error)?;
+        }
+
+        self.genmove_params = new_genmove;
+        self.analysis_params = new_analysis;
+        if self.is_genmove_params {
+            self.bot.set_params(&self.genmove_params);
+        } else {
+            self.bot.set_params(&self.analysis_params);
+        }
+        Ok(())
     }
 
     fn handle_loadsgf(&mut self, pieces: &[String]) -> String {
@@ -1335,7 +1402,26 @@ impl GtpEngine {
                     }
                 }
                 "kata-list-params" => {
-                    response = "analysisWideRootNoise analysisIgnorePreRootHistory genmoveAntiMirror antiMirror humanSLProfile allowResignation ponderingEnabled delayMoveScale delayMoveMax".to_string();
+                    let mut params_list: Vec<String> = vec![
+                        "analysisWideRootNoise",
+                        "analysisIgnorePreRootHistory",
+                        "genmoveAntiMirror",
+                        "antiMirror",
+                        "humanSLProfile",
+                        "allowResignation",
+                        "ponderingEnabled",
+                        "delayMoveScale",
+                        "delayMoveMax",
+                    ]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                    if let serde_json::Value::Object(map) =
+                        self.genmove_params.changeable_parameters_to_json()
+                    {
+                        params_list.extend(map.keys().cloned());
+                    }
+                    response = global::concat_vec(&params_list, " ");
                 }
                 "kata-get-param" => {
                     if pieces.len() != 1 {
@@ -1361,7 +1447,13 @@ impl GtpEngine {
                             "antiMirror" => {
                                 response = global::bool_to_string(self.analysis_params.anti_mirror)
                             }
-                            "humanSLProfile" => response = String::new(),
+                            "humanSLProfile" => {
+                                response = if self.cfg.contains("humanSLProfile") {
+                                    self.cfg.get_string("humanSLProfile").unwrap_or_default()
+                                } else {
+                                    String::new()
+                                };
+                            }
                             "allowResignation" => {
                                 response = global::bool_to_string(self.allow_resignation)
                             }
@@ -1373,8 +1465,14 @@ impl GtpEngine {
                                 response = global::double_to_string(self.delay_move_max)
                             }
                             _ => {
-                                response_is_error = true;
-                                response = format!("Invalid parameter: {}", pieces[0]);
+                                let params = self.genmove_params.changeable_parameters_to_json();
+                                match params.get(pieces[0].as_str()) {
+                                    Some(value) => response = value.to_string(),
+                                    None => {
+                                        response_is_error = true;
+                                        response = format!("Invalid parameter: {}", pieces[0]);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1383,11 +1481,119 @@ impl GtpEngine {
                     response = "[]".to_string();
                 }
                 "kata-get-params" => {
-                    response = "{}".to_string();
+                    let mut params = self.genmove_params.changeable_parameters_to_json();
+                    if let serde_json::Value::Object(map) = &mut params {
+                        map.insert(
+                            "analysisWideRootNoise".to_string(),
+                            serde_json::Value::String(global::double_to_string(
+                                self.analysis_params.wide_root_noise,
+                            )),
+                        );
+                        map.insert(
+                            "analysisIgnorePreRootHistory".to_string(),
+                            serde_json::Value::String(global::bool_to_string(
+                                self.analysis_params.ignore_pre_root_history,
+                            )),
+                        );
+                        map.insert(
+                            "genmoveAntiMirror".to_string(),
+                            serde_json::Value::String(global::bool_to_string(
+                                self.genmove_params.anti_mirror,
+                            )),
+                        );
+                        map.insert(
+                            "antiMirror".to_string(),
+                            serde_json::Value::String(global::bool_to_string(
+                                self.analysis_params.anti_mirror,
+                            )),
+                        );
+                        map.insert(
+                            "humanSLProfile".to_string(),
+                            serde_json::Value::String(if self.cfg.contains("humanSLProfile") {
+                                self.cfg.get_string("humanSLProfile").unwrap_or_default()
+                            } else {
+                                String::new()
+                            }),
+                        );
+                        map.insert(
+                            "allowResignation".to_string(),
+                            serde_json::Value::String(global::bool_to_string(
+                                self.allow_resignation,
+                            )),
+                        );
+                        map.insert(
+                            "ponderingEnabled".to_string(),
+                            serde_json::Value::String("false".to_string()),
+                        );
+                        map.insert(
+                            "delayMoveScale".to_string(),
+                            serde_json::Value::String(global::double_to_string(
+                                self.delay_move_scale,
+                            )),
+                        );
+                        map.insert(
+                            "delayMoveMax".to_string(),
+                            serde_json::Value::String(global::double_to_string(
+                                self.delay_move_max,
+                            )),
+                        );
+                    }
+                    response = params.to_string();
                 }
                 "kata-set-param" | "kata-set-params" => {
-                    response = "? Set param not implemented".to_string();
-                    response_is_error = true;
+                    let mut overrides: std::collections::BTreeMap<String, String> =
+                        std::collections::BTreeMap::new();
+                    if command == "kata-set-param" {
+                        if pieces.len() != 1 && pieces.len() != 2 {
+                            response_is_error = true;
+                            response = format!(
+                                "Expected one or two arguments for kata-set-param but got '{}'",
+                                global::concat_vec(&pieces, " ")
+                            );
+                        } else if pieces.len() == 1 {
+                            overrides.insert(pieces[0].clone(), String::new());
+                        } else {
+                            overrides.insert(pieces[0].clone(), pieces[1].clone());
+                        }
+                    } else if pieces.is_empty() {
+                        response_is_error = true;
+                        response = format!(
+                            "Expected argument for kata-set-param but got '{}'",
+                            global::concat_vec(&pieces, " ")
+                        );
+                    } else {
+                        let rejoined = global::concat_vec(&pieces, " ");
+                        match serde_json::from_str::<serde_json::Value>(&rejoined) {
+                            Ok(serde_json::Value::Object(map)) => {
+                                for (key, value) in map {
+                                    let s = match value {
+                                        serde_json::Value::String(s) => s,
+                                        other => other.to_string(),
+                                    };
+                                    overrides.insert(key, s);
+                                }
+                            }
+                            Ok(_) => {
+                                response_is_error = true;
+                                response =
+                                    "Could not set params: Argument to kata-set-params must be a json object".to_string();
+                            }
+                            Err(e) => {
+                                response_is_error = true;
+                                response = format!("Could not set params: {}", e);
+                            }
+                        }
+                    }
+
+                    if !response_is_error {
+                        match self.apply_param_overrides(&overrides) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                response_is_error = true;
+                                response = format!("Could not set params: {}", e.message);
+                            }
+                        }
+                    }
                 }
                 "time_settings" => match parse_time_settings(&pieces) {
                     Ok(tc) => {
@@ -2410,6 +2616,49 @@ impl GtpEngine {
 
 fn to_string_error(e: impl std::error::Error) -> StringError {
     StringError::new(e.to_string())
+}
+
+/// Load the genmove and analysis parameter sets for the GTP engine, mirroring
+/// the `loadParams` lambda in C++ `GtpEngine::GtpEngine` (cpp/command/gtp.cpp:2062).
+fn load_genmove_and_analysis_params(
+    cfg: &ConfigParser,
+    has_human_model: bool,
+) -> Result<(SearchParams, SearchParams), StringError> {
+    let mut params = setup::load_single_params_with_human(cfg, SetupFor::Gtp, has_human_model)?;
+    // GTP defaults for these differ from matches or selfplay.
+    if !cfg.contains("conservativePass") {
+        params.conservative_pass = true;
+    }
+    if !cfg.contains("fillDameBeforePass") {
+        params.fill_dame_before_pass = true;
+    }
+
+    let analysis_wide_root_noise = if cfg.contains("analysisWideRootNoise") {
+        cfg.get_double("analysisWideRootNoise", 0.0, 5.0)
+            .map_err(to_string_error)?
+    } else {
+        setup::DEFAULT_ANALYSIS_WIDE_ROOT_NOISE
+    };
+    let analysis_ignore_pre_root_history = if cfg.contains("analysisIgnorePreRootHistory") {
+        cfg.get_bool("analysisIgnorePreRootHistory")
+            .map_err(to_string_error)?
+    } else {
+        setup::DEFAULT_ANALYSIS_IGNORE_PRE_ROOT_HISTORY
+    };
+    let genmove_anti_mirror = if cfg.contains("genmoveAntiMirror") {
+        cfg.get_bool("genmoveAntiMirror").map_err(to_string_error)?
+    } else if cfg.contains("antiMirror") {
+        cfg.get_bool("antiMirror").map_err(to_string_error)?
+    } else {
+        true
+    };
+
+    let mut genmove_out = params.clone();
+    genmove_out.anti_mirror = genmove_anti_mirror;
+    let mut analysis_out = params;
+    analysis_out.wide_root_noise = analysis_wide_root_noise;
+    analysis_out.ignore_pre_root_history = analysis_ignore_pre_root_history;
+    Ok((genmove_out, analysis_out))
 }
 
 fn showboard_column_letter(x: i32) -> String {

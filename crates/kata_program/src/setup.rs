@@ -68,9 +68,9 @@ pub enum SetupFor {
 pub const MAX_BOT_PARAMS_FROM_CFG: i32 = 4096;
 
 /// Default wide root noise used for analysis mode.
-const DEFAULT_ANALYSIS_WIDE_ROOT_NOISE: f64 = 0.04;
+pub const DEFAULT_ANALYSIS_WIDE_ROOT_NOISE: f64 = 0.04;
 /// Default value for ignoring pre-root history in analysis mode.
-const DEFAULT_ANALYSIS_IGNORE_PRE_ROOT_HISTORY: bool = true;
+pub const DEFAULT_ANALYSIS_IGNORE_PRE_ROOT_HISTORY: bool = true;
 
 fn to_string_error(e: impl std::error::Error) -> StringError {
     StringError {
@@ -2128,6 +2128,19 @@ pub fn initialize_nn_evaluators(
             "trtbackend" => {
                 nn_eval.set_backend(Arc::new(kata_nn::backends::trt::TensorRtBackend));
                 nn_eval.load_model().map_err(to_string_error)?;
+            }
+            "cudabackend" => {
+                #[cfg(feature = "cuda")]
+                {
+                    nn_eval.set_backend(Arc::new(kata_nn::backends::cuda::CudaBackend));
+                    nn_eval.load_model().map_err(to_string_error)?;
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    return Err(StringError::new(
+                        "cudabackend requires the 'cuda' cargo feature".to_string(),
+                    ));
+                }
             }
             other => {
                 return Err(StringError::new(format!(

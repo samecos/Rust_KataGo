@@ -67,11 +67,11 @@
 - **校验链**：干净 ConfigParser overrideKeys → loadParams 验证 → 未使用键报 "Unrecognized or non-overridable parameter in kata-set-params: <key>"；`dynamicPlayoutDoublingAdvantageCapPerOppLead`、`avoidRepeatedPatternUtility` 明确禁改；9 个特殊参数里 allowResignation/ponderingEnabled/delayMoveScale/delayMoveMax 可改（引擎字段），analysisWideRootNoise 等走后 4 步直接引擎 set 路径
 - **生效链**：cfg.overrideKeys 持久化 → loadParams 重解析 → failIfParamsDifferOnUnchangeableParameter 校验 → setGenmoveParamsIfChanged/setAnalysisParamsIfChanged → pass-alive 模式翻转时 rereplayGameForPassAliveModeChange
 
-### Rust 现状（gtp.rs:1337-1391；2026-08-14 复查更新）
-- kata-list-params：已硬编码 9 个特殊参数名（与 C++ 完全一致），缺 changeable 部分
-- kata-get-param：已实现 9 个特殊参数取值分支，缺 changeable 部分
-- kata-get-params：返回 `{}`（需实现完整 JSON）
-- kata-set-param(s)：直接报 "not implemented"
+### Rust 现状（2026-08-14 已实现完毕，冒烟验证通过）
+- kata-list-params：9 个特殊参数 + changeableParametersToJson 全部键，空格连接
+- kata-get-param：9 个特殊参数取值分支 + changeable JSON `.dump()` 取值，找不到报 "Invalid parameter: <name>"
+- kata-get-params：changeableParametersToJson 完整 JSON + 9 个特殊键（字符串形式）
+- kata-set-param(s)：ConfigParser override → load_params 验证 → 禁改键检查 → fail_if_params_differ_on_unchangeable_parameter → bot.set_params + 引擎字段；错误信息与 C++ 一致（"Unrecognized or non-overridable parameter in kata-set-params: <key>"）
 - **好消息：上游 katago-rs 已完整移植底层能力，缺口仅为 gtp.rs 接线**：
   - `kata_search::params::SearchParams::changeable_parameters_to_json()`（params.rs:394，与 C++ 逐键对应，含测试 params.rs:1080）
   - `SearchParams::get_hash()`（params.rs:777，含 omitted 参数）
@@ -85,4 +85,15 @@
 - 只改 `crates/kata_search/src/params.rs` 与 `crates/katago/src/cmd/gtp.rs`，勿动 search.rs/analysis.rs/CUDA 相关
 - 保持 `cargo test -p kata_search` 与 GTP 回归（`crates/katago/tests/gtp_regression.rs`）全绿；回归用例里 kata-list-params/kata-get-param 的既有断言需同步更新为新语义
 - GTP 冒烟：`--model /dev/null`（dummy 后端）
+
+## SM120 时效资料（2026-08-13 网上核实）
+
+以下结论基于 2025-2026 年资料，已与本机（GeForce RTX 5070 Ti）实际验证对齐：
+
+- **架构确认**：RTX 5070 Ti = GB205，compute capability **12.0（sm_120）**，与 RTX 5080/5090 同为 Blackwell 消费级；与数据中心 sm_100（B200）不同，sm_100 cubin 不可互相加载。
+- **工具链门槛**：sm_120 需 **CUDA 12.9+**（nvcc/nvrtc）；更早版本报 "no kernel image is available for execution on the device"。本项目 build.rs 用本机 nvcc（实测可编译 sm_120 PTX）。
+- **张量核代数**：5th Gen Tensor Cores，支持 FP4/FP8/FP16/BF16/TF32；**tcgen05.mma 是 sm_100（sm_100f）指令集**，消费级 sm_120 需以 **sm_120f 家族特性**编译才能在 PTX 里用 tcgen05/tensor-memory 指令；普通 `-arch=sm_120`（非 f 变体）编不出 tcgen05。
+- **tcgen05 寄存器天花板**：Blackwell 最大矩阵指令（tcgen05.mma.cta_group::2）每线程需 256 个寄存器，硬件每线程上限 255（[The Software Frontier, 2026-08-03](https://www.thesoftwarefrontier.com/p/how-blackwells-tensor-memory-actually)）。即 cta_group::2 无法在单个 kernel 里完成 mma——fork 的 tile 尺寸设计必须避开（单 cta_group::1 tile 128×N 是安全区）。
+- **实现参考**：CUTLASS 4.x 已支持 sm_120（消费级 Blackwell）的 tcgen05 GEMM 模板；[tcgen05 for dummies（gau-nernst, 2025-12-21）](https://gau-nernst.github.io/tcgen05/) 有 sm_100 的逐指令级讲解（tmem 分配、tcgen05.mma 描述符、ld/st、commit/mbarrier），消费级差异主要在 cluster/cta_group 与 tmem 尺寸。
+- **本项目定位**：基线手写 PTX（hgemm m16n8k16 / 共享内存归约 attention）为**正确性优先**；M4 的 tcgen05 路径按 fork 认证 plan（FA4 tile M128×N64 s1 both16）实施，编译开关经 `configs/sm-targets.json` 的 `arch` 字段（如 `sm_120f`）选择，失败回退基线。
 

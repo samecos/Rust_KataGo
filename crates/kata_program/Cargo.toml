@@ -14,4 +14,8 @@ kata_nn = { path = "../kata_nn" }
 kata_search = { path = "../kata_search" }
 parking_lot = { workspace = true }
 
+[features]
+# Enables the hand-written CUDA backend (`cudabackend` nnBackend value).
+cuda = ["kata_nn/cuda"]
+
 [dev-dependencies]
