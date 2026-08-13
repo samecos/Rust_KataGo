@@ -554,7 +554,14 @@ mod imp {
             let gpu = if gpu_idx_for_this_thread >= 0 {
                 gpu_idx_for_this_thread
             } else {
-                trt_ctx.gpu_idxs.first().copied().unwrap_or(0)
+                // -1 means "auto": pick the first valid configured device,
+                // falling back to device 0.
+                trt_ctx
+                    .gpu_idxs
+                    .iter()
+                    .copied()
+                    .find(|&g| g >= 0)
+                    .unwrap_or(0)
             };
             let engine_info = trt_ctx.engine_info;
 
@@ -947,6 +954,19 @@ mod imp {
         // Infer.
         let in_ptrs: Vec<*const f32> = bufs.inputs.iter().map(|v| v.as_ptr()).collect();
         let out_ptrs: Vec<*mut f32> = bufs.outputs.iter_mut().map(|v| v.as_mut_ptr()).collect();
+
+        // Debug dump (KATAGO_DEBUG_DUMP set): write the first batch element's
+        // inputs and raw outputs for offline inspection.
+        if let Ok(d) = std::env::var("KATAGO_DEBUG_DUMP") {
+            let mut w = |name: &str, data: &[f32]| {
+                let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+                let _ = std::fs::write(format!("{d}/{name}.bin"), bytes);
+            };
+            let _ = std::fs::create_dir_all(&d);
+            w("dbg_spatial", &bufs.inputs[idx_spatial][..single_spatial]);
+            w("dbg_global", &bufs.inputs[idx_global][..single_global]);
+        }
+
         let ok = unsafe {
             trt_ffi::katago_trt_infer_generic(
                 h.ctx.ptr,
@@ -959,6 +979,23 @@ mod imp {
             return Err(NeuralNetError(
                 trt_ffi::last_error().unwrap_or_else(|| "generic inference failed".into()),
             ));
+        }
+
+        if let Ok(d) = std::env::var("KATAGO_DEBUG_DUMP") {
+            let mut w = |name: &str, data: &[f32]| {
+                let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+                let _ = std::fs::write(format!("{d}/{name}.bin"), bytes);
+            };
+            let sp = GenericIo::single_elts(&gio.output_dims[idx_policy]);
+            let sv = GenericIo::single_elts(&gio.output_dims[idx_value]);
+            let sm = GenericIo::single_elts(&gio.output_dims[idx_misc]);
+            let smm = GenericIo::single_elts(&gio.output_dims[idx_moremisc]);
+            let so = GenericIo::single_elts(&gio.output_dims[idx_ownership]);
+            w("dbg_policy", &bufs.outputs[idx_policy][..sp]);
+            w("dbg_value", &bufs.outputs[idx_value][..sv]);
+            w("dbg_misc", &bufs.outputs[idx_misc][..sm]);
+            w("dbg_moremisc", &bufs.outputs[idx_moremisc][..smm]);
+            w("dbg_ownership", &bufs.outputs[idx_ownership][..so]);
         }
 
         // Decode v15 outputs.

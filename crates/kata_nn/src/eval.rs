@@ -20,9 +20,9 @@ use kata_core::logger::Logger;
 use kata_core::rng::Rand;
 use kata_core::thread::queue::ThreadSafeQueue;
 use kata_game::board::location;
-use kata_game::board::{Board, P_BLACK, PASS_LOC, Player};
+use kata_game::board::{Board, P_BLACK, PASS_LOC, Player, P_WHITE};
 use kata_game::history::BoardHistory;
-use kata_game::rules::Rules;
+use kata_game::rules::{KoRule, Rules, ScoringRule};
 use kata_game::symmetry::NUM_SYMMETRIES;
 
 use crate::backend::dummy::DummyInputBuffers;
@@ -207,6 +207,9 @@ struct SharedState {
     backend: Mutex<Option<Arc<dyn Backend>>>,
     compute_handles: Mutex<Vec<Box<dyn ComputeHandle>>>,
     input_buffers: Mutex<Option<Box<dyn InputBuffers>>>,
+    /// Model version and post-processing parameters, set by `load_model`
+    /// before any server thread is spawned (then read-only).
+    postprocess_cfg: Mutex<(i32, ModelPostProcessParams)>,
 }
 
 impl SharedState {
@@ -283,7 +286,16 @@ impl SharedState {
                     });
             }
 
-            for (i, output) in outputs.into_iter().enumerate() {
+            for (i, mut output) in outputs.into_iter().enumerate() {
+                // Turn raw backend logits into probabilities / points,
+                // mirroring the C++ NNEvaluator postprocessing.
+                self.postprocess_output(
+                    &batch[i].board,
+                    &batch[i].history,
+                    batch[i].next_player,
+                    &batch[i].nn_input_params,
+                    &mut output,
+                );
                 let output = Arc::new(output);
                 if let Some(cache) = &self.nn_cache_table {
                     cache.set(&output);
@@ -319,6 +331,216 @@ impl SharedState {
                 request.result_ready.notify_one();
             }
         }
+    }
+
+    /// Postprocess a raw backend output into probabilities / points.
+    ///
+    /// Mirrors the postprocessing in C++ `nneval.cpp` (`NNEvaluator::evaluate`):
+    /// policy logits are softmaxed over legal moves (with policy temperature
+    /// and optional passing hacks), value logits are softmaxed and flipped to
+    /// white's perspective, score outputs get their multipliers / softplus,
+    /// and the ownership map is tanh-ed and flipped.
+    fn postprocess_output(
+        &self,
+        board: &Board,
+        history: &BoardHistory,
+        next_player: Player,
+        nn_input_params: &MiscNNInputParams,
+        output: &mut NNOutput,
+    ) {
+        let (model_version, pp) = *self.postprocess_cfg.lock().unwrap();
+        let policy_size = self.policy_size as usize;
+        let x_size = board.x_size;
+        let y_size = board.y_size;
+
+        // --- Policy ---------------------------------------------------------
+        let policy_output_scaling = pp.output_scale_multiplier
+            / nn_input_params.nn_policy_temperature.clamp(1e-6, 1e6);
+
+        let mut is_legal = vec![false; policy_size];
+        let mut legal_count = 0usize;
+        for i in 0..policy_size {
+            let loc = nn_pos::pos_to_loc(
+                i as i32,
+                x_size,
+                y_size,
+                self.nn_x_len,
+                self.nn_y_len,
+            );
+            is_legal[i] = history.is_legal(board, loc, next_player);
+        }
+        // TODO(selfplay): the C++ avoidMYTDaggerHack dagger-match ban is not
+        // ported here; it only affects selfplay training, not GTP play.
+
+        let mut max_policy = -1e25f32;
+        for i in 0..policy_size {
+            let v = if is_legal[i] {
+                legal_count += 1;
+                output.policy_probs[i] * policy_output_scaling
+            } else {
+                -1e30f32
+            };
+            output.policy_probs[i] = v;
+            if v > max_policy {
+                max_policy = v;
+            }
+        }
+
+        let mut policy_sum = 0.0f32;
+        if nn_input_params.enable_passing_hacks {
+            // Cap passing prior policy at 95% (19x other moves).
+            let max_pass_policy_sum_factor = 19.0f32;
+            for i in 0..policy_size - 1 {
+                let v = (output.policy_probs[i] - max_policy).exp();
+                output.policy_probs[i] = v;
+                policy_sum += v;
+            }
+            let i = policy_size - 1;
+            let v = (output.policy_probs[i] - max_policy)
+                .exp()
+                .clamp(1e-20, policy_sum * max_pass_policy_sum_factor);
+            output.policy_probs[i] = v;
+            policy_sum += v;
+        } else {
+            for v in output.policy_probs.iter_mut().take(policy_size) {
+                *v = (*v - max_policy).exp();
+                policy_sum += *v;
+            }
+        }
+
+        if policy_sum <= 0.0 {
+            // Somehow all legal moves rounded to 0 probability.
+            let uniform = 1.0f32 / legal_count.max(1) as f32;
+            for i in 0..policy_size {
+                output.policy_probs[i] = if is_legal[i] { uniform } else { -1.0 };
+            }
+        } else {
+            for i in 0..policy_size {
+                output.policy_probs[i] = if is_legal[i] {
+                    output.policy_probs[i] / policy_sum
+                } else {
+                    -1.0
+                };
+            }
+        }
+        for v in output.policy_probs.iter_mut().skip(policy_size) {
+            *v = -1.0f32;
+        }
+        output.policy_optimism_used = nn_input_params.policy_optimism as f32;
+
+        // --- Value / score (model version >= 4) ------------------------------
+        if model_version >= 4 {
+            let win_logits = output.white_win_prob as f64 * pp.output_scale_multiplier as f64;
+            let loss_logits = output.white_loss_prob as f64 * pp.output_scale_multiplier as f64;
+            let mut no_result_logits =
+                output.white_no_result_prob as f64 * pp.output_scale_multiplier as f64;
+            let score_mean_pre = output.white_score_mean as f64 * pp.output_scale_multiplier as f64;
+            let score_stdev_pre =
+                output.white_score_mean_sq as f64 * pp.output_scale_multiplier as f64;
+            let lead_pre = output.white_lead as f64 * pp.output_scale_multiplier as f64;
+            let var_time_pre = output.var_time_left as f64 * pp.output_scale_multiplier as f64;
+            let swin_pre =
+                output.shortterm_winloss_error as f64 * pp.output_scale_multiplier as f64;
+            let sscore_pre =
+                output.shortterm_score_error as f64 * pp.output_scale_multiplier as f64;
+
+            if history.rules.ko_rule != KoRule::Simple
+                && history.rules.scoring_rule != ScoringRule::Territory
+            {
+                no_result_logits -= 100000.0;
+            }
+
+            let max_logits = win_logits.max(loss_logits).max(no_result_logits);
+            let mut win_prob = (win_logits - max_logits).exp();
+            let mut loss_prob = (loss_logits - max_logits).exp();
+            let mut no_result_prob = (no_result_logits - max_logits).exp();
+            if history.rules.ko_rule != KoRule::Simple
+                && history.rules.scoring_rule != ScoringRule::Territory
+            {
+                no_result_prob = 0.0;
+            }
+            let prob_sum = win_prob + loss_prob + no_result_prob;
+            win_prob /= prob_sum;
+            loss_prob /= prob_sum;
+            no_result_prob /= prob_sum;
+
+            let mut score_mean = score_mean_pre * pp.score_mean_multiplier;
+            let score_stdev = softplus(score_stdev_pre) * pp.score_stdev_multiplier;
+            let mut score_mean_sq = score_mean * score_mean + score_stdev * score_stdev;
+            let mut lead = lead_pre * pp.lead_multiplier;
+            let var_time_left = softplus(var_time_pre) * pp.variance_time_multiplier;
+            // No-result counts as 0 score for score-value purposes.
+            score_mean *= 1.0 - no_result_prob;
+            score_mean_sq *= 1.0 - no_result_prob;
+            lead *= 1.0 - no_result_prob;
+
+            let (shortterm_winloss_error, shortterm_score_error) = if model_version >= 14 {
+                let s1 = softplus(swin_pre * 0.5);
+                let s2 = softplus(sscore_pre * 0.5);
+                (
+                    (s1 * s1 * pp.shortterm_value_error_multiplier).sqrt(),
+                    (s2 * s2 * pp.shortterm_score_error_multiplier).sqrt(),
+                )
+            } else if model_version >= 10 {
+                (
+                    (softplus(swin_pre) * pp.shortterm_value_error_multiplier).sqrt(),
+                    (softplus(sscore_pre) * pp.shortterm_score_error_multiplier).sqrt(),
+                )
+            } else {
+                (softplus(swin_pre), softplus(sscore_pre) * 10.0)
+            };
+
+            // Flip from player-to-move to white's perspective.
+            if next_player == P_WHITE {
+                output.white_win_prob = win_prob as f32;
+                output.white_loss_prob = loss_prob as f32;
+                output.white_no_result_prob = no_result_prob as f32;
+                output.white_score_mean = score_mean as f32;
+                output.white_score_mean_sq = score_mean_sq as f32;
+                output.white_lead = lead as f32;
+            } else {
+                output.white_win_prob = loss_prob as f32;
+                output.white_loss_prob = win_prob as f32;
+                output.white_no_result_prob = no_result_prob as f32;
+                output.white_score_mean = -(score_mean as f32);
+                output.white_score_mean_sq = score_mean_sq as f32;
+                output.white_lead = -(lead as f32);
+            }
+            if model_version >= 9 {
+                output.var_time_left = var_time_left as f32;
+                output.shortterm_winloss_error = shortterm_winloss_error as f32;
+                output.shortterm_score_error = shortterm_score_error as f32;
+            } else {
+                output.var_time_left = -1.0;
+                output.shortterm_winloss_error = -1.0;
+                output.shortterm_score_error = -1.0;
+            }
+        }
+
+        // --- Ownership ---------------------------------------------------------
+        if let Some(map) = &mut output.white_owner_map {
+            let s = pp.output_scale_multiplier;
+            for pos in 0..(self.nn_x_len * self.nn_y_len) as usize {
+                let y = pos as i32 / self.nn_x_len;
+                let x = pos as i32 % self.nn_x_len;
+                if y >= board.y_size || x >= board.x_size {
+                    map[pos] = 0.0f32;
+                } else {
+                    // Same as value: flip player-to-move → white and tanh.
+                    let v = map[pos] * s;
+                    map[pos] = if next_player == P_WHITE { v.tanh() } else { -v.tanh() };
+                }
+            }
+        }
+    }
+}
+
+/// Softplus: `log(1 + exp(x))`, linear for large x (mirrors C++ `softPlus`).
+fn softplus(x: f64) -> f64 {
+    if x > 40.0 {
+        x
+    } else {
+        (1.0 + x.exp()).ln()
     }
 }
 
@@ -397,6 +619,7 @@ impl NnEvaluator {
             backend: Mutex::new(None),
             compute_handles: Mutex::new(Vec::new()),
             input_buffers: Mutex::new(None),
+            postprocess_cfg: Mutex::new((0, ModelPostProcessParams::default())),
         });
 
         Self {
@@ -947,6 +1170,11 @@ impl NnEvaluator {
             .map_err(|e| StringError::new(format!("Could not determine inputs version: {e}")))?;
         self.num_input_meta_channels = model.model_desc().num_input_meta_channels;
         self.post_process_params = model.model_desc().post_process_params;
+        // Mirror into SharedState so server threads can postprocess raw
+        // backend outputs. Runs before spawn_server_threads, so a plain
+        // mutex-guarded pair is fine.
+        *self.shared.postprocess_cfg.lock().unwrap() =
+            (self.model_version, self.post_process_params);
 
         let cfg = &self.cfg;
         let compute_context = backend
