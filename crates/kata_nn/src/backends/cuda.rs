@@ -128,6 +128,117 @@ mod imp {
                 .map_err(|e| e.to_string())?;
             Ok(out)
         }
+
+        /// FP16 张量核 GEMM：`C[M,N] = alpha * A[M,K] * B[N,K]^T + beta * C`。
+        ///
+        /// `a`/`b` 为 f32 主机数据（主机侧转 half），`c` 就地读写；K 必须是
+        /// 16 的倍数（调用方负责 padding）。对应 `cuda-kernels/gemm.cu` 的
+        /// `hgemm_m16n8k16_kernel`（内联 PTX mma.sync m16n8k16）。
+        #[allow(clippy::too_many_arguments)]
+        pub fn hgemm_m16n8k16(
+            &self,
+            a: &[f32],
+            b: &[f32],
+            c: &mut [f32],
+            m: usize,
+            n: usize,
+            k: usize,
+            alpha: f32,
+            beta: f32,
+        ) -> Result<(), String> {
+            assert_eq!(a.len(), m * k, "A 尺寸不符");
+            assert_eq!(b.len(), n * k, "B 尺寸不符");
+            assert_eq!(c.len(), m * n, "C 尺寸不符");
+            assert_eq!(k % 16, 0, "K 必须是 16 的倍数");
+
+            let a_half: Vec<u16> = a.iter().map(|&x| f32_to_f16_bits(x)).collect();
+            let b_half: Vec<u16> = b.iter().map(|&x| f32_to_f16_bits(x)).collect();
+
+            let f = self.get_func("hgemm_m16n8k16_kernel")?;
+            let stream = self.device.default_stream();
+            let mut d_a: CudaSlice<u16> =
+                unsafe { stream.alloc(a_half.len()) }.map_err(|e| e.to_string())?;
+            let mut d_b: CudaSlice<u16> =
+                unsafe { stream.alloc(b_half.len()) }.map_err(|e| e.to_string())?;
+            let mut d_c: CudaSlice<f32> =
+                unsafe { stream.alloc(c.len()) }.map_err(|e| e.to_string())?;
+            stream
+                .memcpy_htod(a_half.as_slice(), &mut d_a)
+                .map_err(|e| e.to_string())?;
+            stream
+                .memcpy_htod(b_half.as_slice(), &mut d_b)
+                .map_err(|e| e.to_string())?;
+            stream
+                .memcpy_htod(c, &mut d_c)
+                .map_err(|e| e.to_string())?;
+
+            let grid = (
+                m.div_ceil(64) as u32,
+                n.div_ceil(64) as u32,
+                1u32,
+            );
+            let block = (4 * 32) as u32;
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: grid,
+                block_dim: (block, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            unsafe {
+                stream
+                    .launch_builder(&f)
+                    .arg(&d_a)
+                    .arg(&d_b)
+                    .arg(&mut d_c)
+                    .arg(&(m as i32))
+                    .arg(&(n as i32))
+                    .arg(&(k as i32))
+                    .arg(&alpha)
+                    .arg(&beta)
+                    .launch(cfg)
+            }
+            .map_err(|e| format!("hgemm launch failed: {e}"))?;
+
+            stream
+                .memcpy_dtoh(&d_c, c)
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        }
+    }
+
+    /// f32 → f16 位模式（round-to-nearest-even，与 CUDA `__float2half` 一致）。
+    pub fn f32_to_f16_bits(x: f32) -> u16 {
+        let b = x.to_bits();
+        let sign = ((b >> 16) & 0x8000) as u16;
+        let exp = ((b >> 23) & 0xff) as i32;
+        let mant = b & 0x7fffff;
+        if exp == 0xff {
+            return if mant != 0 { sign | 0x7e00 } else { sign | 0x7c00 };
+        }
+        let e = exp - 127 + 15;
+        if e >= 0x1f {
+            return sign | 0x7c00;
+        }
+        if e <= 0 {
+            if e < -10 {
+                return sign;
+            }
+            let m = (mant | 0x800000) >> (14 - e);
+            let m = (m + 1) >> 1;
+            return sign | (m as u16);
+        }
+        let m = mant >> 13;
+        let round_bits = mant & 0x1fff;
+        let mut m = m as u16;
+        if round_bits > 0x1000 || (round_bits == 0x1000 && (m & 1) == 1) {
+            m += 1;
+            if m == 0x400 {
+                if e + 1 >= 0x1f {
+                    return sign | 0x7c00;
+                }
+                return sign | (((e + 1) as u16) << 10);
+            }
+        }
+        sign | ((e as u16) << 10) | m
     }
 }
 
@@ -143,4 +254,4 @@ impl CudaRuntime {
 }
 
 #[cfg(feature = "cuda")]
-pub use imp::CudaRuntime;
+pub use imp::{CudaRuntime, f32_to_f16_bits};

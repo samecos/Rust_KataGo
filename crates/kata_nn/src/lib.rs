@@ -10,6 +10,7 @@ pub mod inputs;
 pub mod model_parser;
 pub mod onnx_builder;
 pub mod onnx_model;
+pub mod onnx_parser;
 pub mod score_value;
 pub mod sgf_meta;
 pub mod version;

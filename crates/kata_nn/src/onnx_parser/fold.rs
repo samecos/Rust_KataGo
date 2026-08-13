@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use crate::onnx_proto::{AttributeProto, GraphProto, NodeProto, TensorProto, ValueInfoProto};
+use crate::onnx_proto::{GraphProto, NodeProto, TensorProto, ValueInfoProto};
 
 // ---------------------------------------------------------------------------
 // Tensor
@@ -404,11 +404,11 @@ pub fn shape_fn(
             if shapes.len() != 2 {
                 return Err("MatMul 需要 2 个输入".to_string());
             }
-            let (a, b) = (shapes[0], shapes[1]);
+            let (a, b) = (&shapes[0], &shapes[1]);
             if a.len() < 2 || b.len() < 2 {
                 return Err("MatMul 输入 rank < 2".to_string());
             }
-            let mut out = a[..a.len() - 2].to_vec();
+            let mut out = a[..a.len() - 1].to_vec();
             out.push(b[b.len() - 1]);
             one(out)
         }
@@ -416,7 +416,7 @@ pub fn shape_fn(
             if shapes.len() < 2 || shapes.len() > 3 {
                 return Err("Gemm 需要 2-3 个输入".to_string());
             }
-            let (a, b) = (shapes[0], shapes[1]);
+            let (a, b) = (&shapes[0], &shapes[1]);
             if a.len() != 2 || b.len() != 2 {
                 return Err("Gemm 输入必须为 2 维".to_string());
             }
@@ -430,7 +430,7 @@ pub fn shape_fn(
             if shapes.len() < 2 || shapes.len() > 3 {
                 return Err("Conv 需要 2-3 个输入".to_string());
             }
-            let (x, w) = (shapes[0], shapes[1]);
+            let (x, w) = (&shapes[0], &shapes[1]);
             if x.len() != 4 || w.len() != 4 {
                 return Err("Conv 仅支持 NCHW".to_string());
             }
@@ -455,14 +455,14 @@ pub fn shape_fn(
             if shapes.len() != 2 {
                 return Err(format!("{op} 需要 2 个输入"));
             }
-            one(broadcast_shape(shapes[0], shapes[1])?)
+            one(broadcast_shape(&shapes[0], &shapes[1])?)
         }
         "Where" => {
             if shapes.len() != 3 {
                 return Err("Where 需要 3 个输入".to_string());
             }
-            let t = broadcast_shape(shapes[1], shapes[2])?;
-            one(broadcast_shape(shapes[0], &t)?)
+            let t = broadcast_shape(&shapes[1], &shapes[2])?;
+            one(broadcast_shape(&shapes[0], &t)?)
         }
         "ReduceMean" | "ReduceSum" | "ReduceMax" => {
             if shapes.len() < 1 || shapes.len() > 2 {
@@ -477,7 +477,7 @@ pub fn shape_fn(
             } else {
                 None
             };
-            one(reduce_shape(shapes[0], keepdims, attrs, axes_input.as_deref())?)
+            one(reduce_shape(&shapes[0], keepdims, attrs, axes_input.as_deref())?)
         }
         "Reshape" => {
             if shapes.len() != 2 {
@@ -487,7 +487,12 @@ pub fn shape_fn(
                 .get(&input_names[1])
                 .ok_or_else(|| format!("Reshape 的 shape 输入 '{}' 必须是常量", input_names[1]))?;
             let target: Vec<i64> = shape_t.i64_data().to_vec();
-            let total = linear_product(shapes[0])?;
+            let total = linear_product(&shapes[0]).map_err(|e| {
+                format!(
+                    "Reshape(数据输入 '{}' 形状 {:?}, 目标 {target:?}): {e}",
+                    input_names[0], shapes[0]
+                )
+            })?;
             let n_infer = target.iter().filter(|&&d| d == -1).count();
             if n_infer == 0 {
                 let dims: Vec<SymDim> = target.iter().map(|&d| SymDim::k(d)).collect();
@@ -586,8 +591,8 @@ pub fn shape_fn(
                 }
                 Ok(d)
             };
-            let mut starts = get(1)?.to_vec();
-            let mut ends = get(2)?.to_vec();
+            let starts = get(1)?.to_vec();
+            let ends = get(2)?.to_vec();
             let axes: Vec<i64> = if input_names.len() >= 4 { get(3)?.to_vec() } else { (0..rank as i64).collect() };
             let steps: Vec<i64> = if input_names.len() >= 5 { get(4)?.to_vec() } else { vec![1] };
             if steps.len() != starts.len() || axes.len() != starts.len() {
@@ -774,14 +779,18 @@ fn broadcast_binary(
     .collect::<Result<_, _>>()?;
     let oc = concrete_dims(&out_dims);
     let total: usize = oc.iter().product();
-    let sa = strides_of(&ca);
-    let sb = strides_of(&cb);
-    // 输入若为单元素（标量 broadcast）则全部 stride 为 0
-    let (sa, sb): (Vec<usize>, Vec<usize>) = (
-        if da.len() == 1 { sa.iter().map(|_| 0).collect() } else { sa },
-        if db.len() == 1 { sb.iter().map(|_| 0).collect() } else { sb },
-    );
     let rank = oc.len();
+    // 标量（0 维或单元素）输入的全部 stride 为 0
+    let sa: Vec<usize> = if ca.is_empty() || da.len() == 1 {
+        vec![0; rank]
+    } else {
+        strides_of(&ca)
+    };
+    let sb: Vec<usize> = if cb.is_empty() || db.len() == 1 {
+        vec![0; rank]
+    } else {
+        strides_of(&cb)
+    };
     let mut out = vec![0f32; total];
     let mut idx = vec![0usize; rank];
     for o in 0..total {
@@ -816,8 +825,8 @@ fn elemwise(t: &Tensor, f: impl Fn(f32) -> f32) -> Tensor {
     Tensor { dims: t.dims.clone(), data: TensorData::F32(data) }
 }
 
-/// 2 维转置（本模型常量转置全是 2 维）。
-fn transpose2(t: &Tensor, perm: &[i64]) -> Result<Tensor, String> {
+/// 一般秩转置（支持 FLOAT 常量；batch 维 `-1` 必须留在第 0 维）。
+pub fn transpose2(t: &Tensor, perm: &[i64]) -> Result<Tensor, String> {
     let dims = t.dims.clone();
     let concrete = concrete_dims(&dims);
     let rank = concrete.len();
@@ -832,7 +841,6 @@ fn transpose2(t: &Tensor, perm: &[i64]) -> Result<Tensor, String> {
     let in_strides = strides_of(&concrete);
     let out_dims: Vec<i64> = perm.iter().map(|&p| dims[p]).collect();
     let out_concrete: Vec<usize> = perm.iter().map(|&p| concrete[p]).collect();
-    let out_strides = strides_of(&out_concrete);
     let total: usize = out_concrete.iter().product();
     let mut out = vec![0f32; total];
     let mut idx = vec![0usize; rank];
@@ -1064,7 +1072,7 @@ pub fn fold_op(
         "Shape" => {
             let start = attrs.int_scalar("start").unwrap_or(0);
             let end = attrs.int_scalar("end").unwrap_or(i64::MAX);
-            let s = input_shapes[0];
+            let s = &input_shapes[0];
             let n = s.len() as i64;
             let start = if start < 0 { start + n } else { start }.max(0);
             let end = if end < 0 { end + n } else { end }.min(n);
@@ -1091,10 +1099,8 @@ pub fn fold_op(
         }
         "Equal" => {
             let t = broadcast_binary(inputs[0], inputs[1], |a, b| if a == b { 1.0 } else { 0.0 })?;
-            Ok(Some(vec![Tensor {
-                dims: t.dims,
-                data: TensorData::I64(t.f32_data().iter().map(|&v| v as i64).collect()),
-            }]))
+            let data: Vec<i64> = t.f32_data().iter().map(|&v| v as i64).collect();
+            Ok(Some(vec![Tensor { dims: t.dims, data: TensorData::I64(data) }]))
         }
         "Where" => {
             let (cond, x, y) = (inputs[0], inputs[1], inputs[2]);
@@ -1239,8 +1245,11 @@ pub fn fold_graph(graph: &GraphProto) -> Result<SimplifiedGraph, String> {
         return Err("不支持 sparse_initializer".to_string());
     }
 
-    // 2. 图输入形状
+    // 2. 图输入形状 + 常量形状
     let mut shapes: HashMap<String, Vec<SymDim>> = HashMap::new();
+    for (name, t) in &constants {
+        shapes.insert(name.clone(), tensor_dims_to_sym(&t.dims));
+    }
     let mut inputs = Vec::new();
     for vi in &graph.input {
         let name = vi.name.clone().unwrap_or_default();
@@ -1318,11 +1327,14 @@ pub fn fold_graph(graph: &GraphProto) -> Result<SimplifiedGraph, String> {
         }
     }
 
-    // 4. consumers 表
+    // 4. consumers 表（同一节点可能重复消费同一输入，去重）
     let mut consumers: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, n) in nodes.iter().enumerate() {
         for inp in &n.inputs {
-            consumers.entry(inp.clone()).or_default().push(i);
+            let v = consumers.entry(inp.clone()).or_default();
+            if !v.contains(&i) {
+                v.push(i);
+            }
         }
     }
 

@@ -218,6 +218,13 @@ fn run_search(nn_eval: &NnEvaluator, max_visits: i64) -> i16 {
     let params = SearchParams {
         max_visits,
         value_weight_exponent: 0.0,
+        // Mimic the GTP genmove param profile.
+        conservative_pass: true,
+        fill_dame_before_pass: true,
+        enable_passing_hacks: true,
+        enable_more_passing_hacks: true,
+        anti_mirror: true,
+        root_symmetry_pruning: true,
         ..SearchParams::default()
     };
     let logger = Arc::new(Logger::new(LoggerOptions::default(), None));

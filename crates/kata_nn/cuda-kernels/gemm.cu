@@ -40,8 +40,8 @@ hgemm_m16n8k16_kernel(const __half* __restrict__ A,
     // A 片段（固定 4 个 .f16x2 寄存器）：行 m0 + lane/4 与 m0 + 8 + lane/4，
     // 列 kk + (lane%4)*2 与 kk + 8 + (lane%4)*2。
     uint32_t a[4];
-    // B 片段：每个 16x8 tile 2 个 .f16x2 寄存器。
-    uint32_t b[n_tiles][2];
+    // B 片段：每个 (16x16 tile, 8 列半块) 2 个 .f16x2 寄存器。
+    uint32_t b[n_tiles][2][2];
     float c[n_tiles][2][4];
 
     for (int t = 0; t < n_tiles; ++t)
@@ -55,33 +55,40 @@ hgemm_m16n8k16_kernel(const __half* __restrict__ A,
 
     for (int kk = 0; kk < K; kk += 16) {
         // --- 加载 A 片段（行主序，越界置零）---
+        // PTX m16n8k16 A 片段：a0=(g, t*2), a1=(g+8, t*2),
+        // a2=(g, t*2+8), a3=(g+8, t*2+8)（经 ldmatrix.x4 推导确认）。
         if (a_row0 < M) {
             const __half* ap = A + (size_t)a_row0 * K + kk + a_col;
             a[0] = *reinterpret_cast<const uint32_t*>(ap);
-            a[1] = *reinterpret_cast<const uint32_t*>(ap + 8);
+            a[2] = *reinterpret_cast<const uint32_t*>(ap + 8);
         } else {
-            a[0] = a[1] = 0;
+            a[0] = a[2] = 0;
         }
         if (a_row1 < M) {
             const __half* ap = A + (size_t)a_row1 * K + kk + a_col;
-            a[2] = *reinterpret_cast<const uint32_t*>(ap);
+            a[1] = *reinterpret_cast<const uint32_t*>(ap);
             a[3] = *reinterpret_cast<const uint32_t*>(ap + 8);
         } else {
-            a[2] = a[3] = 0;
+            a[1] = a[3] = 0;
         }
 
-        // --- 每个 N-tile 加载 B 片段（B 为 [N,K] 行主序 → 列主序片段）---
-        const int b_row = kk + (lane / 4) * 2;
+        // --- 每个 (N-tile, 半块) 加载 B 片段 ---
+        // PTX m16n8k16 B 片段（列主序）：b0 = B[k=(lane%4)*2..+1][col=lane/4]，
+        // b1 = B[k=(lane%4)*2+8..+9][col=lane/4]（经 ldmatrix.trans 推导确认）。
+        const int b_row = kk + (lane % 4) * 2;
         #pragma unroll
         for (int t = 0; t < n_tiles; ++t) {
-            const int b_col = n0 + t * 16 + (lane % 4);
-            if (b_col < N) {
-                const __half* bp = B + (size_t)b_col * K + b_row;
-                b[t][0] = *reinterpret_cast<const uint32_t*>(bp);
-                b[t][1] = *reinterpret_cast<const uint32_t*>(bp + 8);
-            } else {
-                b[t][0] = 0;
-                b[t][1] = 0;
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                const int b_col = n0 + t * 16 + j * 8 + (lane / 4);
+                if (b_col < N) {
+                    const __half* bp = B + (size_t)b_col * K + b_row;
+                    b[t][j][0] = *reinterpret_cast<const uint32_t*>(bp);
+                    b[t][j][1] = *reinterpret_cast<const uint32_t*>(bp + 8);
+                } else {
+                    b[t][j][0] = 0;
+                    b[t][j][1] = 0;
+                }
             }
         }
 
@@ -90,11 +97,8 @@ hgemm_m16n8k16_kernel(const __half* __restrict__ A,
         for (int t = 0; t < n_tiles; ++t) {
             #pragma unroll
             for (int j = 0; j < 2; ++j) {
-                uint32_t bb0 = b[t][0];
-                uint32_t bb1 = b[t][1];
-                // B 片段的 2 个寄存器对应 k 的 8..15 行？mma 布局：B frag 2 个
-                // reg：reg0 = (row kk+lane/4*2+0, col n+lane%4)，(row +1, col)；
-                // reg1 = (row +8, col)，(row +9, col)。
+                uint32_t bb0 = b[t][j][0];
+                uint32_t bb1 = b[t][j][1];
                 asm volatile(
                     "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
                     "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"

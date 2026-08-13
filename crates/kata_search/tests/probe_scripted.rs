@@ -209,6 +209,7 @@ fn dump_search(nn_eval: &NnEvaluator, max_visits: i64) {
     let params = SearchParams {
         max_visits,
         value_weight_exponent: 0.0,
+        root_symmetry_pruning: true,
         ..SearchParams::default()
     };
     let logger = Arc::new(Logger::new(LoggerOptions::default(), None));

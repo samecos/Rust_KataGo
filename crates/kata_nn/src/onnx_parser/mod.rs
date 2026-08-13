@@ -31,7 +31,7 @@ use std::collections::HashMap;
 
 use prost::Message;
 
-use crate::onnx_proto::{GraphProto, ModelProto, NodeProto};
+use crate::onnx_proto::{GraphProto, ModelProto};
 
 // ---------------------------------------------------------------------------
 // 原始图
@@ -88,7 +88,7 @@ pub fn load_onnx_graph(graph: GraphProto) -> Result<OnnxGraph, String> {
         .node
         .iter()
         .enumerate()
-        .map(|(i, n: &NodeProto)| RawNode {
+        .map(|(i, n)| RawNode {
             op: n.op_type.clone().unwrap_or_default(),
             inputs: n.input.clone(),
             outputs: n.output.clone(),

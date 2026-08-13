@@ -1081,6 +1081,20 @@ impl<'a> Search<'a> {
             );
             self.root_sym_dup_loc = dup_loc.try_into().expect("dup_loc length mismatch");
             self.root_symmetries = symmetries;
+            if std::env::var("KATA_DEBUG_SELECT").is_ok() {
+                let non_dup: Vec<Loc> = (0..MAX_ARR_SIZE as Loc)
+                    .filter(|&l| {
+                        self.root_sym_dup_loc[l as usize]
+                            == false
+                            && (self.root_board.is_on_board(l) || l == PASS_LOC)
+                    })
+                    .collect();
+                eprintln!(
+                    "[sym] non_dup_count={} non_dup_locs={:?}",
+                    non_dup.len(),
+                    non_dup
+                );
+            }
         } else {
             self.root_sym_dup_loc = [false; MAX_ARR_SIZE];
             self.root_symmetries.clear();
