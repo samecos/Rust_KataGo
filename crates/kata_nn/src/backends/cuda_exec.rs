@@ -28,18 +28,10 @@
 //!
 //! 本文件交付 `CudaModel::load` + `CudaModel::apply` + 数值对拍（
 //! `tests/dump_nn_io_cuda.rs`）。`crate::backend::Backend` trait 的对接
-//! （`CudaBackend`：load_model_file → onnx_parser，get_output → apply +
-//! v15 解码 + 对称性，参照 `trt.rs::generic_get_output`）留待下一步：
-//!
-//! ```text
-//! TODO(cuda-backend): 在 backends/cuda.rs 加 `pub struct CudaBackend;`
-//!   - load_model_file: 读文件 → onnx_parser::parse_layer_graph → CudaRuntime::new
-//!     → CudaModel::load（CudaRuntime 需随 LoadedModel 持有，注意 Send/Sync）
-//!   - get_output: copy_inputs_with_symmetry 填 [B,22,19,19] NCHW → apply →
-//!     policy 通道 0/5 乐观混合（base + (opt-base)*optimism，pass 位在 361）→
-//!     value[0..3]、misc[0..4]+moremisc[0..2]、ownership 逆对称（
-//!     kata_game::symmetry::{copy_outputs_with_symmetry, invert}）。
-//! ```
+//! 已实现（2026-08-14，`cuda.rs::backend_impl::CudaBackend`）：load_model_file
+//! → onnx_parser → CudaModel::load；get_output → apply + v15 解码 + 对称性。
+//! 调试开关：`KATAGO_CUDA_DEBUG_LAYER=<i>` 逐层 dump、`KATAGO_CUDA_PROFILE=1`
+//! 逐层耗时、`KATAGO_CUDA_DUMP_INPUT=<dir>` 输入 dump（见 cuda.rs）。
 
 use crate::backends::cuda::{f16_to_f32_bits, f32_to_f16_bits, CudaRuntime};
 use crate::onnx_parser::{Layer, LayerGraph, Tensor, TensorData};
@@ -230,8 +222,46 @@ impl CudaModel {
         let mut out_ownership: CudaSlice<f32> = zeros32(&stream, m)?;
 
         // --- 逐层执行 ----------------------------------------------------
+        // per-layer 剖析（KATAGO_CUDA_PROFILE=1）：每层一对事件计时。
+        let profiling = std::env::var("KATAGO_CUDA_PROFILE").is_ok();
+        let mut layer_times: Vec<(i64, &'static str, f32)> = Vec::new();
+        let (ev_start, ev_end) = if profiling {
+            let f = Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT);
+            (
+                Some(rt.device.new_event(f).map_err(|e| format!("event: {e}"))?),
+                Some(rt.device.new_event(f).map_err(|e| format!("event: {e}"))?),
+            )
+        } else {
+            (None, None)
+        };
+        if profiling {
+            let _ = ev_start.as_ref().unwrap().record(&stream);
+        }
         im2col(rt, spatial, &mut cols, batch, s)?;
+        if profiling {
+            let _ = ev_end.as_ref().unwrap().record(&stream);
+            let ms = ev_start
+                .as_ref()
+                .unwrap()
+                .elapsed_ms(ev_end.as_ref().unwrap())
+                .unwrap_or(-1.0);
+            layer_times.push((-1, "im2col", ms));
+        }
         for (li, lb) in self.layers.iter().enumerate() {
+            let layer_tag: &'static str = match lb {
+                LayerBuf::InitialConv { .. } => "InitialConv",
+                LayerBuf::Linear { .. } => "Linear",
+                LayerBuf::RmsNorm { .. } => "RmsNorm",
+                LayerBuf::Attention { .. } => "Attention",
+                LayerBuf::Ffn { .. } => "Ffn",
+                LayerBuf::GateSilu { .. } => "GateSilu",
+                LayerBuf::TrunkFinal { .. } => "TrunkFinal",
+                LayerBuf::PolicyHead { .. } => "PolicyHead",
+                LayerBuf::ValueHead { .. } => "ValueHead",
+            };
+            if profiling {
+                let _ = ev_start.as_ref().unwrap().record(&stream);
+            }
             match lb {
                 LayerBuf::InitialConv { w, gw, g, gate_scale, gate_bias } => {
                     // raw 768 流（块残差加的是 gate 前的值）→ 异位门控 SiLU
@@ -272,17 +302,43 @@ impl CudaModel {
                 LayerBuf::Attention { qkv, out, cos, sin, qk_scale, h: lh, d: ld, s: ls } => {
                     let (lh, ld, ls) = (*lh, *ld, *ls);
                     assert_eq!((lh, ld, ls), (h, d, s), "attention 结构参数不符");
-                    hgemm(rt, &normed, qkv, &mut gemm_out, m)?;
-                    qkv_rope(
-                        rt, &gemm_out, cos, sin, &mut qbuf, &mut kbuf, &mut vbuf, batch, lh, ls,
-                        ld,
-                    )?;
+                    let sub_profile = profiling;
+                    let mut sub_times: Vec<(&'static str, f32)> = Vec::new();
+                    macro_rules! timed {
+                        ($name:expr, $body:expr) => {
+                            if sub_profile {
+                                let _ = ev_start.as_ref().unwrap().record(&stream);
+                            }
+                            $body?;
+                            if sub_profile {
+                                let _ = ev_end.as_ref().unwrap().record(&stream);
+                                let ms = ev_start
+                                    .as_ref()
+                                    .unwrap()
+                                    .elapsed_ms(ev_end.as_ref().unwrap())
+                                    .unwrap_or(-1.0);
+                                sub_times.push(($name, ms));
+                            }
+                        };
+                    }
+                    timed!("qkv", hgemm(rt, &normed, qkv, &mut gemm_out, m));
+                    timed!(
+                        "rope",
+                        qkv_rope(
+                            rt, &gemm_out, cos, sin, &mut qbuf, &mut kbuf, &mut vbuf, batch, lh, ls,
+                            ld,
+                        )
+                    );
                     let scale = qk_scale * qk_scale; // 导出图 q、k 各乘 1/∜d
-                    attention_row(rt, &qbuf, &kbuf, &vbuf, &mut attn, ls, ld, batch * lh, scale)?;
-                    // 拼回 [M,384]（normed 已被 qkv GEMM 消费完，可复用）
-                    attn_merge(rt, &attn, &mut normed, batch, lh, ls, ld)?;
-                    hgemm(rt, &normed, out, &mut gemm_out, m)?;
-                    f32_add_inplace(rt, &mut act384, &gemm_out, m * mid)?;
+                    timed!("attn", attention_row(rt, &qbuf, &kbuf, &vbuf, &mut attn, ls, ld, batch * lh, scale));
+                    timed!("merge", attn_merge(rt, &attn, &mut normed, batch, lh, ls, ld));
+                    timed!("outproj", hgemm(rt, &normed, out, &mut gemm_out, m));
+                    timed!("resid", f32_add_inplace(rt, &mut act384, &gemm_out, m * mid));
+                    if sub_profile {
+                        let total: f32 = sub_times.iter().map(|t| t.1.max(0.0)).sum();
+                        eprintln!("[cuda-profile] attention l{li} total {total:.3} ms: {}",
+                            sub_times.iter().map(|(n, t)| format!("{n}={t:.3}")).collect::<Vec<_>>().join(" "));
+                    }
                 }
                 LayerBuf::Ffn { up, gate, down, hidden } => {
                     let hidden = *hidden;
@@ -386,6 +442,15 @@ impl CudaModel {
                     hgemm(rt, &p192, own_w, &mut out_ownership, m)?;
                 }
             }
+            if profiling {
+                let _ = ev_end.as_ref().unwrap().record(&stream);
+                let ms = ev_start
+                    .as_ref()
+                    .unwrap()
+                    .elapsed_ms(ev_end.as_ref().unwrap())
+                    .unwrap_or(-1.0);
+                layer_times.push((li as i64, layer_tag, ms));
+            }
             // --- 临时调试钩子：KATAGO_CUDA_DEBUG_LAYER=<i> 时 dump 两路流 ---
             if let Ok(spec) = std::env::var("KATAGO_CUDA_DEBUG_LAYER") {
                 if spec == li.to_string() {
@@ -467,6 +532,15 @@ impl CudaModel {
                         wf("vec_a", &vec_a)?;
                     }
                 }
+            }
+        }
+
+        if profiling {
+            let total: f32 = layer_times.iter().map(|t| t.2.max(0.0)).sum();
+            eprintln!("[cuda-profile] total {total:.3} ms across {} kernels:",
+                layer_times.len());
+            for (li, tag, ms) in &layer_times {
+                eprintln!("  {li:3} {tag:12} {ms:9.3} ms");
             }
         }
 
@@ -1100,12 +1174,15 @@ fn attention_row(
     scale: f32,
 ) -> Result<(), String> {
     assert!(s <= 512, "attention_row 要求 S <= 512");
-    let f = rt.get_func("attention_row_kernel")?;
+    // v2：warp-per-row，块共享 K/V smem（8 行/块 × 8 warps）。
+    let f = rt.get_func("attention_row_v2_kernel")?;
     let stream = rt.device.default_stream();
+    let rows_per_block = 8u32;
+    let grid_x = s.div_ceil(rows_per_block as usize) as u32;
     let cfg = LaunchConfig {
-        grid_dim: (s as u32, bh as u32, 1),
-        block_dim: (512, 1, 1),
-        shared_mem_bytes: 0,
+        grid_dim: (grid_x, bh as u32, 1),
+        block_dim: (32, rows_per_block, 1),
+        shared_mem_bytes: (2 * s * d * 2) as u32,
     };
     unsafe {
         stream

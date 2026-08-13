@@ -378,7 +378,7 @@ mod imp {
         let qh: Vec<u16> = q.iter().map(|&x| f32_to_f16_bits(x)).collect();
         let kh: Vec<u16> = k.iter().map(|&x| f32_to_f16_bits(x)).collect();
         let vh: Vec<u16> = v.iter().map(|&x| f32_to_f16_bits(x)).collect();
-        let f = self.get_func("attention_row_kernel")?;
+        let f = self.get_func("attention_row_v2_kernel")?;
         let stream = self.device.default_stream();
         let mut d_q: CudaSlice<u16> =
             unsafe { stream.alloc(n) }.map_err(|e| e.to_string())?;
@@ -391,13 +391,12 @@ mod imp {
         stream.memcpy_htod(qh.as_slice(), &mut d_q).map_err(|e| e.to_string())?;
         stream.memcpy_htod(kh.as_slice(), &mut d_k).map_err(|e| e.to_string())?;
         stream.memcpy_htod(vh.as_slice(), &mut d_v).map_err(|e| e.to_string())?;
-        // kernel 归约工作区固定 ATT_BLOCK=384，且要求 s ≤ 384。
-        assert!(s <= 512, "attention_row v1 requires S <= 512");
-        let block = 512u32;
+        assert!(s <= 512, "attention_row v2 requires S <= 512");
+        let rows_per_block = 8u32;
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (s as u32, bh as u32, 1),
-            block_dim: (block, 1, 1),
-            shared_mem_bytes: 0,
+            grid_dim: (s.div_ceil(rows_per_block as usize) as u32, bh as u32, 1),
+            block_dim: (32, rows_per_block, 1),
+            shared_mem_bytes: (2 * s * d * 2) as u32,
         };
         let scale = 1.0 / (d as f32).sqrt();
         unsafe {
