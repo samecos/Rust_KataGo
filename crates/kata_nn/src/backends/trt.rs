@@ -83,6 +83,65 @@ mod imp {
             unsafe { trt_ffi::katago_trt_engine_get_info(ptr, &mut info) };
             Ok(Self { ptr, info })
         }
+
+        /// Build a name-agnostic engine for a directly loaded exported `.onnx`
+        /// model, returning the engine together with its I/O tensor layout.
+        fn from_onnx_bytes_generic(
+            onnx: &[u8],
+            max_batch_size: i32,
+            use_fp16: bool,
+        ) -> Result<(Self, GenericIo), String> {
+            let ptr = unsafe {
+                trt_ffi::katago_trt_engine_create_generic(
+                    onnx.as_ptr(),
+                    onnx.len(),
+                    max_batch_size,
+                    use_fp16 as i32,
+                )
+            };
+            if ptr.is_null() {
+                return Err(trt_ffi::last_error().unwrap_or_else(|| "unknown engine error".into()));
+            }
+            let mut info = trt_ffi::KatagoTrtEngineInfo::default();
+            unsafe { trt_ffi::katago_trt_engine_get_info(ptr, &mut info) };
+
+            let num_inputs = unsafe { trt_ffi::katago_trt_engine_num_inputs(ptr) };
+            let num_outputs = unsafe { trt_ffi::katago_trt_engine_num_outputs(ptr) };
+            let mut input_names = Vec::with_capacity(num_inputs.max(0) as usize);
+            let mut input_dims = Vec::with_capacity(num_inputs.max(0) as usize);
+            for i in 0..num_inputs.max(0) {
+                let mut t = trt_ffi::KatagoTrtTensorInfo::default();
+                if unsafe { trt_ffi::katago_trt_engine_input_info(ptr, i, &mut t) } == 0 {
+                    return Err("failed to query generic engine input info".to_string());
+                }
+                let name = unsafe { std::ffi::CStr::from_ptr(t.name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned();
+                input_names.push(name);
+                input_dims.push(t.dims[..t.nb_dims.max(0) as usize].to_vec());
+            }
+            let mut output_names = Vec::with_capacity(num_outputs.max(0) as usize);
+            let mut output_dims = Vec::with_capacity(num_outputs.max(0) as usize);
+            for i in 0..num_outputs.max(0) {
+                let mut t = trt_ffi::KatagoTrtTensorInfo::default();
+                if unsafe { trt_ffi::katago_trt_engine_output_info(ptr, i, &mut t) } == 0 {
+                    return Err("failed to query generic engine output info".to_string());
+                }
+                let name = unsafe { std::ffi::CStr::from_ptr(t.name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned();
+                output_names.push(name);
+                output_dims.push(t.dims[..t.nb_dims.max(0) as usize].to_vec());
+            }
+
+            let gio = GenericIo {
+                input_names,
+                output_names,
+                input_dims,
+                output_dims,
+            };
+            Ok((Self { ptr, info }, gio))
+        }
     }
 
     impl Drop for TrtEngine {
@@ -140,6 +199,7 @@ mod imp {
     // ------------------------------------------------------------------
 
     pub struct TensorRtLoadedModel {
+        model_path: String,
         model_desc: ModelDesc,
     }
 
@@ -156,6 +216,9 @@ mod imp {
         engine: TrtEngine,
         engine_info: trt_ffi::KatagoTrtEngineInfo,
         gpu_idxs: Vec<i32>,
+        /// Present when the engine was built from a directly loaded `.onnx`
+        /// model via the generic shim path.
+        generic: Option<GenericIo>,
     }
 
     impl ComputeContext for TensorRtComputeContext {
@@ -168,7 +231,11 @@ mod imp {
         ctx: TrtContext,
         engine_info: trt_ffi::KatagoTrtEngineInfo,
         max_batch_size: i32,
-        bufs: Mutex<TrtBuffers>,
+        /// Name-based staging buffers (onnx_builder models); `None` for the
+        /// generic onnx path, which uses `generic_bufs` instead.
+        bufs: Mutex<Option<TrtBuffers>>,
+        generic: Option<GenericIo>,
+        generic_bufs: Mutex<Option<GenericHostBufs>>,
     }
 
     impl ComputeHandle for TensorRtComputeHandle {
@@ -180,6 +247,150 @@ mod imp {
         }
         fn as_any(&self) -> &dyn Any {
             self
+        }
+    }
+
+    /// Name-agnostic I/O layout of a generic engine.
+    #[derive(Debug, Clone)]
+    struct GenericIo {
+        input_names: Vec<String>,
+        output_names: Vec<String>,
+        input_dims: Vec<Vec<i64>>,
+        output_dims: Vec<Vec<i64>>,
+    }
+
+    impl GenericIo {
+        fn input_index(&self, name: &str) -> Option<usize> {
+            self.input_names.iter().position(|n| n == name)
+        }
+        fn output_index(&self, name: &str) -> Option<usize> {
+            self.output_names.iter().position(|n| n == name)
+        }
+        fn single_elts(dims: &[i64]) -> usize {
+            dims.iter().skip(1).filter(|&&d| d >= 0).product::<i64>().max(1) as usize
+        }
+
+        /// Serialize the layout to a compact text sidecar (one tensor per
+        /// line: `input|output <name> <dim0> <dim1> ...`).
+        fn to_sidecar(&self) -> String {
+            let mut s = String::new();
+            for (i, n) in self.input_names.iter().enumerate() {
+                s.push_str(&format!("input {n}"));
+                for d in &self.input_dims[i] {
+                    s.push_str(&format!(" {d}"));
+                }
+                s.push('\n');
+            }
+            for (i, n) in self.output_names.iter().enumerate() {
+                s.push_str(&format!("output {n}"));
+                for d in &self.output_dims[i] {
+                    s.push_str(&format!(" {d}"));
+                }
+                s.push('\n');
+            }
+            s
+        }
+
+        fn from_sidecar(text: &str) -> Result<Self, String> {
+            let mut input_names = Vec::new();
+            let mut output_names = Vec::new();
+            let mut input_dims = Vec::new();
+            let mut output_dims = Vec::new();
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let mut parts = line.split_whitespace();
+                let kind = parts.next().unwrap_or("");
+                let name = parts.next().unwrap_or("");
+                let dims: Vec<i64> = parts
+                    .map(|d| d.parse::<i64>().map_err(|_| "bad dim".to_string()))
+                    .collect::<Result<_, _>>()?;
+                match kind {
+                    "input" => {
+                        input_names.push(name.to_string());
+                        input_dims.push(dims);
+                    }
+                    "output" => {
+                        output_names.push(name.to_string());
+                        output_dims.push(dims);
+                    }
+                    _ => return Err(format!("bad sidecar kind: {kind}")),
+                }
+            }
+            if input_names.is_empty() {
+                return Err("sidecar has no inputs".to_string());
+            }
+            Ok(Self {
+                input_names,
+                output_names,
+                input_dims,
+                output_dims,
+            })
+        }
+    }
+
+    /// Host staging buffers for the generic inference path.
+    struct GenericHostBufs {
+        inputs: Vec<Vec<f32>>,
+        outputs: Vec<Vec<f32>>,
+    }
+
+    /// Build (or load from a plan cache next to the model file) a generic
+    /// engine for a directly exported `.onnx` model.
+    fn generic_engine_for_model(
+        model_path: &str,
+        onnx_bytes: &[u8],
+        max_batch_size: i32,
+        use_fp16: bool,
+    ) -> Result<(TrtEngine, GenericIo), String> {
+        let plan_path = format!(
+            "{model_path}.trtplan.b{}.{}",
+            max_batch_size,
+            if use_fp16 { "fp16" } else { "fp32" }
+        );
+        let sidecar_path = format!("{plan_path}.io");
+
+        // Try the cache first.
+        if let Ok(text) = std::fs::read_to_string(&sidecar_path) {
+            let c_path = CString::new(plan_path.as_str()).map_err(|_| "invalid plan path".to_string())?;
+            let ptr = unsafe { trt_ffi::katago_trt_engine_deserialize_generic(c_path.as_ptr()) };
+            if !ptr.is_null() {
+                if let Ok(gio) = GenericIo::from_sidecar(&text) {
+                    let mut info = trt_ffi::KatagoTrtEngineInfo::default();
+                    unsafe { trt_ffi::katago_trt_engine_get_info(ptr, &mut info) };
+                    return Ok((TrtEngine { ptr, info }, gio));
+                }
+                unsafe { trt_ffi::katago_trt_engine_destroy(ptr) };
+            }
+        }
+
+        // Build from ONNX and persist the plan + sidecar.
+        let (engine, gio) = TrtEngine::from_onnx_bytes_generic(onnx_bytes, max_batch_size, use_fp16)?;
+        let c_path = CString::new(plan_path.as_str()).map_err(|_| "invalid plan path".to_string())?;
+        if unsafe { trt_ffi::katago_trt_engine_serialize_to_file(engine.ptr, c_path.as_ptr()) } == 0 {
+            // Cache write failure is non-fatal; just remove any partial file.
+            let _ = std::fs::remove_file(&plan_path);
+        } else {
+            let _ = std::fs::write(&sidecar_path, gio.to_sidecar());
+        }
+        Ok((engine, gio))
+    }
+
+    impl GenericHostBufs {
+        fn new(gio: &GenericIo, max_batch_size: i32) -> Self {
+            let inputs = gio
+                .input_dims
+                .iter()
+                .map(|d| vec![0.0f32; max_batch_size as usize * GenericIo::single_elts(d)])
+                .collect();
+            let outputs = gio
+                .output_dims
+                .iter()
+                .map(|d| vec![0.0f32; max_batch_size as usize * GenericIo::single_elts(d)])
+                .collect();
+            Self { inputs, outputs }
         }
     }
 
@@ -206,9 +417,22 @@ mod imp {
             file: &str,
             _expected_sha256: &str,
         ) -> Result<Box<dyn LoadedModel>, NeuralNetError> {
+            // Directly exported KataGo .onnx models are handled via their
+            // custom metadata; other formats go through the KataGo model parser.
+            if file.ends_with(".onnx") {
+                let bytes = std::fs::read(file)
+                    .map_err(|e| NeuralNetError(format!("could not read {file}: {e}")))?;
+                let parsed = crate::onnx_model::parse_onnx_model(&bytes)
+                    .map_err(|e| NeuralNetError(format!("onnx metadata parse failed: {e}")))?;
+                return Ok(Box::new(TensorRtLoadedModel {
+                    model_path: file.to_string(),
+                    model_desc: parsed.model_desc,
+                }));
+            }
             let model_desc = crate::model_parser::load_model_file(file)
                 .map_err(|e| NeuralNetError(format!("model load failed: {e}")))?;
             Ok(Box::new(TensorRtLoadedModel {
+                model_path: file.to_string(),
                 model_desc,
             }))
         }
@@ -241,6 +465,51 @@ mod imp {
             // 1. Use the ModelDesc parsed during load_model_file.
             let model_desc = model.model_desc.clone();
 
+            // Directly exported KataGo .onnx model: build a generic engine
+            // straight from the file (no onnx_builder round-trip).
+            if model.model_path.ends_with(".onnx") {
+                let bytes = std::fs::read(&model.model_path).map_err(|e| {
+                    NeuralNetError(format!("could not read {}: {e}", model.model_path))
+                })?;
+                let parsed = crate::onnx_model::parse_onnx_model(&bytes)
+                    .map_err(|e| NeuralNetError(format!("onnx metadata parse failed: {e}")))?;
+                if parsed.inputs.len() != 2 {
+                    return Err(NeuralNetError(format!(
+                        "expected 2 inputs (spatial+global), found {}",
+                        parsed.inputs.len()
+                    )));
+                }
+                let (mut engine, gio) = generic_engine_for_model(
+                    &model.model_path,
+                    &bytes,
+                    max_batch_size,
+                    use_fp16,
+                )
+                .map_err(|e| NeuralNetError(format!("TensorRT engine creation failed: {e}")))?;
+
+                let d = &model_desc;
+                engine.info = trt_ffi::KatagoTrtEngineInfo {
+                    nn_x_len,
+                    nn_y_len,
+                    num_input_channels: d.num_input_channels,
+                    num_input_global_channels: d.num_input_global_channels,
+                    num_input_meta_channels: d.num_input_meta_channels,
+                    num_policy_channels: d.num_policy_channels,
+                    num_value_channels: d.num_value_channels,
+                    num_score_value_channels: d.num_score_value_channels,
+                    num_ownership_channels: d.num_ownership_channels,
+                    max_batch_size,
+                };
+                let engine_info = engine.info;
+
+                return Ok(Box::new(TensorRtComputeContext {
+                    engine,
+                    engine_info,
+                    gpu_idxs: gpu_idxs.to_vec(),
+                    generic: Some(gio),
+                }));
+            }
+
             // 2. Build ONNX from ModelDesc
             let onnx_result = crate::onnx_builder::build(
                 &model_desc,
@@ -262,6 +531,7 @@ mod imp {
                 engine,
                 engine_info,
                 gpu_idxs: gpu_idxs.to_vec(),
+                generic: None,
             }))
         }
 
@@ -290,14 +560,22 @@ mod imp {
 
             let trt_handle = TrtContext::new(&trt_ctx.engine, gpu)
                 .map_err(|e| NeuralNetError(format!("TensorRT context creation failed: {e}")))?;
-            let bufs = TrtBuffers::new(&trt_ctx.engine, max_batch_size)
-                .map_err(|e| NeuralNetError(format!("TensorRT buffers creation failed: {e}")))?;
+
+            let (bufs, generic_bufs) = if let Some(gio) = &trt_ctx.generic {
+                (None, Some(GenericHostBufs::new(gio, max_batch_size)))
+            } else {
+                let bufs = TrtBuffers::new(&trt_ctx.engine, max_batch_size)
+                    .map_err(|e| NeuralNetError(format!("TensorRT buffers creation failed: {e}")))?;
+                (Some(bufs), None)
+            };
 
             Ok(Box::new(TensorRtComputeHandle {
                 ctx: trt_handle,
                 engine_info,
                 max_batch_size,
                 bufs: Mutex::new(bufs),
+                generic: trt_ctx.generic.clone(),
+                generic_bufs: Mutex::new(generic_bufs),
             }))
         }
 
@@ -343,6 +621,10 @@ mod imp {
                 )));
             }
 
+            // Generic directly-loaded .onnx path.
+            if h.generic.is_some() {
+                return generic_get_output(h, n, input_bufs, outputs);
+            }
             let info = h.engine_info;
             let nn_x_len = info.nn_x_len;
             let nn_y_len = info.nn_y_len;
@@ -353,6 +635,9 @@ mod imp {
             let _num_score_value_channels = info.num_score_value_channels;
 
             let lock = h.bufs.lock().unwrap();
+            let lock = lock
+                .as_ref()
+                .ok_or_else(|| NeuralNetError("name-based buffers not initialized".to_string()))?;
 
             // --- Fill input buffers -----------------------------------------------
             // TRT always uses NCHW layout.
@@ -595,6 +880,185 @@ mod imp {
 
             Ok(())
         }
+    }
+
+    /// Inference + decode for a directly loaded exported `.onnx` model
+    /// (v15 head layout: `out_policy[6,362]`, `out_value[3]`, `out_miscvalue[10]`,
+    /// `out_moremiscvalue[8]`, `out_ownership[1,19,19]`).
+    fn generic_get_output(
+        h: &TensorRtComputeHandle,
+        n: usize,
+        input_bufs: &mut [&mut NNResultBuf],
+        outputs: &mut [&mut NNOutput],
+    ) -> Result<(), NeuralNetError> {
+        let gio = h.generic.as_ref().expect("generic path requires GenericIo");
+        let nn_x_len = h.engine_info.nn_x_len;
+        let nn_y_len = h.engine_info.nn_y_len;
+
+        let idx_spatial = gio
+            .input_index("input_spatial")
+            .ok_or_else(|| NeuralNetError("missing input tensor 'input_spatial'".into()))?;
+        let idx_global = gio
+            .input_index("input_global")
+            .ok_or_else(|| NeuralNetError("missing input tensor 'input_global'".into()))?;
+        let idx_policy = gio
+            .output_index("out_policy")
+            .ok_or_else(|| NeuralNetError("missing output tensor 'out_policy'".into()))?;
+        let idx_value = gio
+            .output_index("out_value")
+            .ok_or_else(|| NeuralNetError("missing output tensor 'out_value'".into()))?;
+        let idx_misc = gio
+            .output_index("out_miscvalue")
+            .ok_or_else(|| NeuralNetError("missing output tensor 'out_miscvalue'".into()))?;
+        let idx_moremisc = gio
+            .output_index("out_moremiscvalue")
+            .ok_or_else(|| NeuralNetError("missing output tensor 'out_moremiscvalue'".into()))?;
+        let idx_ownership = gio
+            .output_index("out_ownership")
+            .ok_or_else(|| NeuralNetError("missing output tensor 'out_ownership'".into()))?;
+
+        let mut gb = h.generic_bufs.lock().unwrap();
+        let bufs = gb.as_mut().expect("generic buffers must be initialized");
+
+        let single_spatial = GenericIo::single_elts(&gio.input_dims[idx_spatial]);
+        let single_global = GenericIo::single_elts(&gio.input_dims[idx_global]);
+
+        // Fill inputs (NCHW spatial + global, with symmetry applied to spatial).
+        for i in 0..n {
+            let sym_idx = input_bufs[i].symmetry;
+            let sp_off = i * single_spatial;
+            copy_inputs_with_symmetry(
+                &input_bufs[i].row_spatial_buf,
+                &mut bufs.inputs[idx_spatial][sp_off..sp_off + single_spatial],
+                1,
+                nn_y_len,
+                nn_x_len,
+                h.engine_info.num_input_channels,
+                false, // NCHW
+                sym_idx,
+            );
+            let gl_off = i * single_global;
+            let gb_row = &input_bufs[i].row_global_buf;
+            let copy_len = single_global.min(gb_row.len());
+            bufs.inputs[idx_global][gl_off..gl_off + copy_len]
+                .copy_from_slice(&gb_row[..copy_len]);
+        }
+
+        // Infer.
+        let in_ptrs: Vec<*const f32> = bufs.inputs.iter().map(|v| v.as_ptr()).collect();
+        let out_ptrs: Vec<*mut f32> = bufs.outputs.iter_mut().map(|v| v.as_mut_ptr()).collect();
+        let ok = unsafe {
+            trt_ffi::katago_trt_infer_generic(
+                h.ctx.ptr,
+                n as i32,
+                in_ptrs.as_ptr(),
+                out_ptrs.as_ptr(),
+            )
+        };
+        if ok == 0 {
+            return Err(NeuralNetError(
+                trt_ffi::last_error().unwrap_or_else(|| "generic inference failed".into()),
+            ));
+        }
+
+        // Decode v15 outputs.
+        let policy_area = (nn_x_len * nn_y_len) as usize;
+        let single_policy = GenericIo::single_elts(&gio.output_dims[idx_policy]); // 6*362
+        let policy_channels = gio.output_dims[idx_policy].get(1).copied().unwrap_or(6) as usize;
+        let single_value = GenericIo::single_elts(&gio.output_dims[idx_value]);
+        let single_misc = GenericIo::single_elts(&gio.output_dims[idx_misc]);
+        let single_moremisc = GenericIo::single_elts(&gio.output_dims[idx_moremisc]);
+        let single_ownership = GenericIo::single_elts(&gio.output_dims[idx_ownership]);
+
+        let mut tmp_policy_base = vec![0.0f32; policy_area];
+        let mut tmp_policy_opt = vec![0.0f32; policy_area];
+        let mut tmp_ownership = vec![0.0f32; single_ownership];
+
+        for i in 0..n {
+            let sym_idx = input_bufs[i].symmetry;
+            let inv_sym = if sym_idx != 0 { invert(sym_idx) } else { 0 };
+
+            // --- Policy ----------------------------------------------------
+            let p_off = i * single_policy;
+            let base_src = &bufs.outputs[idx_policy][p_off..p_off + policy_area];
+            // Short-term-optimistic logits are channel 5 of the exported head.
+            let opt_ch = 5usize.min(policy_channels.saturating_sub(1));
+            let opt_src = &bufs.outputs[idx_policy]
+                [p_off + opt_ch * policy_area..p_off + (opt_ch + 1) * policy_area];
+            if inv_sym != 0 {
+                copy_outputs_with_symmetry(
+                    base_src,
+                    &mut tmp_policy_base,
+                    1,
+                    nn_y_len,
+                    nn_x_len,
+                    inv_sym,
+                );
+                copy_outputs_with_symmetry(
+                    opt_src,
+                    &mut tmp_policy_opt,
+                    1,
+                    nn_y_len,
+                    nn_x_len,
+                    inv_sym,
+                );
+            } else {
+                tmp_policy_base.copy_from_slice(base_src);
+                tmp_policy_opt.copy_from_slice(opt_src);
+            }
+            let optimism = input_bufs[i].policy_optimism as f32;
+            for pos in 0..policy_area {
+                let base = tmp_policy_base[pos];
+                let opt = tmp_policy_opt[pos];
+                outputs[i].policy_probs[pos] = base + (opt - base) * optimism;
+            }
+            // Pass logit is at index policy_area within each channel.
+            let base_pass = bufs.outputs[idx_policy][p_off + policy_area];
+            let opt_pass = bufs.outputs[idx_policy][p_off + opt_ch * policy_area + policy_area];
+            outputs[i].policy_probs[policy_area] = base_pass + (opt_pass - base_pass) * optimism;
+
+            // --- Value -----------------------------------------------------
+            let v_off = i * single_value;
+            outputs[i].white_win_prob = bufs.outputs[idx_value][v_off];
+            outputs[i].white_loss_prob = bufs.outputs[idx_value][v_off + 1];
+            outputs[i].white_no_result_prob = bufs.outputs[idx_value][v_off + 2];
+
+            // --- Score value -------------------------------------------------
+            let m_off = i * single_misc;
+            outputs[i].white_score_mean = bufs.outputs[idx_misc][m_off];
+            outputs[i].white_score_mean_sq = bufs.outputs[idx_misc][m_off + 1];
+            outputs[i].white_lead = bufs.outputs[idx_misc][m_off + 2];
+            outputs[i].var_time_left = bufs.outputs[idx_misc][m_off + 3];
+            let mm_off = i * single_moremisc;
+            outputs[i].shortterm_winloss_error = bufs.outputs[idx_moremisc][mm_off];
+            outputs[i].shortterm_score_error = bufs.outputs[idx_moremisc][mm_off + 1];
+
+            // --- Ownership ---------------------------------------------------
+            if input_bufs[i].include_owner_map {
+                let o_off = i * single_ownership;
+                let src = &bufs.outputs[idx_ownership][o_off..o_off + single_ownership];
+                if inv_sym != 0 {
+                    copy_outputs_with_symmetry(
+                        src,
+                        &mut tmp_ownership,
+                        1,
+                        nn_y_len,
+                        nn_x_len,
+                        inv_sym,
+                    );
+                } else {
+                    tmp_ownership.copy_from_slice(src);
+                }
+                outputs[i].white_owner_map = Some(tmp_ownership.clone().into_boxed_slice());
+            }
+
+            outputs[i].nn_x_len = nn_x_len;
+            outputs[i].nn_y_len = nn_y_len;
+            outputs[i].policy_optimism_used = input_bufs[i].policy_optimism as f32;
+            input_bufs[i].has_result = true;
+        }
+
+        Ok(())
     }
 }
 

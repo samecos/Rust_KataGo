@@ -3,14 +3,9 @@
 
 use crate::activations::{ACTIVATION_IDENTITY, ACTIVATION_SILU};
 use crate::desc::{ConvLayerDesc, MatBiasLayerDesc, MatMulLayerDesc, ModelDesc, ResidualBlockDesc};
+use crate::onnx_proto::*;
 use kata_core::logger::Logger;
 use prost::Message;
-
-#[allow(clippy::all, clippy::field_reassign_with_default)]
-mod onnx_proto {
-    include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
-}
-use onnx_proto::*;
 
 pub struct OnnxBuildResult {
     pub serialized_model: Vec<u8>,

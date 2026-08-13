@@ -49,6 +49,28 @@ pub struct KatagoTrtEngineInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Generic engine info
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct KatagoTrtTensorInfo {
+    pub name: [c_char; 128],
+    pub dims: [i64; 8],
+    pub nb_dims: c_int,
+}
+
+impl Default for KatagoTrtTensorInfo {
+    fn default() -> Self {
+        Self {
+            name: [0; 128],
+            dims: [0; 8],
+            nb_dims: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FFI declarations
 // ---------------------------------------------------------------------------
 
@@ -85,6 +107,10 @@ unsafe extern "C" {
     ) -> c_int;
 
     pub fn katago_trt_engine_deserialize_from_file(
+        file_path: *const c_char,
+    ) -> *mut KatagoTrtEngine;
+
+    pub fn katago_trt_engine_deserialize_generic(
         file_path: *const c_char,
     ) -> *mut KatagoTrtEngine;
 
@@ -136,6 +162,36 @@ unsafe extern "C" {
         ctx: *mut KatagoTrtContext,
         bufs: *mut KatagoTrtBuffers,
         batch_size: c_int,
+    ) -> c_int;
+
+    // Generic ONNX engine + inference.
+    pub fn katago_trt_engine_create_generic(
+        onnx_data: *const c_uchar,
+        onnx_size: usize,
+        max_batch_size: c_int,
+        use_fp16: c_int,
+    ) -> *mut KatagoTrtEngine;
+
+    pub fn katago_trt_engine_num_inputs(engine: *const KatagoTrtEngine) -> c_int;
+    pub fn katago_trt_engine_num_outputs(engine: *const KatagoTrtEngine) -> c_int;
+
+    pub fn katago_trt_engine_input_info(
+        engine: *const KatagoTrtEngine,
+        idx: c_int,
+        out: *mut KatagoTrtTensorInfo,
+    ) -> c_int;
+
+    pub fn katago_trt_engine_output_info(
+        engine: *const KatagoTrtEngine,
+        idx: c_int,
+        out: *mut KatagoTrtTensorInfo,
+    ) -> c_int;
+
+    pub fn katago_trt_infer_generic(
+        ctx: *mut KatagoTrtContext,
+        batch_size: c_int,
+        input_ptrs: *const *const c_float,
+        output_ptrs: *const *mut c_float,
     ) -> c_int;
 }
 

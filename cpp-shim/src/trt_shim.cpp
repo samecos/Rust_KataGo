@@ -93,6 +93,13 @@ struct KatagoTrtEngine {
     std::unique_ptr<nvinfer1::IRuntime> runtime;
     std::unique_ptr<nvinfer1::ICudaEngine> engine;
 
+    // Generic-engine I/O snapshots (creation order), filled by
+    // katago_trt_engine_create_generic. Empty for the name-based engines.
+    std::vector<std::string> generic_input_names;
+    std::vector<std::string> generic_output_names;
+    std::vector<std::vector<int64_t>> generic_input_dims;
+    std::vector<std::vector<int64_t>> generic_output_dims;
+
     ~KatagoTrtEngine() { /* runtime & engine auto-destroy */ }
 };
 
@@ -746,4 +753,369 @@ cleanup: {
 #undef CUDA_FREE
 
     return tls_last_error.empty() ? 1 : 0;
+}
+
+// ==========================================================================
+// Generic ONNX engine + inference (name-agnostic)
+// ==========================================================================
+
+KatagoTrtEngine* katago_trt_engine_deserialize_generic(const char* file_path) {
+    clear_error();
+    auto data = read_binary_file(file_path);
+    if (data.empty()) {
+        set_error(std::string("Failed to read plan file: ") + file_path);
+        return nullptr;
+    }
+    auto runtime = std::unique_ptr<nvinfer1::IRuntime>(
+        nvinfer1::createInferRuntime(g_trt_logger));
+    if (!runtime) {
+        set_error("createInferRuntime failed");
+        return nullptr;
+    }
+    auto engine = std::unique_ptr<nvinfer1::ICudaEngine>(
+        runtime->deserializeCudaEngine(data.data(), data.size()));
+    if (!engine) {
+        set_error("deserializeCudaEngine (generic) failed");
+        return nullptr;
+    }
+
+    auto ret = std::unique_ptr<KatagoTrtEngine>(new KatagoTrtEngine());
+    for (int i = 0; i < engine->getNbIOTensors(); ++i) {
+        auto name = engine->getIOTensorName(i);
+        if (!name) continue;
+        auto mode = engine->getTensorIOMode(name);
+        auto dims = engine->getTensorShape(name);
+        std::vector<int64_t> d(dims.d, dims.d + dims.nbDims);
+        if (mode == nvinfer1::TensorIOMode::kINPUT) {
+            ret->generic_input_names.emplace_back(name);
+            ret->generic_input_dims.push_back(std::move(d));
+        } else {
+            ret->generic_output_names.emplace_back(name);
+            ret->generic_output_dims.push_back(std::move(d));
+        }
+    }
+    ret->runtime = std::move(runtime);
+    ret->engine = std::move(engine);
+    clear_error();
+    return ret.release();
+}
+
+KatagoTrtEngine* katago_trt_engine_create_generic(
+    const uint8_t* onnx_data, size_t onnx_size,
+    int max_batch_size, int use_fp16) {
+    clear_error();
+
+    if (!onnx_data || onnx_size == 0) {
+        set_error("ONNX data is null or empty");
+        return nullptr;
+    }
+    if (max_batch_size <= 0) {
+        set_error("max_batch_size must be positive");
+        return nullptr;
+    }
+
+    const auto builder = std::unique_ptr<nvinfer1::IBuilder>(
+        nvinfer1::createInferBuilder(g_trt_logger));
+    if (!builder) {
+        set_error("createInferBuilder failed");
+        return nullptr;
+    }
+
+    const auto networkFlags =
+        1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+    const auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(
+        builder->createNetworkV2(networkFlags));
+    if (!network) {
+        set_error("createNetworkV2 failed");
+        return nullptr;
+    }
+
+    const auto parser = std::unique_ptr<nvonnxparser::IParser>(
+        nvonnxparser::createParser(*network, g_trt_logger));
+    if (!parser) {
+        set_error("createParser (nvonnxparser) failed");
+        return nullptr;
+    }
+
+    if (!parser->parse(onnx_data, onnx_size)) {
+        std::ostringstream oss;
+        oss << "ONNX parsing failed";
+        for (int i = 0; i < parser->getNbErrors(); ++i) {
+            oss << "\n  " << parser->getError(i)->desc();
+        }
+        set_error(oss.str());
+        return nullptr;
+    }
+
+    // Snapshot I/O names and dims in creation order.
+    std::vector<std::string> input_names, output_names;
+    std::vector<std::vector<int64_t>> input_dims, output_dims;
+    for (int i = 0; i < network->getNbInputs(); ++i) {
+        const auto* t = network->getInput(i);
+        auto d = t->getDimensions();
+        input_names.emplace_back(t->getName());
+        input_dims.emplace_back(d.d, d.d + d.nbDims);
+    }
+    for (int i = 0; i < network->getNbOutputs(); ++i) {
+        const auto* t = network->getOutput(i);
+        auto d = t->getDimensions();
+        output_names.emplace_back(t->getName());
+        output_dims.emplace_back(d.d, d.d + d.nbDims);
+    }
+
+    const auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(
+        builder->createBuilderConfig());
+    if (!config) {
+        set_error("createBuilderConfig failed");
+        return nullptr;
+    }
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 2ULL << 30);
+    if (use_fp16) {
+        if (!builder->platformHasFastFp16()) {
+            set_error("FP16 requested but not supported on this platform");
+            return nullptr;
+        }
+        config->setFlag(nvinfer1::BuilderFlag::kFP16);
+    }
+
+    // Dynamic-batch optimization profile over all inputs.
+    const auto profile = builder->createOptimizationProfile();
+    for (int i = 0; i < network->getNbInputs(); ++i) {
+        const auto* t = network->getInput(i);
+        auto dims = t->getDimensions();
+        if (dims.nbDims < 1) {
+            set_error("input tensor has no batch dimension");
+            return nullptr;
+        }
+        dims.d[0] = -1;
+        network->getInput(i)->setDimensions(dims);
+        auto minDims = dims, optDims = dims, maxDims = dims;
+        minDims.d[0] = 1;
+        optDims.d[0] = std::max(1, max_batch_size / 2);
+        maxDims.d[0] = max_batch_size;
+        profile->setDimensions(t->getName(),
+                               nvinfer1::OptProfileSelector::kMIN, minDims);
+        profile->setDimensions(t->getName(),
+                               nvinfer1::OptProfileSelector::kOPT, optDims);
+        profile->setDimensions(t->getName(),
+                               nvinfer1::OptProfileSelector::kMAX, maxDims);
+    }
+    config->addOptimizationProfile(profile);
+
+    auto serialized = std::unique_ptr<nvinfer1::IHostMemory>(
+        builder->buildSerializedNetwork(*network, *config));
+    if (!serialized) {
+        set_error("buildSerializedNetwork failed");
+        return nullptr;
+    }
+
+    auto runtime = std::unique_ptr<nvinfer1::IRuntime>(
+        nvinfer1::createInferRuntime(g_trt_logger));
+    if (!runtime) {
+        set_error("createInferRuntime failed");
+        return nullptr;
+    }
+
+    auto engine = std::unique_ptr<nvinfer1::ICudaEngine>(
+        runtime->deserializeCudaEngine(serialized->data(), serialized->size()));
+    if (!engine) {
+        set_error("deserializeCudaEngine failed");
+        return nullptr;
+    }
+
+    auto ret = std::unique_ptr<KatagoTrtEngine>(new KatagoTrtEngine());
+    ret->info.max_batch_size = max_batch_size;
+    ret->generic_input_names = std::move(input_names);
+    ret->generic_output_names = std::move(output_names);
+    ret->generic_input_dims = std::move(input_dims);
+    ret->generic_output_dims = std::move(output_dims);
+    ret->runtime = std::move(runtime);
+    ret->engine = std::move(engine);
+
+    clear_error();
+    return ret.release();
+}
+
+int katago_trt_engine_num_inputs(const KatagoTrtEngine* engine) {
+    return engine ? static_cast<int>(engine->generic_input_names.size()) : 0;
+}
+
+int katago_trt_engine_num_outputs(const KatagoTrtEngine* engine) {
+    return engine ? static_cast<int>(engine->generic_output_names.size()) : 0;
+}
+
+static int fill_tensor_info(const std::string& name,
+                            const std::vector<int64_t>& dims,
+                            KatagoTrtTensorInfo* out) {
+    if (!out) return 0;
+    size_t n = name.copy(out->name, sizeof(out->name) - 1);
+    out->name[n] = '\0';
+    out->nb_dims = static_cast<int>(dims.size());
+    if (out->nb_dims > 8) out->nb_dims = 8;
+    for (int i = 0; i < out->nb_dims; ++i) out->dims[i] = dims[i];
+    return 1;
+}
+
+int katago_trt_engine_input_info(const KatagoTrtEngine* engine, int idx,
+                                 KatagoTrtTensorInfo* out) {
+    if (!engine || idx < 0 || idx >= static_cast<int>(engine->generic_input_names.size()))
+        return 0;
+    return fill_tensor_info(engine->generic_input_names[idx],
+                            engine->generic_input_dims[idx], out);
+}
+
+int katago_trt_engine_output_info(const KatagoTrtEngine* engine, int idx,
+                                  KatagoTrtTensorInfo* out) {
+    if (!engine || idx < 0 || idx >= static_cast<int>(engine->generic_output_names.size()))
+        return 0;
+    return fill_tensor_info(engine->generic_output_names[idx],
+                            engine->generic_output_dims[idx], out);
+}
+
+int katago_trt_infer_generic(KatagoTrtContext* ctx, int batch_size,
+                             const float* const* input_ptrs,
+                             float* const* output_ptrs) {
+    clear_error();
+    if (!ctx || !ctx->exec) {
+        set_error("Invalid context");
+        return 0;
+    }
+    if (batch_size <= 0) {
+        set_error("batch_size must be positive");
+        return 0;
+    }
+
+    const auto& in_names = ctx->engine->generic_input_names;
+    const auto& out_names = ctx->engine->generic_output_names;
+    const auto& in_dims = ctx->engine->generic_input_dims;
+    const auto& out_dims = ctx->engine->generic_output_dims;
+    if (in_names.empty()) {
+        set_error("Not a generic engine");
+        return 0;
+    }
+
+    cudaError_t cu_err = cudaSetDevice(ctx->gpu_idx);
+    if (cu_err != cudaSuccess) {
+        set_error(std::string("cudaSetDevice failed: ") + cudaGetErrorString(cu_err));
+        return 0;
+    }
+
+    cudaStream_t stream = nullptr;
+    cu_err = cudaStreamCreate(&stream);
+    if (cu_err != cudaSuccess) {
+        set_error(std::string("cudaStreamCreate failed: ") + cudaGetErrorString(cu_err));
+        return 0;
+    }
+
+    auto prod_after_batch = [](const std::vector<int64_t>& dims) -> int64_t {
+        int64_t n = 1;
+        for (size_t i = 1; i < dims.size(); ++i) {
+            if (dims[i] >= 0) n *= dims[i];
+        }
+        return n;
+    };
+
+    std::vector<void*> d_inputs(in_names.size(), nullptr);
+    std::vector<void*> d_outputs(out_names.size(), nullptr);
+    std::vector<int64_t> in_elts(in_names.size(), 0);
+    std::vector<int64_t> out_elts(out_names.size(), 0);
+    bool ok = true;
+
+    for (size_t i = 0; i < in_names.size(); ++i) {
+        int64_t elts = batch_size * prod_after_batch(in_dims[i]);
+        in_elts[i] = elts;
+        if (!input_ptrs || !input_ptrs[i]) {
+            set_error("null input buffer");
+            ok = false;
+            break;
+        }
+        cu_err = cudaMalloc(&d_inputs[i], static_cast<size_t>(elts) * sizeof(float));
+        if (cu_err != cudaSuccess) {
+            set_error(std::string("cudaMalloc failed: ") + cudaGetErrorString(cu_err));
+            ok = false;
+            break;
+        }
+        cu_err = cudaMemcpyAsync(d_inputs[i], input_ptrs[i],
+                                 static_cast<size_t>(elts) * sizeof(float),
+                                 cudaMemcpyHostToDevice, stream);
+        if (cu_err != cudaSuccess) {
+            set_error(std::string("cudaMemcpyAsync H2D failed: ") + cudaGetErrorString(cu_err));
+            ok = false;
+            break;
+        }
+    }
+    for (size_t i = 0; ok && i < out_names.size(); ++i) {
+        int64_t elts = batch_size * prod_after_batch(out_dims[i]);
+        out_elts[i] = elts;
+        if (!output_ptrs || !output_ptrs[i]) {
+            set_error("null output buffer");
+            ok = false;
+            break;
+        }
+        cu_err = cudaMalloc(&d_outputs[i], static_cast<size_t>(elts) * sizeof(float));
+        if (cu_err != cudaSuccess) {
+            set_error(std::string("cudaMalloc failed: ") + cudaGetErrorString(cu_err));
+            ok = false;
+            break;
+        }
+    }
+
+    if (ok) {
+        for (size_t i = 0; i < in_names.size(); ++i) {
+            nvinfer1::Dims dims;
+            dims.nbDims = static_cast<int>(in_dims[i].size());
+            for (int d = 0; d < dims.nbDims; ++d) dims.d[d] = in_dims[i][d];
+            dims.d[0] = batch_size;
+            if (!ctx->exec->setInputShape(in_names[i].c_str(), dims)) {
+                set_error(std::string("setInputShape failed for ") + in_names[i]);
+                ok = false;
+                break;
+            }
+            if (!ctx->exec->setTensorAddress(in_names[i].c_str(), d_inputs[i])) {
+                set_error(std::string("setTensorAddress failed for ") + in_names[i]);
+                ok = false;
+                break;
+            }
+        }
+    }
+    if (ok) {
+        for (size_t i = 0; i < out_names.size(); ++i) {
+            if (!ctx->exec->setTensorAddress(out_names[i].c_str(), d_outputs[i])) {
+                set_error(std::string("setTensorAddress failed for ") + out_names[i]);
+                ok = false;
+                break;
+            }
+        }
+    }
+    if (ok) {
+        if (!ctx->exec->enqueueV3(stream)) {
+            set_error("enqueueV3 failed");
+            ok = false;
+        }
+    }
+    if (ok) {
+        cu_err = cudaStreamSynchronize(stream);
+        if (cu_err != cudaSuccess) {
+            set_error(std::string("cudaStreamSynchronize failed: ") + cudaGetErrorString(cu_err));
+            ok = false;
+        }
+    }
+    if (ok) {
+        for (size_t i = 0; i < out_names.size(); ++i) {
+            cu_err = cudaMemcpy(output_ptrs[i], d_outputs[i],
+                                static_cast<size_t>(out_elts[i]) * sizeof(float),
+                                cudaMemcpyDeviceToHost);
+            if (cu_err != cudaSuccess) {
+                set_error(std::string("cudaMemcpy D2H failed: ") + cudaGetErrorString(cu_err));
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    for (void* p : d_inputs) if (p) cudaFree(p);
+    for (void* p : d_outputs) if (p) cudaFree(p);
+    cudaStreamDestroy(stream);
+
+    return ok ? 1 : 0;
 }

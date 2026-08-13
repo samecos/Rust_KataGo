@@ -80,6 +80,11 @@ int katago_trt_engine_serialize_to_file(const KatagoTrtEngine* engine,
 // Create an engine from a previously serialized plan file.
 KatagoTrtEngine* katago_trt_engine_deserialize_from_file(const char* file_path);
 
+// Deserialize a generic engine from a plan file, re-enumerating its I/O
+// tensors from the engine itself (so the generic inference API works without
+// the original ONNX model present).
+KatagoTrtEngine* katago_trt_engine_deserialize_generic(const char* file_path);
+
 // ---------------------------------------------------------------------------
 // Execution context (per thread)
 // ---------------------------------------------------------------------------
@@ -151,6 +156,46 @@ int katago_trt_buffers_single_ownership_elts(const KatagoTrtBuffers* bufs);
 // Returns 1 on success, 0 on failure.
 int katago_trt_infer(KatagoTrtContext* ctx, KatagoTrtBuffers* bufs,
                      int batch_size);
+
+// ---------------------------------------------------------------------------
+// Generic ONNX engine + inference (name-agnostic, for directly loading
+// exported KataGo .onnx models such as b11fix.onnx)
+// ---------------------------------------------------------------------------
+
+// Describes a single I/O tensor of a generic engine.
+typedef struct {
+    char name[128];
+    int64_t dims[8];
+    int nb_dims;
+} KatagoTrtTensorInfo;
+
+// Create an engine from serialized ONNX model data without assuming any
+// specific tensor names. All inputs are treated as having a dynamic batch
+// (first) dimension, with an optimization profile over [1 .. max_batch_size].
+KatagoTrtEngine* katago_trt_engine_create_generic(
+    const uint8_t* onnx_data, size_t onnx_size,
+    int max_batch_size, int use_fp16);
+
+// Number of input / output tensors of a generic engine.
+int katago_trt_engine_num_inputs(const KatagoTrtEngine* engine);
+int katago_trt_engine_num_outputs(const KatagoTrtEngine* engine);
+
+// Query input/output tensor info by creation-order index.
+// Returns 1 on success, 0 on failure.
+int katago_trt_engine_input_info(const KatagoTrtEngine* engine, int idx,
+                                 KatagoTrtTensorInfo* out);
+int katago_trt_engine_output_info(const KatagoTrtEngine* engine, int idx,
+                                  KatagoTrtTensorInfo* out);
+
+// Run batched inference with host-staging buffers supplied by the caller.
+// input_ptrs[i] / output_ptrs[i] are flat float arrays in creation-order
+// index, each sized batch_size * prod(dims[1..]) elements. The shim copies
+// inputs to device, enqueues on a private stream, synchronizes, and copies
+// outputs back.
+// Returns 1 on success, 0 on failure.
+int katago_trt_infer_generic(KatagoTrtContext* ctx, int batch_size,
+                             const float* const* input_ptrs,
+                             float* const* output_ptrs);
 
 #ifdef __cplusplus
 }

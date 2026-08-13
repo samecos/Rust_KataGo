@@ -9,6 +9,13 @@ pub mod eval;
 pub mod inputs;
 pub mod model_parser;
 pub mod onnx_builder;
+pub mod onnx_model;
 pub mod score_value;
 pub mod sgf_meta;
 pub mod version;
+
+/// Prost-generated ONNX protobuf types (from the vendored `onnx.proto`).
+#[allow(clippy::all)]
+pub(crate) mod onnx_proto {
+    include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
+}
