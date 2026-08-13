@@ -1047,16 +1047,25 @@ fn run_request_loop<R: BufRead>(
                     }
                     push_write(input_json.to_string());
                 }
+                // "analyze" is not a special action: it falls through to the
+                // same query parsing as a request with no "action" field at
+                // all. (C++ has no such branch either — requests without an
+                // action are analyze queries, analysis.cpp:507-614.)
+                "analyze" => {}
                 _ => {
                     report_error(
                         to_write_queue,
                         logger,
                         log_errors_and_warnings,
-                        "'action' field must be 'query_version' or 'query_models' or 'clear_cache' or 'terminate' or 'terminate_all'",
+                        "'action' field must be 'query_version' or 'query_models' or 'clear_cache' or 'terminate' or 'terminate_all' or 'analyze'",
                     );
                 }
             }
-            continue;
+            // Every special action is fully handled above; "analyze" alone
+            // continues into the query parsing below.
+            if action.as_str() != "analyze" {
+                continue;
+            }
         }
 
         // Parse a query.
@@ -2375,5 +2384,94 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let v: Value = serde_json::from_str(&lines[0]).unwrap();
         assert!(v.get("error").is_some());
+    }
+
+    #[test]
+    fn test_analysis_analyze_action() {
+        // An explicit "action":"analyze" request must be accepted and treated
+        // exactly like a query without an action field: one result line per
+        // requested turn, each carrying id/turnNumber/isDuringSearch.
+        let input = r#"{"id":"a","action":"analyze","boardXSize":9,"boardYSize":9,"rules":"tromp-taylor","moves":[["b","d4"],["w","e4"]],"analyzeTurns":[0,1,2],"maxVisits":5}"#;
+        let lines = analysis_impl(&[], input.as_bytes()).unwrap();
+        let results: Vec<Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|v| {
+                v.get("id").and_then(|x| x.as_str()) == Some("a")
+                    && v.get("warning").is_none()
+                    && v.get("moveInfos").is_some()
+            })
+            .collect();
+        assert_eq!(results.len(), 3, "one result per analyzed turn");
+        let mut turn_numbers: Vec<i64> = results
+            .iter()
+            .map(|v| v.get("turnNumber").unwrap().as_i64().unwrap())
+            .collect();
+        turn_numbers.sort();
+        assert_eq!(turn_numbers, vec![0, 1, 2]);
+        for v in &results {
+            assert!(
+                v.get("moveInfos").is_some(),
+                "expected real analysis in result: {}",
+                v
+            );
+            assert_eq!(v.get("isDuringSearch"), Some(&Value::Bool(false)));
+        }
+    }
+
+    #[test]
+    fn test_analysis_analyze_action_sequence() {
+        // query_version + analyze + terminate: version line, an analyze result
+        // line (real analysis or noResults if terminated early), and the
+        // terminate echo.
+        let input = r#"{"id":"v","action":"query_version"}
+{"id":"a","action":"analyze","boardXSize":9,"boardYSize":9,"rules":"tromp-taylor","moves":[["b","d4"]],"maxVisits":3}
+{"id":"t","action":"terminate","terminateId":"a"}"#;
+        let lines = analysis_impl(&[], input.as_bytes()).unwrap();
+        let values: Vec<Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .collect();
+        assert!(
+            values.iter().any(|v| v.get("version").is_some()),
+            "query_version response"
+        );
+        assert!(
+            values.iter().any(|v| {
+                v.get("id").and_then(|x| x.as_str()) == Some("a")
+                    && (v.get("moveInfos").is_some() || v.get("noResults").is_some())
+                    && v.get("isDuringSearch") == Some(&Value::Bool(false))
+            }),
+            "analyze final result line"
+        );
+        assert!(
+            values.iter().any(|v| {
+                v.get("id").and_then(|x| x.as_str()) == Some("t")
+                    && v.get("action").and_then(|x| x.as_str()) == Some("terminate")
+            }),
+            "terminate echo"
+        );
+    }
+
+    #[test]
+    fn test_analysis_analyze_action_errors() {
+        // Missing "moves" and an unparseable move coordinate must both produce
+        // per-id error lines, not a crash.
+        let input = r#"{"id":"e1","action":"analyze","boardXSize":9,"boardYSize":9,"rules":"tromp-taylor"}
+{"id":"e2","action":"analyze","boardXSize":9,"boardYSize":9,"rules":"tromp-taylor","moves":[["b","z99"]]}"#;
+        let lines = analysis_impl(&[], input.as_bytes()).unwrap();
+        let values: Vec<Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .collect();
+        assert_eq!(values.len(), 2);
+        let e1 = &values[0];
+        assert_eq!(e1.get("id").unwrap().as_str().unwrap(), "e1");
+        assert_eq!(e1.get("field").unwrap().as_str().unwrap(), "moves");
+        assert!(e1.get("error").is_some());
+        let e2 = &values[1];
+        assert_eq!(e2.get("id").unwrap().as_str().unwrap(), "e2");
+        assert_eq!(e2.get("field").unwrap().as_str().unwrap(), "moves");
+        assert!(e2.get("error").is_some());
     }
 }
