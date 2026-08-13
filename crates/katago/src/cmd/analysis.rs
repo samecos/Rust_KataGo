@@ -1980,19 +1980,21 @@ fn run_request_loop<R: BufRead>(
                 );
                 continue;
             };
-            if has_allow_moves && avoid_params_list.len() > 1 {
+            if has_allow_moves && avoid_params_list.len() > 2 {
                 report_error_for_id(
                     to_write_queue,
                     logger,
                     log_errors_and_warnings,
                     &rbase.id,
                     field,
-                    "Currently allowMoves only allows one entry",
+                    "Currently allowMoves only allows at most one entry per player",
                 );
                 continue;
             }
 
             let mut failed = false;
+            let mut got_allow_moves_black = false;
+            let mut got_allow_moves_white = false;
             for avoid_params in avoid_params_list {
                 let Value::Object(params_obj) = avoid_params else {
                     report_error_for_id(
@@ -2042,6 +2044,29 @@ fn run_request_loop<R: BufRead>(
                 ) {
                     failed = true;
                     break;
+                }
+                // For allowMoves, at most one entry per player is permitted. Two entries for the same player would be
+                // ambiguous/incorrect since the fill below for the second entry would wipe out the first entry's allowed locs.
+                // Two entries for different players are fine since they write to separate per-player vectors.
+                if has_allow_moves {
+                    let got_allow_moves = if avoid_pla == P_BLACK {
+                        &mut got_allow_moves_black
+                    } else {
+                        &mut got_allow_moves_white
+                    };
+                    if *got_allow_moves {
+                        report_error_for_id(
+                            to_write_queue,
+                            logger,
+                            log_errors_and_warnings,
+                            &rbase.id,
+                            field,
+                            "Cannot specify allowMoves more than once for the same player",
+                        );
+                        failed = true;
+                        break;
+                    }
+                    *got_allow_moves = true;
                 }
                 let avoid_move_until_by_loc = if avoid_pla == P_BLACK {
                     &mut rbase.avoid_move_until_by_loc_black
