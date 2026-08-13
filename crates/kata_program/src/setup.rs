@@ -1846,6 +1846,11 @@ pub fn initialize_nn_evaluators(
             inputs_use_nhwc = cfg.get_bool("inputsUseNHWC").map_err(to_string_error)?;
         }
 
+        // TensorRT 后端使用 NCHW 布局（与 C++ setup 一致：TRT 强制 NCHW）。
+        if backend_prefix == "trtbackend" {
+            inputs_use_nhwc = false;
+        }
+
         let nn_randomize = if setup_for == SetupFor::Distributed {
             true
         } else if cfg.contains("nnRandomize") {

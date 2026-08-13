@@ -323,37 +323,34 @@ fn broadcast_shape(a: &[SymDim], b: &[SymDim]) -> Result<Vec<SymDim>, String> {
 }
 
 /// 从节点输入名 + 常量表取形状。
-fn input_shapes<'a>(
+fn input_shapes(
     names: &[String],
-    shapes: &'a HashMap<String, Vec<SymDim>>,
-) -> Result<Vec<&'a [SymDim]>, String> {
+    shapes: &HashMap<String, Vec<SymDim>>,
+) -> Result<Vec<Vec<SymDim>>, String> {
     names
         .iter()
         .map(|n| {
             shapes
                 .get(n)
-                .map(|v| v.as_slice())
+                .cloned()
                 .ok_or_else(|| format!("缺少输入 '{n}' 的形状（图未按拓扑序？）"))
         })
         .collect()
 }
 
 /// 需要读取 axes 输入（INT64 常量）的归约类算子的输出形状。
+/// `input_axes` 优先（opset 18 的 axes 输入），否则看 `axes` 属性。
 fn reduce_shape(
     input: &[SymDim],
-    axes: &[i64],
     keepdims: bool,
     attrs: &NodeAttrs,
-    axes_attr: Option<&str>,
     input_axes: Option<&[i64]>,
 ) -> Result<Vec<SymDim>, String> {
     let rank = input.len();
     let axes: Vec<usize> = if let Some(ia) = input_axes {
         ia.iter().map(|&a| normalize_axis(a, rank)).collect::<Result<_, _>>()?
-    } else if let Some(av) = axes_attr.and_then(|n| attrs.ints_of(n)) {
+    } else if let Some(av) = attrs.ints_of("axes") {
         av.iter().map(|&a| normalize_axis(a, rank)).collect::<Result<_, _>>()?
-    } else if !axes.is_empty() {
-        axes.iter().map(|&a| normalize_axis(a, rank)).collect::<Result<_, _>>()?
     } else {
         (0..rank).collect()
     };
@@ -398,7 +395,7 @@ pub fn shape_fn(
     op: &str,
     attrs: &NodeAttrs,
     input_names: &[String],
-    shapes: &[&[SymDim]],
+    shapes: &[Vec<SymDim>],
     constants: &HashMap<String, Tensor>,
 ) -> Result<Vec<Vec<SymDim>>, String> {
     let one = |s: Vec<SymDim>| Ok(vec![s]);
@@ -480,7 +477,7 @@ pub fn shape_fn(
             } else {
                 None
             };
-            one(reduce_shape(shapes[0], &[], keepdims, attrs, Some("axes"), axes_input.as_deref())?)
+            one(reduce_shape(shapes[0], keepdims, attrs, axes_input.as_deref())?)
         }
         "Reshape" => {
             if shapes.len() != 2 {
@@ -491,46 +488,78 @@ pub fn shape_fn(
                 .ok_or_else(|| format!("Reshape 的 shape 输入 '{}' 必须是常量", input_names[1]))?;
             let target: Vec<i64> = shape_t.i64_data().to_vec();
             let total = linear_product(shapes[0])?;
-            // 解析 -1（infer 或 batch）
-            let mut known: Vec<SymDim> = Vec::with_capacity(target.len());
-            let mut has_infer = false;
-            for &d in &target {
-                if d == -1 {
-                    if has_infer {
-                        return Err("Reshape 目标里 -1 最多出现一次".to_string());
-                    }
-                    has_infer = true;
-                    known.push(SymDim::k(1)); // 占位，稍后回填
-                } else if d >= 0 {
-                    known.push(SymDim::k(d));
-                } else {
-                    return Err(format!("Reshape 目标含非法维 {d}"));
-                }
-            }
-            let (ke, kc) = linear_product(&known)?;
-            if !has_infer {
+            let n_infer = target.iter().filter(|&&d| d == -1).count();
+            if n_infer == 0 {
+                let dims: Vec<SymDim> = target.iter().map(|&d| SymDim::k(d)).collect();
+                let (ke, kc) = linear_product(&dims)?;
                 if ke != total.0 || kc != total.1 {
                     return Err(format!(
                         "Reshape 元素数不匹配: {:?} -> {:?}",
                         shapes[0], target
                     ));
                 }
-                return one(known);
+                return one(dims);
             }
-            if kc == 0 || total.1 % kc != 0 || total.0 < ke {
-                return Err(format!(
-                    "Reshape 无法推断 -1 维: {:?} -> {:?}",
-                    shapes[0], target
-                ));
-            }
-            let infer = SymDim { b: total.0 - ke, c: total.1 / kc };
-            for k in known.iter_mut() {
-                if *k == SymDim::k(1) && has_infer {
-                    *k = infer;
-                    has_infer = false;
+            // 单个 -1：按 ONNX 语义推断（导出图里 batch 符号也写作 -1，
+            // 推断结果恰好就是 batch）。
+            if n_infer == 1 {
+                let known: Vec<SymDim> = target
+                    .iter()
+                    .filter(|&&d| d != -1)
+                    .map(|&d| SymDim::k(d))
+                    .collect();
+                let (ke, kc) = linear_product(&known)?;
+                if kc == 0 || total.1 % kc != 0 || total.0 < ke {
+                    return Err(format!(
+                        "Reshape 无法推断 -1 维: {:?} -> {:?}",
+                        shapes[0], target
+                    ));
                 }
+                let infer = SymDim { b: total.0 - ke, c: total.1 / kc };
+                let mut out = Vec::with_capacity(target.len());
+                for &d in &target {
+                    if d == -1 {
+                        out.push(infer);
+                    } else {
+                        out.push(SymDim::k(d));
+                    }
+                }
+                return one(out);
             }
-            one(known)
+            // 两个 -1：导出图的约定是第 1 个为 batch 符号、第 2 个为推断
+            // （例如 [-1, 96, -1] → [B, 96, 361]）。
+            if n_infer == 2 && target.first() == Some(&-1) {
+                if total.0 != 1 {
+                    return Err(format!(
+                        "Reshape 双 -1 目标要求输入含 batch 维: {:?} -> {:?}",
+                        shapes[0], target
+                    ));
+                }
+                let known: i64 = target.iter().filter(|&&d| d != -1).product();
+                if known == 0 || total.1 % known != 0 {
+                    return Err(format!(
+                        "Reshape 无法推断 -1 维: {:?} -> {:?}",
+                        shapes[0], target
+                    ));
+                }
+                let infer = SymDim::k(total.1 / known);
+                let mut out = Vec::with_capacity(target.len());
+                let mut seen_batch = false;
+                for &d in &target {
+                    if d == -1 {
+                        if !seen_batch {
+                            out.push(SymDim::batch());
+                            seen_batch = true;
+                        } else {
+                            out.push(infer);
+                        }
+                    } else {
+                        out.push(SymDim::k(d));
+                    }
+                }
+                return one(out);
+            }
+            Err(format!("Reshape 目标里 -1 过多: {target:?}"))
         }
         "Transpose" => {
             let perm = attrs.ints_of("perm").ok_or("Transpose 缺少 perm")?;
@@ -832,8 +861,7 @@ pub fn fold_op(
     attrs: &NodeAttrs,
     input_names: &[String],
     inputs: &[&Tensor],
-    input_shapes: &[&[SymDim]],
-    constants: &HashMap<String, Tensor>,
+    input_shapes: &[Vec<SymDim>],
     dynamic_ok: bool,
 ) -> Result<Option<Vec<Tensor>>, String> {
     let none_dyn = |e: String| {
@@ -1233,20 +1261,18 @@ pub fn fold_graph(graph: &GraphProto) -> Result<SimplifiedGraph, String> {
         let op = node.op_type.clone().unwrap_or_default();
         let attrs = parse_attrs(node);
         let in_shapes = input_shapes(&node.input, &shapes)?;
-        let mut insert_const = |name: String, t: Tensor, shapes: &mut HashMap<String, Vec<SymDim>>, constants: &mut HashMap<String, Tensor>| {
-            let sd = tensor_dims_to_sym(&t.dims);
-            shapes.insert(name.clone(), sd);
-            constants.insert(name, t);
-        };
 
         if op == "Shape" {
             // Shape 永远可折叠（形状已知，batch 记为 -1）
             if node.input.len() != 1 || node.output.len() != 1 {
                 return Err(format!("节点 {idx} (Shape) 输入/输出数量异常"));
             }
-            let out = fold_op("Shape", &attrs, &node.input, &[], &in_shapes, &constants, false)?
+            let out = fold_op("Shape", &attrs, &node.input, &[], &in_shapes, false)?
                 .ok_or_else(|| format!("节点 {idx} (Shape) 折叠失败"))?;
-            insert_const(node.output[0].clone(), out.into_iter().next().unwrap(), &mut shapes, &mut constants);
+            let t = out.into_iter().next().unwrap();
+            let sd = tensor_dims_to_sym(&t.dims);
+            shapes.insert(node.output[0].clone(), sd);
+            constants.insert(node.output[0].clone(), t);
             continue;
         }
 
@@ -1255,13 +1281,15 @@ pub fn fold_graph(graph: &GraphProto) -> Result<SimplifiedGraph, String> {
         if all_const {
             let tensors: Vec<&Tensor> = node.input.iter().map(|n| &constants[n]).collect();
             if let Ok(Some(out)) =
-                fold_op(&op, &attrs, &node.input, &tensors, &in_shapes, &constants, true)
+                fold_op(&op, &attrs, &node.input, &tensors, &in_shapes, true)
             {
                 if out.len() != node.output.len() {
                     return Err(format!("节点 {idx} ({op}) 折叠输出数量不匹配"));
                 }
                 for (o, t) in node.output.iter().zip(out) {
-                    insert_const(o.clone(), t, &mut shapes, &mut constants);
+                    let sd = tensor_dims_to_sym(&t.dims);
+                    shapes.insert(o.clone(), sd);
+                    constants.insert(o.clone(), t);
                 }
                 folded = true;
             }

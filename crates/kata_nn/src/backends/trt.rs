@@ -231,6 +231,8 @@ mod imp {
         ctx: TrtContext,
         engine_info: trt_ffi::KatagoTrtEngineInfo,
         max_batch_size: i32,
+        /// 求值器输入缓冲的布局（NCHW=false / NHWC=true），随 handle 记录。
+        inputs_use_nhwc: bool,
         /// Name-based staging buffers (onnx_builder models); `None` for the
         /// generic onnx path, which uses `generic_bufs` instead.
         bufs: Mutex<Option<TrtBuffers>>,
@@ -542,7 +544,7 @@ mod imp {
             _logger: &Logger,
             max_batch_size: i32,
             _require_exact_nn_len: bool,
-            _inputs_use_nhwc: bool,
+            inputs_use_nhwc: bool,
             gpu_idx_for_this_thread: i32,
             _server_thread_idx: i32,
         ) -> Result<Box<dyn ComputeHandle>, NeuralNetError> {
@@ -580,6 +582,7 @@ mod imp {
                 ctx: trt_handle,
                 engine_info,
                 max_batch_size,
+                inputs_use_nhwc: inputs_use_nhwc,
                 bufs: Mutex::new(bufs),
                 generic: trt_ctx.generic.clone(),
                 generic_bufs: Mutex::new(generic_bufs),
@@ -680,7 +683,7 @@ mod imp {
                 let global_offset = i * single_global_elts;
                 let mask_offset = i * single_mask_elts;
 
-                // Copy spatial features with symmetry (NCHW, c=h.stack, h,w per channel).
+                // Copy spatial features with symmetry (layout = evaluator buffers).
                 copy_inputs_with_symmetry(
                     &input_bufs[i].row_spatial_buf,
                     &mut spatial_slice[spatial_offset..spatial_offset + single_spatial_elts],
@@ -688,7 +691,7 @@ mod imp {
                     nn_y_len,
                     nn_x_len,
                     num_spatial_channels,
-                    false, // NCHW
+                    h.inputs_use_nhwc,
                     sym_idx,
                 );
 
@@ -941,7 +944,7 @@ mod imp {
                 nn_y_len,
                 nn_x_len,
                 h.engine_info.num_input_channels,
-                false, // NCHW
+                h.inputs_use_nhwc,
                 sym_idx,
             );
             let gl_off = i * single_global;
