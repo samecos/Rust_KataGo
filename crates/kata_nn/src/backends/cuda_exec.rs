@@ -1174,15 +1174,15 @@ fn attention_row(
     scale: f32,
 ) -> Result<(), String> {
     assert!(s <= 512, "attention_row 要求 S <= 512");
-    // v2：warp-per-row，块共享 K/V smem（8 行/块 × 8 warps）。
-    let f = rt.get_func("attention_row_v2_kernel")?;
+    // v1（每行一块，512 线程）：ABBA 实测 v2（warp-per-row + 46KB smem/块）
+    // 在 S=361/D=32/BH=12 上更慢（40 vs 47 nnEvals/s：smem 限制并行度、
+    // 串行依赖链主导）。v2 保留在 attention.cu，G1 FA4 tile 版再换。
+    let f = rt.get_func("attention_row_kernel")?;
     let stream = rt.device.default_stream();
-    let rows_per_block = 8u32;
-    let grid_x = s.div_ceil(rows_per_block as usize) as u32;
     let cfg = LaunchConfig {
-        grid_dim: (grid_x, bh as u32, 1),
-        block_dim: (32, rows_per_block, 1),
-        shared_mem_bytes: (2 * s * d * 2) as u32,
+        grid_dim: (s as u32, bh as u32, 1),
+        block_dim: (512, 1, 1),
+        shared_mem_bytes: 0,
     };
     unsafe {
         stream
