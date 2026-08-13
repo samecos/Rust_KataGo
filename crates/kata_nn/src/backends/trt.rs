@@ -884,8 +884,6 @@ mod imp {
                 outputs[i].nn_x_len = nn_x_len;
                 outputs[i].nn_y_len = nn_y_len;
                 outputs[i].policy_optimism_used = input_bufs[i].policy_optimism as f32;
-
-                input_bufs[i].has_result = true;
             }
 
             Ok(())
@@ -961,7 +959,7 @@ mod imp {
         // Debug dump (KATAGO_DEBUG_DUMP set): write the first batch element's
         // inputs and raw outputs for offline inspection.
         if let Ok(d) = std::env::var("KATAGO_DEBUG_DUMP") {
-            let mut w = |name: &str, data: &[f32]| {
+            let w = |name: &str, data: &[f32]| {
                 let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
                 let _ = std::fs::write(format!("{d}/{name}.bin"), bytes);
             };
@@ -985,7 +983,7 @@ mod imp {
         }
 
         if let Ok(d) = std::env::var("KATAGO_DEBUG_DUMP") {
-            let mut w = |name: &str, data: &[f32]| {
+            let w = |name: &str, data: &[f32]| {
                 let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
                 let _ = std::fs::write(format!("{d}/{name}.bin"), bytes);
             };
@@ -1095,7 +1093,6 @@ mod imp {
             outputs[i].nn_x_len = nn_x_len;
             outputs[i].nn_y_len = nn_y_len;
             outputs[i].policy_optimism_used = input_bufs[i].policy_optimism as f32;
-            input_bufs[i].has_result = true;
         }
 
         Ok(())

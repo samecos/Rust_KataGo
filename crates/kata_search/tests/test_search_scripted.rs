@@ -45,8 +45,9 @@ use kata_search::search::Search;
 
 /// A backend that fills in raw NN logits from a script, mimicking a real
 /// model's output distribution (the TRT b11fix model used in the GTP repro).
+#[derive(Clone)]
 struct ScriptedBackend {
-    /// Policy logit for the peak move.
+    /// Policy logit for the peak move(s).
     peak_logit: f32,
     /// Policy logit for pass.
     pass_logit: f32,
@@ -54,6 +55,8 @@ struct ScriptedBackend {
     other_logit: f32,
     /// Logit for `white_win_prob` (loss logit is 0). `0.0` => neutral 0.5.
     win_logit: f32,
+    /// Board locations receiving `peak_logit` (the policy-peak set).
+    peak_locs: Vec<i16>,
 }
 
 impl ScriptedBackend {
@@ -65,7 +68,35 @@ impl ScriptedBackend {
             other_logit: 0.0,
             // Neutral value: P(win) = P(loss) = 0.5.
             win_logit: 0.0,
+            peak_locs: vec![PEAK_LOC],
         }
+    }
+
+    /// A policy with a symmetric set of eight high-probability peaks (one per
+    /// symmetry orbit, so all are selectable under root symmetry pruning) and
+    /// a very low pass probability, mimicking the real model's opening policy.
+    fn with_eight_peaks() -> Self {
+        Self {
+            peak_logit: 3.0,
+            pass_logit: -2.0,
+            other_logit: -4.0,
+            win_logit: 0.0,
+            peak_locs: vec![
+                1 * 19 + 1, // (1,1)
+                1 * 19 + 2, // (2,1)
+                1 * 19 + 3, // (3,1)
+                1 * 19 + 4, // (4,1)
+                1 * 19 + 5, // (5,1)
+                2 * 19 + 2, // (2,2)
+                2 * 19 + 3, // (3,2)
+                2 * 19 + 4, // (4,2)
+            ],
+        }
+    }
+
+    /// The peak board locations for this backend.
+    fn peak_locs(&self) -> &[i16] {
+        &self.peak_locs
     }
 }
 
@@ -201,15 +232,19 @@ impl Backend for ScriptedBackend {
         outputs: &mut [&mut NNOutput],
     ) -> Result<(), NeuralNetError> {
         let n = num_batch_elts as usize;
-        let peak_pos = nn_pos::loc_to_pos(PEAK_LOC, 19, 19, 19) as usize;
         let pass_pos = nn_pos::loc_to_pos(PASS_LOC, 19, 19, 19) as usize;
+        let peak_positions: Vec<usize> = self
+            .peak_locs
+            .iter()
+            .map(|&loc| nn_pos::loc_to_pos(loc, 19, 19, 19) as usize)
+            .collect();
         for (_input_buf, output) in input_bufs
             .iter_mut()
             .take(n)
             .zip(outputs.iter_mut().take(n))
         {
             for pos in 0..output.policy_probs.len() {
-                output.policy_probs[pos] = if pos == peak_pos {
+                output.policy_probs[pos] = if peak_positions.contains(&pos) {
                     self.peak_logit
                 } else if pos == pass_pos {
                     self.pass_logit
@@ -233,6 +268,11 @@ const PEAK_LOC: i16 = 15 * 19 + 3;
 
 /// Build an `NnEvaluator` backed by the scripted backend.
 fn scripted_evaluator() -> NnEvaluator {
+    scripted_evaluator_with(ScriptedBackend::new())
+}
+
+/// Build an `NnEvaluator` backed by a custom scripted backend.
+fn scripted_evaluator_with(backend: ScriptedBackend) -> NnEvaluator {
     let logger = Arc::new(Logger::new(LoggerOptions::default(), None));
     let cfg = ConfigParser::new(false, false);
     let mut nn_eval = NnEvaluator::new(
@@ -258,7 +298,7 @@ fn scripted_evaluator() -> NnEvaluator {
         true,
         &cfg,
     );
-    nn_eval.set_backend(Arc::new(ScriptedBackend::new()));
+    nn_eval.set_backend(Arc::new(backend));
     nn_eval
         .load_model()
         .expect("scripted backend should load the model");
@@ -326,6 +366,125 @@ fn low_visit_search_with_root_symmetry_pruning_chooses_policy_peak_not_pass() {
             chosen, PEAK_LOC,
             "search with maxVisits={} and rootSymmetryPruning should choose the policy peak, got {}",
             max_visits, chosen
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: GTP-style parameters with a symmetric eight-peak policy must
+// pick one of the policy peaks, never pass.
+//
+// Reported failure: `boardsize 19; clear_board; genmove B` returned pass for
+// maxVisits = 5/50/500/1000 even though the search tree was healthy (8
+// symmetric first moves each with roughly equal visits, pass with 0 visits).
+// Root cause was in the GTP layer (crates/katago/src/cmd/gtp.rs):
+// `launch_gen_move` set the search parameters but never launched the search,
+// so `get_chosen_move_loc` ran on an empty tree and returned NULL_LOC, which
+// the GTP handler turned into "pass". This test pins down the search-side
+// contract that the GTP layer relies on: with GTP-style parameters and a
+// scripted policy that looks like the real model's (eight symmetric peaks,
+// very low pass), the chosen move must be one of the peaks at every visit
+// count the bug report covered.
+// ---------------------------------------------------------------------------
+
+/// The GTP search-parameter profile, mirroring
+/// `kata_program::setup::load_params_impl(SetupFor::Gtp)` plus the GTPEngine
+/// defaults (conservativePass/fillDameBeforePass forced on, passing hacks on,
+/// temperature 0.1/0.5, LCB selection on, etc.).
+fn gtp_like_params(max_visits: i64) -> SearchParams {
+    let mut p = SearchParams::new();
+    p.max_visits = max_visits;
+    p.win_loss_utility_factor = 1.0;
+    p.static_score_utility_factor = 0.1;
+    p.dynamic_score_utility_factor = 0.3;
+    p.dynamic_score_center_zero_weight = 0.2;
+    p.dynamic_score_center_scale = 0.75;
+    p.cpuct_exploration = 1.0;
+    p.cpuct_exploration_log = 0.45;
+    p.cpuct_exploration_base = 500.0;
+    p.cpuct_utility_stdev_prior = 0.40;
+    p.cpuct_utility_stdev_prior_weight = 2.0;
+    p.cpuct_utility_stdev_scale = 0.85;
+    p.fpu_reduction_max = 0.2;
+    p.fpu_loss_prop = 0.0;
+    p.fpu_parent_weight_by_visited_policy = true;
+    p.fpu_parent_weight_by_visited_policy_pow = 2.0;
+    p.policy_optimism = 1.0;
+    p.value_weight_exponent = 0.25;
+    p.use_noise_pruning = true;
+    p.noise_prune_utility_scale = 0.15;
+    p.use_uncertainty = true;
+    p.uncertainty_coeff = 0.25;
+    p.uncertainty_exponent = 1.0;
+    p.uncertainty_max_weight = 8.0;
+    p.use_graph_search = true;
+    p.graph_search_rep_bound = 11;
+    p.root_noise_enabled = false;
+    p.root_dirichlet_noise_total_concentration = 10.83;
+    p.root_dirichlet_noise_weight = 0.25;
+    p.root_policy_temperature = 1.0;
+    p.root_policy_temperature_early = 1.0;
+    p.root_fpu_reduction_max = 0.1;
+    p.root_fpu_loss_prop = 0.0;
+    p.root_num_symmetries_to_sample = 1;
+    p.root_symmetry_pruning = true;
+    p.root_policy_optimism = 0.2;
+    p.chosen_move_temperature = 0.1;
+    p.chosen_move_temperature_early = 0.5;
+    p.chosen_move_temperature_halflife = 19.0;
+    p.chosen_move_temperature_only_below_prob = 1.0;
+    p.chosen_move_subtract = 0.0;
+    p.chosen_move_prune = 1.0;
+    p.use_lcb_for_selection = true;
+    p.lcb_stdevs = 5.0;
+    p.min_visit_prop_for_lcb = 0.15;
+    p.use_non_buggy_lcb = true;
+    p.root_ending_bonus_points = 0.5;
+    p.root_prune_useless_moves = true;
+    p.conservative_pass = true;
+    p.fill_dame_before_pass = true;
+    p.enable_passing_hacks = true;
+    p.enable_more_passing_hacks = true;
+    p.anti_mirror = true;
+    p.avoid_repeated_pattern_utility = 0.0;
+    p
+}
+
+/// Run a search with GTP-style parameters and return the chosen move.
+fn run_gtp_like_search(nn_eval: &NnEvaluator, max_visits: i64) -> i16 {
+    let params = gtp_like_params(max_visits);
+    let logger = Arc::new(Logger::new(LoggerOptions::default(), None));
+    let mut search = Search::new(params, nn_eval, logger.as_ref(), "gtpLikeSearchSeed");
+
+    let board = Board::new(19, 19);
+    let next_pla = P_BLACK;
+    let hist = BoardHistory::new(board.clone(), next_pla, Rules::get_tromp_taylorish(), 0);
+
+    search.set_position(next_pla, &board, &hist);
+    search.run_whole_search(next_pla);
+    search.get_chosen_move_loc()
+}
+
+/// The chosen move must be one of the policy peaks, never pass, at every
+/// visit count from the bug report (5/50/500). This is the search-side
+/// contract that the fixed GTP `launch_gen_move` now relies on.
+#[test]
+fn gtp_like_search_with_symmetric_peaks_never_chooses_pass() {
+    let backend = ScriptedBackend::with_eight_peaks();
+    let nn_eval = scripted_evaluator_with(backend.clone());
+
+    for max_visits in [5i64, 50, 500] {
+        let chosen = run_gtp_like_search(&nn_eval, max_visits);
+        assert_ne!(
+            chosen, PASS_LOC,
+            "GTP-like search with maxVisits={} must not choose pass when the policy peaks are normal moves",
+            max_visits
+        );
+        assert!(
+            backend.peak_locs().contains(&chosen),
+            "GTP-like search with maxVisits={} should choose one of the policy peaks, got {}",
+            max_visits,
+            chosen
         );
     }
 }

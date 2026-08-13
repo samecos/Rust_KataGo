@@ -2060,8 +2060,8 @@ impl GtpEngine {
         }
     }
 
-    fn gen_move(&mut self, pla: Player, gargs: &GenmoveArgs, _args: &AnalyzeArgs) -> (String, Loc) {
-        self.launch_gen_move(pla, gargs);
+    fn gen_move(&mut self, pla: Player, gargs: &GenmoveArgs, args: &AnalyzeArgs) -> (String, Loc) {
+        self.launch_gen_move(pla, gargs, args);
         self.bot.wait_for_search_to_end();
         let search = self.bot.get_search_stop_and_wait();
         let mut move_loc = search.get_chosen_move_loc();
@@ -2158,12 +2158,17 @@ impl GtpEngine {
         }
     }
 
-    fn launch_gen_move(&mut self, pla: Player, _gargs: &GenmoveArgs) {
+    fn launch_gen_move(&mut self, pla: Player, _gargs: &GenmoveArgs, args: &AnalyzeArgs) {
         self.genmove_timer.reset();
         self.nn_eval.clear_cache();
         if let Some(he) = self.human_eval {
             he.clear_cache();
         }
+        let tc = if pla == P_BLACK {
+            &self.b_time_controls
+        } else {
+            &self.w_time_controls
+        };
 
         if !self.is_genmove_params {
             self.bot.set_params(&self.genmove_params);
@@ -2186,30 +2191,70 @@ impl GtpEngine {
             params_to_use.playout_doubling_advantage = desired_dynamic_pda;
         }
 
-        let initial_opp_advantage =
-            self.initial_black_advantage() * if pla == P_WHITE { 1.0 } else { -1.0 };
-        let board_scaling = self.board_size_scaling();
-        let threshold = (4.0 / board_scaling).max(2.0);
-        let avoid_repeated_pattern_utility = if initial_opp_advantage > threshold {
-            self.handicap_avoid_repeated_pattern_utility
-        } else {
-            self.normal_avoid_repeated_pattern_utility
-        };
+        // Handicap avoidance only applies to actual genmoves, not analysis
+        // (mirrors C++ `launchGenMove`'s `if(!args.analyzing)` guard).
+        let mut avoid_repeated_pattern_utility = self.normal_avoid_repeated_pattern_utility;
+        if !args.analyzing {
+            let initial_opp_advantage =
+                self.initial_black_advantage() * if pla == P_WHITE { 1.0 } else { -1.0 };
+            let board_scaling = self.board_size_scaling();
+            let threshold = (4.0 / board_scaling).max(2.0);
+            if initial_opp_advantage > threshold {
+                avoid_repeated_pattern_utility = self.handicap_avoid_repeated_pattern_utility;
+            }
+        }
         params_to_use.avoid_repeated_pattern_utility = avoid_repeated_pattern_utility;
 
         if params_to_use != *self.bot.get_params() {
             self.bot.set_params(&params_to_use);
         }
 
-        self.last_search_factor = play_utils::get_search_factor(
+        let search_factor = play_utils::get_search_factor(
             self.search_factor_when_winning_threshold,
             self.search_factor_when_winning,
             &self.genmove_params,
             &self.recent_win_loss_values,
             pla,
         );
+        self.last_search_factor = search_factor;
 
-        self.genmove_expected_id = (self.genmove_expected_id + 1) & 0x3FFFFFFF;
+        self.bot.set_avoid_move_until_by_loc(
+            &args.avoid_move_until_by_loc_black,
+            &args.avoid_move_until_by_loc_white,
+        );
+
+        let expected_search_id = (self.genmove_expected_id + 1) & 0x3FFFFFFF;
+        self.genmove_expected_id = expected_search_id;
+
+        if args.analyzing {
+            if args.show_ownership
+                || args.show_ownership_stdev
+                || args.show_moves_ownership
+                || args.show_moves_ownership_stdev
+            {
+                self.bot.set_always_include_owner_map(true);
+            } else {
+                self.bot.set_always_include_owner_map(false);
+            }
+            // The Rust port renders the analysis line after the search
+            // completes (gen_move_analyze), so unlike C++'s
+            // `genMoveAsyncAnalyze` no periodic callback is needed here.
+            self.bot.gen_move_async_with_factor(
+                pla,
+                expected_search_id,
+                tc,
+                search_factor,
+                Box::new(|_move_loc: Loc, _search_id: i32, _search: &Search| {}),
+            );
+        } else {
+            self.bot.gen_move_async_with_factor(
+                pla,
+                expected_search_id,
+                tc,
+                search_factor,
+                Box::new(|_move_loc: Loc, _search_id: i32, _search: &Search| {}),
+            );
+        }
     }
 
     fn desired_dynamic_pda_for_white(&self) -> f64 {

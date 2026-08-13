@@ -1049,11 +1049,15 @@ impl NnEvaluator {
         let mut req_buf = request.buf.lock();
         req_buf.client_waiting_for_result = true;
         let condvar = &request.result_ready;
-        while !req_buf.has_result && !self.shared.is_killed.load(Ordering::Relaxed) {
+        // Wait until the result is actually stored. The backend's get_output
+        // is allowed to flip `has_result` on the request buffers while the
+        // result Arc is still pending, so keying the wait on `has_result`
+        // alone could let the client leave early with `result == None`.
+        while req_buf.result.is_none() && !self.shared.is_killed.load(Ordering::Relaxed) {
             condvar.wait(&mut req_buf);
         }
 
-        if req_buf.has_result {
+        if req_buf.result.is_some() {
             buf.result = req_buf.result.clone();
             buf.has_result = true;
         } else {

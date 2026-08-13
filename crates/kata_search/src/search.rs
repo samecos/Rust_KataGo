@@ -382,6 +382,17 @@ impl<'a> Search<'a> {
         let root_board = Board::new(19, 19);
         let root_history = BoardHistory::new(root_board.clone(), C_EMPTY, Rules::default(), 0);
 
+        // 值权重分布表（C++ search.cpp:131 无条件创建；valueWeightExponent!=0 时
+        // getPlaySelectionValues 需要它，缺失会导致搜索线程 panic）。
+        const VALUE_WEIGHT_DEGREES_OF_FREEDOM: f64 = 3.0;
+        let value_weight_distribution = Some(Box::new(DistributionTable::new(
+            |z| kata_core::math::t_dist_pdf(z, VALUE_WEIGHT_DEGREES_OF_FREEDOM),
+            |z| kata_core::math::t_dist_cdf(z, VALUE_WEIGHT_DEGREES_OF_FREEDOM),
+            -50.0,
+            50.0,
+            2000,
+        )));
+
         Self {
             root_pla: C_EMPTY,
             root_board,
@@ -410,7 +421,7 @@ impl<'a> Search<'a> {
             effective_search_time_carried_over: 0.0,
             rand_seed: rand_seed.to_string(),
             root_ko_hash_table: None,
-            value_weight_distribution: None,
+            value_weight_distribution,
             norm_to_t_approx_z: 0.0,
             norm_to_t_approx_table: Vec::new(),
             pattern_bonus_table: None,
