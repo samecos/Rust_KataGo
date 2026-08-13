@@ -206,8 +206,7 @@ mod imp {
     }
 
     /// f32 → f16 位模式（round-to-nearest-even，与 CUDA `__float2half` 一致）。
-    pub fn f32_to_f16_bits(x: f32) -> u16 {
-        let b = x.to_bits();
+    pub fn f32_to_f16_bits(x: f32) -> u16 {        let b = x.to_bits();
         let sign = ((b >> 16) & 0x8000) as u16;
         let exp = ((b >> 23) & 0xff) as i32;
         let mant = b & 0x7fffff;
@@ -240,6 +239,184 @@ mod imp {
         }
         sign | ((e as u16) << 10) | m
     }
+
+    /// f16 位模式 → f32（主机侧，测试/参考用）。
+    pub fn f16_to_f32_bits(bits: u16) -> f32 {
+        let sign = if bits & 0x8000 != 0 { -1.0f32 } else { 1.0f32 };
+        let e = ((bits >> 10) & 0x1f) as i32;
+        let m = (bits & 0x3ff) as u32;
+        if e == 0 {
+            if m == 0 {
+                return 0.0 * sign;
+            }
+            sign * (m as f32) * 2f32.powi(-24)
+        } else if e == 0x1f {
+            f32::INFINITY * sign
+        } else {
+            sign * (1.0 + (m as f32) / 1024.0) * 2f32.powi(e - 15)
+        }
+    }
+
+    impl CudaRuntime {
+    /// 通用 1D f16 逐元素 kernel：`in -> out`（单输入单输出）。
+    fn run_elem1(&self, kernel: &str, x: &[u16], n: usize) -> Result<Vec<u16>, String> {        let f = self.get_func(kernel)?;
+        let stream = self.device.default_stream();
+        let mut d_in: CudaSlice<u16> =
+            unsafe { stream.alloc(n) }.map_err(|e| e.to_string())?;
+        let mut d_out: CudaSlice<u16> = stream.alloc_zeros(n).map_err(|e| e.to_string())?;
+        stream.memcpy_htod(x, &mut d_in).map_err(|e| e.to_string())?;
+        unsafe {
+            stream
+                .launch_builder(&f)
+                .arg(&d_in)
+                .arg(&mut d_out)
+                .arg(&(n as i32))
+                .launch(LaunchConfig::for_num_elems(n as u32))
+        }
+        .map_err(|e| format!("{kernel} launch failed: {e}"))?;
+        let mut out = vec![0u16; n];
+        stream.memcpy_dtoh(&d_out, &mut out).map_err(|e| e.to_string())?;
+        Ok(out)
+    }
+
+    /// SiLU（f16 逐元素，FP32 计算）。
+    pub fn silu_f16(&self, x: &[f32]) -> Result<Vec<f32>, String> {
+        let xh: Vec<u16> = x.iter().map(|&v| f32_to_f16_bits(v)).collect();
+        let out = self.run_elem1("silu_f16_kernel", &xh, x.len())?;
+        Ok(out.iter().map(|&b| f16_to_f32_bits(b)).collect())
+    }
+
+    /// 原位残差 `res += in`（f16）。
+    pub fn add_residual_f16(&self, x: &[f32], res: &mut [f32]) -> Result<(), String> {
+        assert_eq!(x.len(), res.len());
+        let n = x.len();
+        let xh: Vec<u16> = x.iter().map(|&v| f32_to_f16_bits(v)).collect();
+        let rh: Vec<u16> = res.iter().map(|&v| f32_to_f16_bits(v)).collect();
+        let f = self.get_func("add_residual_f16_kernel")?;
+        let stream = self.device.default_stream();
+        let mut d_in: CudaSlice<u16> =
+            unsafe { stream.alloc(n) }.map_err(|e| e.to_string())?;
+        let mut d_res: CudaSlice<u16> =
+            unsafe { stream.alloc(n) }.map_err(|e| e.to_string())?;
+        stream.memcpy_htod(xh.as_slice(), &mut d_in).map_err(|e| e.to_string())?;
+        stream.memcpy_htod(rh.as_slice(), &mut d_res).map_err(|e| e.to_string())?;
+        unsafe {
+            stream
+                .launch_builder(&f)
+                .arg(&d_in)
+                .arg(&mut d_res)
+                .arg(&(n as i32))
+                .launch(LaunchConfig::for_num_elems(n as u32))
+        }
+        .map_err(|e| format!("add_residual launch failed: {e}"))?;
+        let mut out = vec![0u16; n];
+        stream.memcpy_dtoh(&d_res, &mut out).map_err(|e| e.to_string())?;
+        for (r, b) in res.iter_mut().zip(out.iter()) {
+            *r = f16_to_f32_bits(*b);
+        }
+        Ok(())
+    }
+
+    /// RMSNorm（每行 ncols 元素，f16）。
+    pub fn rms_norm_f16(
+        &self,
+        x: &[f32],
+        scale: &[f32],
+        eps: f32,
+        ncols: usize,
+    ) -> Result<Vec<f32>, String> {
+        assert_eq!(x.len() % ncols, 0);
+        assert_eq!(scale.len(), ncols);
+        let rows = x.len() / ncols;
+        let xh: Vec<u16> = x.iter().map(|&v| f32_to_f16_bits(v)).collect();
+        let sh: Vec<u16> = scale.iter().map(|&v| f32_to_f16_bits(v)).collect();
+        let f = self.get_func("rms_norm_f16_kernel")?;
+        let stream = self.device.default_stream();
+        let mut d_x: CudaSlice<u16> =
+            unsafe { stream.alloc(x.len()) }.map_err(|e| e.to_string())?;
+        let mut d_s: CudaSlice<u16> =
+            unsafe { stream.alloc(ncols) }.map_err(|e| e.to_string())?;
+        let mut d_y: CudaSlice<u16> =
+            stream.alloc_zeros(x.len()).map_err(|e| e.to_string())?;
+        stream.memcpy_htod(xh.as_slice(), &mut d_x).map_err(|e| e.to_string())?;
+        stream.memcpy_htod(sh.as_slice(), &mut d_s).map_err(|e| e.to_string())?;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (rows as u32, 1, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            stream
+                .launch_builder(&f)
+                .arg(&d_x)
+                .arg(&d_s)
+                .arg(&mut d_y)
+                .arg(&eps)
+                .arg(&(ncols as i32))
+                .launch(cfg)
+        }
+        .map_err(|e| format!("rms_norm launch failed: {e}"))?;
+        let mut out = vec![0u16; x.len()];
+        stream.memcpy_dtoh(&d_y, &mut out).map_err(|e| e.to_string())?;
+        Ok(out.iter().map(|&b| f16_to_f32_bits(b)).collect())
+    }
+
+    /// 注意力 v1（正确优先）：`out = softmax(Q·K^T/sqrt(D))·V`，non-causal 无掩码。
+    /// q/k/v：[B*H, S, D] 行主序 f32（主机侧转 half）。
+    pub fn attention_row(
+        &self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        s: usize,
+        d: usize,
+    ) -> Result<Vec<f32>, String> {
+        let bh = q.len() / (s * d);
+        assert_eq!(q.len(), bh * s * d);
+        assert_eq!(k.len(), bh * s * d);
+        assert_eq!(v.len(), bh * s * d);
+        let n = q.len();
+        let qh: Vec<u16> = q.iter().map(|&x| f32_to_f16_bits(x)).collect();
+        let kh: Vec<u16> = k.iter().map(|&x| f32_to_f16_bits(x)).collect();
+        let vh: Vec<u16> = v.iter().map(|&x| f32_to_f16_bits(x)).collect();
+        let f = self.get_func("attention_row_kernel")?;
+        let stream = self.device.default_stream();
+        let mut d_q: CudaSlice<u16> =
+            unsafe { stream.alloc(n) }.map_err(|e| e.to_string())?;
+        let mut d_k: CudaSlice<u16> =
+            unsafe { stream.alloc(n) }.map_err(|e| e.to_string())?;
+        let mut d_v: CudaSlice<u16> =
+            unsafe { stream.alloc(n) }.map_err(|e| e.to_string())?;
+        let mut d_o: CudaSlice<u16> =
+            stream.alloc_zeros(n).map_err(|e| e.to_string())?;
+        stream.memcpy_htod(qh.as_slice(), &mut d_q).map_err(|e| e.to_string())?;
+        stream.memcpy_htod(kh.as_slice(), &mut d_k).map_err(|e| e.to_string())?;
+        stream.memcpy_htod(vh.as_slice(), &mut d_v).map_err(|e| e.to_string())?;
+        // kernel 归约工作区固定 ATT_BLOCK=384，且要求 s ≤ 384。
+        assert!(s <= 512, "attention_row v1 requires S <= 512");
+        let block = 512u32;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (s as u32, bh as u32, 1),
+            block_dim: (block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            stream
+                .launch_builder(&f)
+                .arg(&d_q)
+                .arg(&d_k)
+                .arg(&d_v)
+                .arg(&mut d_o)
+                .arg(&(s as i32))
+                .arg(&(d as i32))
+                .launch(cfg)
+        }
+        .map_err(|e| format!("attention launch failed: {e}"))?;
+        let mut out = vec![0u16; n];
+        stream.memcpy_dtoh(&d_o, &mut out).map_err(|e| e.to_string())?;
+        Ok(out.iter().map(|&b| f16_to_f32_bits(b)).collect())
+    }
+    }
 }
 
 /// CUDA 后端入口（无 feature 时的占位实现）。
@@ -254,4 +431,4 @@ impl CudaRuntime {
 }
 
 #[cfg(feature = "cuda")]
-pub use imp::{CudaRuntime, f32_to_f16_bits};
+pub use imp::{f16_to_f32_bits, f32_to_f16_bits, CudaRuntime};

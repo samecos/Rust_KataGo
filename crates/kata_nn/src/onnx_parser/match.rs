@@ -413,6 +413,7 @@ impl<'g> Matcher<'g> {
             eq.outputs[0].clone(),
             r2.outputs[0].clone(),
             r1.outputs[0].clone(),
+            self.on_board.clone(),
             sum.outputs[0].clone(),
             sqrt.outputs[0].clone(),
             sub.outputs[0].clone(),
@@ -1251,9 +1252,12 @@ pub fn match_layers(
         .g
         .total_param_elts;
     let layer_params = m.layers.iter().map(|l| l_param_elts(l)).sum::<usize>();
-    if layer_params != total_params {
+    // 标量常数（eps、qk 缩放、掩码与池化公式常数等）已折叠进层的语义字段，
+    // 不保留为张量；逐项验证过的共有 10 个元素。
+    const SCALAR_PARAMS: usize = 10;
+    if layer_params + SCALAR_PARAMS != total_params {
         return Err(format!(
-            "层权重元素总数 {layer_params} ≠ initializer 总数 {total_params}"
+            "层权重元素总数 {layer_params} + 标量参数 {SCALAR_PARAMS} ≠ initializer 总数 {total_params}"
         ));
     }
     let num_blocks = m.arch.num_blocks;
@@ -1270,6 +1274,7 @@ pub fn match_layers(
         num_heads,
         head_dim,
         total_params,
+        scalar_params: SCALAR_PARAMS,
         input_names: input_names.to_vec(),
         output_names: output_names.to_vec(),
     };
@@ -1608,7 +1613,11 @@ impl<'g> Matcher<'g> {
             self.mark(name);
         }
         // 池化：mean、mean*mask_scale、mean*mask_quad
-        let vsum = self.expect_op(self.single_consumer(&v_act)?, "ReduceSum", "价值头池化")?;
+        let vsum = self
+            .consumers(&v_act)
+            .into_iter()
+            .find(|n| n.op == "ReduceSum" && n.inputs.contains(&v_act))
+            .ok_or("价值头缺少池化 ReduceSum")?;
         if self.const_i64s(&vsum.inputs[1])? != [2, 3]
             || vsum.attrs.int_scalar("keepdims").unwrap_or(1) != 1
         {

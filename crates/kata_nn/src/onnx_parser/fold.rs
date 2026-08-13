@@ -121,18 +121,21 @@ impl SymDim {
     }
 }
 
-/// 形状乘积 = `batch^e * c`（要求 e ≤ 1）。
+/// 形状乘积 = `C * batch^e`（要求 e ≤ 1，且不允许 b、c 同时非零的混合维）。
 pub fn linear_product(dims: &[SymDim]) -> Result<(i64, i64), String> {
     let mut e = 0i64;
     let mut c = 1i64;
     for d in dims {
         if d.b != 0 {
-            e += d.b;
+            if d.c != 0 {
+                return Err(format!("shape {:?} 含混合批维（b、c 同时非零）", dims));
+            }
+            e += 1;
             if e > 1 {
                 return Err(format!("shape {:?} 含 batch 高次项", dims));
             }
-        }
-        if d.c == 0 {
+            c *= d.b;
+        } else if d.c == 0 {
             c = 0;
         } else {
             c *= d.c;
@@ -520,7 +523,12 @@ pub fn shape_fn(
                         shapes[0], target
                     ));
                 }
-                let infer = SymDim { b: total.0 - ke, c: total.1 / kc };
+                let q = total.1 / kc;
+                let infer = if total.0 - ke == 1 {
+                    SymDim { b: q, c: 0 }
+                } else {
+                    SymDim::k(q)
+                };
                 let mut out = Vec::with_capacity(target.len());
                 for &d in &target {
                     if d == -1 {

@@ -62,27 +62,24 @@ fn print_layer_list(g: &LayerGraph) {
     println!("== 层清单（共 {} 层）==", g.layers.len());
     let mut idx = 0usize;
     for l in &g.layers {
-        let mut extra = String::new();
-        match l {
-            Layer::InitialConv(x) => extra = format!(" params={}", weight_elts_initial(x)),
-            Layer::Linear(x) => extra = format!(" params={}", x.weight.numel()),
-            Layer::RmsNorm(x) => extra = format!(" params={}", x.scale.numel()),
-            Layer::Attention(x) => {
-                extra = format!(
-                    " params={}",
-                    x.qkv_weight.numel() + x.out_weight.numel() + x.rope_cos.numel() + x.rope_sin.numel()
-                )
-            }
+        let extra = match l {
+            Layer::InitialConv(x) => format!(" params={}", weight_elts_initial(x)),
+            Layer::Linear(x) => format!(" params={}", x.weight.numel()),
+            Layer::RmsNorm(x) => format!(" params={}", x.scale.numel()),
+            Layer::Attention(x) => format!(
+                " params={}",
+                x.qkv_weight.numel() + x.out_weight.numel() + x.rope_cos.numel() + x.rope_sin.numel()
+            ),
             Layer::Ffn(x) => {
-                extra = format!(" params={}", x.up_weight.numel() + x.gate_weight.numel() + x.down_weight.numel())
+                format!(" params={}", x.up_weight.numel() + x.gate_weight.numel() + x.down_weight.numel())
             }
-            Layer::GateSilu(x) => extra = format!(" params={}", x.scale.numel() + x.bias.numel()),
+            Layer::GateSilu(x) => format!(" params={}", x.scale.numel() + x.bias.numel()),
             Layer::TrunkFinal(x) => {
-                extra = format!(" params={}", x.mean.numel() + x.std.numel() + x.gamma.numel() + x.beta.numel())
+                format!(" params={}", x.mean.numel() + x.std.numel() + x.gamma.numel() + x.beta.numel())
             }
-            Layer::PolicyHead(_) => extra = " params=见统计".to_string(),
-            Layer::ValueHead(_) => extra = " params=见统计".to_string(),
-        }
+            Layer::PolicyHead(_) => " params=见统计".to_string(),
+            Layer::ValueHead(_) => " params=见统计".to_string(),
+        };
         println!("  [{idx:3}] {}{}", layer_name(l), extra);
         idx += 1;
     }
@@ -196,15 +193,21 @@ fn parse_real_model_and_verify_layer_graph() {
         ["out_policy", "out_value", "out_miscvalue", "out_moremiscvalue", "out_ownership"]
     );
 
-    // 层数与结构
-    assert_eq!(g.layers.len(), 180, "总层数应为 180（1 初始卷积 + 11 块×(1 下投影 + 6 子层 + 1 门 + 1 上投影 + 10×门) + 1 trunk 末端 + 2 头）");
+    // 层数与结构：1 初始卷积 + 11 块×(1 下投影 + 6 RMSNorm + 3 attn + 3 FFN
+    // + 1 块内门 + 1 上投影) + 10 个块间门 + 1 trunk 末端 + 2 头 = 179
+    assert_eq!(g.layers.len(), 179, "总层数应为 179");
     assert_eq!(g.num_attention_layers(), 33);
     assert_eq!(g.num_ffn_layers(), 33);
     assert_eq!(g.num_rmsnorm_layers(), 66);
 
-    // 参数量：层内权重元素总数 == initializer 总数（≈ 75,008,575）
+    // 参数量：层内权重元素总数 + 折叠的标量参数 == initializer 总数（75,008,575）
     assert_eq!(g.total_params, 75_008_575, "模型参数总量");
-    assert_eq!(g.layer_param_elts(), g.total_params, "层内权重应覆盖全部 initializer 元素");
+    assert_eq!(g.scalar_params, 10);
+    assert_eq!(
+        g.layer_param_elts() + g.scalar_params,
+        g.total_params,
+        "层内权重应覆盖全部 initializer 元素"
+    );
 
     // 逐层形状抽查
     let mut attn_count = 0usize;

@@ -314,8 +314,12 @@ pub struct LayerGraph {
     pub num_blocks: usize,
     pub num_heads: usize,
     pub head_dim: usize,
-    /// 所有权重元素总数（f32 个数）。
+    /// 所有权重元素总数（f32 个数，= initializer 总数）。
     pub total_params: usize,
+    /// 被折叠进层语义字段（而非张量）的标量参数元素数：eps(1)、qk 缩放(1)、
+    /// 掩码常数 0/-inf(2)、1.0(1)、池化公式常数 14/10/100/0.1(4)、落点屏蔽
+    /// 5000(1)，共 10 个（matcher 已逐一验证数值）。
+    pub scalar_params: usize,
     pub input_names: Vec<String>,
     pub output_names: Vec<String>,
 }

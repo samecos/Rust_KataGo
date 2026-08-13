@@ -28,6 +28,92 @@ fn cuda_pipeline_smoke_f32_add() {
 }
 
 #[test]
+fn cuda_attention_row_vs_cpu_reference() {
+    let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else {
+        eprintln!("skipped: CUDA runtime unavailable");
+        return;
+    };
+    use kata_nn::backends::cuda::{f16_to_f32_bits, f32_to_f16_bits};
+
+    let (s, d) = (64usize, 32usize);
+    let mut rng = kata_core::rng::Rand::new_from_seed("attention-test");
+    let rand_f = |rng: &mut kata_core::rng::Rand| -> f32 {
+        (rng.next_u64() as f64 / u64::MAX as f64 - 0.5) as f32 * 2.0
+    };
+    let mut q = Vec::with_capacity(s * d);
+    let mut k = Vec::with_capacity(s * d);
+    let mut v = Vec::with_capacity(s * d);
+    for _ in 0..s * d {
+        q.push(rand_f(&mut rng));
+        k.push(rand_f(&mut rng));
+        v.push(rand_f(&mut rng));
+    }
+
+    let out = rt
+        .attention_row(&q, &k, &v, s, d)
+        .expect("attention launch");
+
+    // CPU 参考（f16 舍入输入，fp32 计算）
+    let q16: Vec<f32> = q.iter().map(|&x| f16_to_f32_bits(f32_to_f16_bits(x))).collect();
+    let k16: Vec<f32> = k.iter().map(|&x| f16_to_f32_bits(f32_to_f16_bits(x))).collect();
+    let v16: Vec<f32> = v.iter().map(|&x| f16_to_f32_bits(f32_to_f16_bits(x))).collect();
+    let scale = 1.0 / (d as f32).sqrt();
+    let mut max_abs = 0.0f32;
+    let mut worst = (0usize, 0.0f32, 0.0f32);
+    for i in 0..s {
+        // softmax
+        let mut scores = vec![0.0f32; s];
+        let mut m = f32::NEG_INFINITY;
+        for j in 0..s {
+            let mut dot = 0.0f32;
+            for dd in 0..d {
+                dot += q16[i * d + dd] * k16[j * d + dd];
+            }
+            scores[j] = dot * scale;
+            m = m.max(scores[j]);
+        }
+        let mut sum = 0.0f32;
+        for j in 0..s {
+            scores[j] = (scores[j] - m).exp();
+            sum += scores[j];
+        }
+        for dd in 0..d {
+            let mut acc = 0.0f32;
+            for j in 0..s {
+                acc += scores[j] / sum * v16[j * d + dd];
+            }
+            let got = out[i * d + dd];
+            let err = (got - acc).abs();
+            if err > max_abs {
+                max_abs = err;
+                worst = (i * d + dd, got, acc);
+            }
+        }
+    }
+    eprintln!("attention max_abs err = {max_abs:.3e} at idx {} got {} expect {}", worst.0, worst.1, worst.2);
+    for dd in 0..4 {
+        eprintln!("  row0[{dd}]: got {} expect {}", out[dd], {
+            let mut scores = vec![0.0f32; s];
+            let mut m = f32::NEG_INFINITY;
+            for j in 0..s {
+                let mut dot = 0.0f32;
+                for ddd in 0..d { dot += q16[ddd] * k16[j * d + ddd]; }
+                scores[j] = dot * scale;
+                m = m.max(scores[j]);
+            }
+            let mut sum = 0.0f32;
+            for j in 0..s { scores[j] = (scores[j] - m).exp(); sum += scores[j]; }
+            let mut acc = 0.0f32;
+            for j in 0..s { acc += scores[j] / sum * v16[j * d + dd]; }
+            acc
+        });
+    }
+    eprintln!("attention max_abs err = {max_abs:.3e}");
+    assert!(max_abs < 0.02, "attention 与 CPU 参考偏差过大: {max_abs:.3e}");
+    eprintln!("attention_row_kernel OK");
+}
+
+#[test]
 fn cuda_hgemm_m16n8k16_vs_cpu_reference() {
     let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else {
         eprintln!("skipped: CUDA runtime unavailable");

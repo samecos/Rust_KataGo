@@ -6,9 +6,11 @@ KataGo 围棋引擎的 Rust 移植（基座：KataGo-Lite/katago-rs，约 10 万
 ## 构建与运行
 
 - 构建（默认特性，dummy 后端）：`cargo build --workspace`
-- 全特性（含 `trt`，需本机 CUDA + TensorRT 头文件）：`cargo build -p katago --features trt`
+- TRT 后端：`cargo build -p katago --features trt`（需本机 CUDA + TensorRT 头文件）
+- CUDA 后端（手写 kernel，nvcc 编译）：`cargo build -p katago --features cuda`；冒烟 `cargo test -p kata_nn --test test_cuda --features cuda`
 - 测试：`cargo test --workspace`
-- GTP 冒烟：`scripts/gtp_smoke.sh`（或手动 `cargo run --bin katago-rs -- gtp --config configs/gtp_smoke.cfg --model D:/code/b11fix.onnx`）
+- GTP 冒烟：`scripts/gtp_smoke.sh`；真实推理：`configs/gtp_trt.cfg` + `--model D:/code/b11fix.onnx`（首次构建 TRT 引擎较慢，plan 缓存在模型旁）
+- 数值对拍：`cargo test -p kata_nn --test dump_nn_io --features trt` 生成转储 → `.venv/Scripts/python.exe scripts/compare_nn_output.py <dump目录>`（ORT FP32 黄金参考）
 
 ## 后端选择
 

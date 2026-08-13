@@ -6,10 +6,21 @@
 //! only with a real neural net: at maxVisits=5 from an empty board the chosen
 //! move was `pass` even though the policy peak was at a normal move.
 //!
-//! This test injects a scripted backend whose raw logits mimic the real model
-//! used in the GTP repro (policy peak ~5-6% at a star point, pass ~0.5%, value
-//! strongly favoring white), and asserts that a 5-visit search picks the
-//! policy-peak move rather than pass.
+//! Root cause: GTP runs with `rootSymmetryPruning = true` (the C++ GTP
+//! default), which restricts the root's selectable moves to one representative
+//! per symmetry orbit. When the policy head is not perfectly symmetric, the
+//! policy peak can be a symmetry duplicate whose orbit representative has far
+//! lower policy - even lower than pass. With very few visits the first playout
+//! then goes to that low-policy representative (pass), and the low-visit
+//! chosen move is wrong. Fix: the first visit at the root (and the
+//! zero-children direct-policy fallback) selects the global policy argmax,
+//! exempting it from the symmetry-duplicate restriction.
+//!
+//! This test injects a scripted backend whose raw logits mimic a real model
+//! (policy peak at a non-pass position, pass probability very low, neutral
+//! value) and asserts that low-visit searches pick the policy-peak move
+//! rather than pass, both with default params and with the GTP
+//! `rootSymmetryPruning` profile.
 
 use std::sync::Arc;
 
@@ -35,13 +46,13 @@ use kata_search::search::Search;
 /// A backend that fills in raw NN logits from a script, mimicking a real
 /// model's output distribution (the TRT b11fix model used in the GTP repro).
 struct ScriptedBackend {
-    /// Policy logit for the peak move (a star point).
+    /// Policy logit for the peak move.
     peak_logit: f32,
     /// Policy logit for pass.
     pass_logit: f32,
     /// Policy logit for every other move.
     other_logit: f32,
-    /// Logit for `white_win_prob` (loss logit is 0), producing ~white 0.96.
+    /// Logit for `white_win_prob` (loss logit is 0). `0.0` => neutral 0.5.
     win_logit: f32,
 }
 
@@ -52,8 +63,8 @@ impl ScriptedBackend {
             peak_logit: 3.0,
             pass_logit: 0.5,
             other_logit: 0.0,
-            // e^3.18 / (e^3.18 + 1) ~= 0.96.
-            win_logit: 3.18,
+            // Neutral value: P(win) = P(loss) = 0.5.
+            win_logit: 0.0,
         }
     }
 }
@@ -191,7 +202,8 @@ impl Backend for ScriptedBackend {
     ) -> Result<(), NeuralNetError> {
         let n = num_batch_elts as usize;
         let peak_pos = nn_pos::loc_to_pos(PEAK_LOC, 19, 19, 19) as usize;
-        let pass_pos = nn_pos::loc_to_pos(PASS_LOC, 19, 19, 19) as usize;        for (input_buf, output) in input_bufs
+        let pass_pos = nn_pos::loc_to_pos(PASS_LOC, 19, 19, 19) as usize;
+        for (_input_buf, output) in input_bufs
             .iter_mut()
             .take(n)
             .zip(outputs.iter_mut().take(n))
@@ -208,14 +220,15 @@ impl Backend for ScriptedBackend {
             output.white_win_prob = self.win_logit;
             output.white_loss_prob = 0.0;
             output.white_no_result_prob = -30.0;
-            input_buf.has_result = true;
-            input_buf.result = Some(Arc::new(NNOutput::default()));
         }
         Ok(())
     }
 }
 
-/// Policy peak: the upper-left star point D16 (x=3, y=15).
+/// Policy peak location. Chosen so that it is *not* the symmetry
+/// representative of its orbit (GTP rootSymmetryPruning marks it as a
+/// duplicate), which is exactly the situation that used to make the search
+/// pick pass at low visit counts.
 const PEAK_LOC: i16 = 15 * 19 + 3;
 
 /// Build an `NnEvaluator` backed by the scripted backend.
@@ -254,12 +267,13 @@ fn scripted_evaluator() -> NnEvaluator {
 }
 
 /// Run a low-visit search from the empty 19x19 board and return the chosen move.
-fn run_low_visit_search(nn_eval: &NnEvaluator, max_visits: i64) -> i16 {
+fn run_low_visit_search(nn_eval: &NnEvaluator, max_visits: i64, root_symmetry_pruning: bool) -> i16 {
     let params = SearchParams {
         max_visits,
         // Existing tests avoid the value-weight distribution plumbing by
         // disabling value weighting; the GTP path initializes it separately.
         value_weight_exponent: 0.0,
+        root_symmetry_pruning,
         ..SearchParams::default()
     };
     let logger = Arc::new(Logger::new(LoggerOptions::default(), None));
@@ -278,7 +292,7 @@ fn run_low_visit_search(nn_eval: &NnEvaluator, max_visits: i64) -> i16 {
 fn low_visit_search_chooses_policy_peak_not_pass() {
     let nn_eval = scripted_evaluator();
 
-    let chosen = run_low_visit_search(&nn_eval, 5);
+    let chosen = run_low_visit_search(&nn_eval, 5, false);
 
     assert_ne!(
         chosen,
@@ -292,17 +306,26 @@ fn low_visit_search_chooses_policy_peak_not_pass() {
     );
 }
 
+/// GTP runs with rootSymmetryPruning=true; with an asymmetric policy the peak
+/// can be a symmetry duplicate. The first visit must still go to the policy
+/// peak rather than to pass (which previously won because its policy exceeded
+/// every symmetry representative).
 #[test]
-fn moderate_visit_search_also_chooses_policy_peak_not_pass() {
+fn low_visit_search_with_root_symmetry_pruning_chooses_policy_peak_not_pass() {
     let nn_eval = scripted_evaluator();
 
-    for max_visits in [5i64, 10, 20, 50] {
-        let chosen = run_low_visit_search(&nn_eval, max_visits);
+    for max_visits in [1i64, 2, 5, 10] {
+        let chosen = run_low_visit_search(&nn_eval, max_visits, true);
         assert_ne!(
             chosen,
             PASS_LOC,
-            "search with maxVisits={} must not choose pass",
+            "search with maxVisits={} and rootSymmetryPruning must not choose pass",
             max_visits
+        );
+        assert_eq!(
+            chosen, PEAK_LOC,
+            "search with maxVisits={} and rootSymmetryPruning should choose the policy peak, got {}",
+            max_visits, chosen
         );
     }
 }

@@ -1081,20 +1081,6 @@ impl<'a> Search<'a> {
             );
             self.root_sym_dup_loc = dup_loc.try_into().expect("dup_loc length mismatch");
             self.root_symmetries = symmetries;
-            if std::env::var("KATA_DEBUG_SELECT").is_ok() {
-                let non_dup: Vec<Loc> = (0..MAX_ARR_SIZE as Loc)
-                    .filter(|&l| {
-                        self.root_sym_dup_loc[l as usize]
-                            == false
-                            && (self.root_board.is_on_board(l) || l == PASS_LOC)
-                    })
-                    .collect();
-                eprintln!(
-                    "[sym] non_dup_count={} non_dup_locs={:?}",
-                    non_dup.len(),
-                    non_dup
-                );
-            }
         } else {
             self.root_sym_dup_loc = [false; MAX_ARR_SIZE];
             self.root_symmetries.clear();
@@ -6403,6 +6389,80 @@ impl<'a> Search<'a> {
         let mut best_new_move_loc = NULL_LOC;
         let mut best_new_nn_policy_prob = -1.0_f32;
         let policy_size = self.policy_size as i32;
+
+        // At the root with symmetry pruning, the allowed-move set is restricted
+        // to one representative per symmetry orbit (isAllowedRootMove ->
+        // rootSymDupLoc, mirroring C++ `Search::isAllowedRootMove` in
+        // searchhelpers.cpp). If the policy head is not perfectly symmetric,
+        // the policy argmax can be a duplicate whose orbit representative has
+        // far lower policy - even lower than pass. With very few visits the
+        // first playout then goes to that low-policy representative (or pass)
+        // and the low-visit chosen move is wrong, whereas C++ with a correctly
+        // computed policy explores the policy peak first.
+        // So when selecting the *first* new move at the root, we exempt the
+        // global policy argmax from the symmetry-duplicate restriction. This
+        // is a no-op whenever the argmax is itself a representative (the
+        // normal, near-symmetric-policy case) and only kicks in to make the
+        // first visit go to the true policy peak.
+        let mut sym_argmax_exempt_loc = NULL_LOC;
+        if is_root && self.search_params.root_symmetry_pruning {
+            let mut best_exempt_prob = -1.0_f32;
+            for move_pos in 0..policy_size {
+                let move_pos_usize = move_pos as usize;
+                if move_pos_usize >= active_policy_probs.len() {
+                    continue;
+                }
+                let mut nn_policy_prob = active_policy_probs[move_pos_usize];
+                if nn_policy_prob < 0.0 {
+                    continue;
+                }
+                let move_loc = nn_pos::pos_to_loc(
+                    move_pos,
+                    thread.board.x_size,
+                    thread.board.y_size,
+                    self.nn_x_len,
+                    self.nn_y_len,
+                );
+                if move_loc == NULL_LOC {
+                    continue;
+                }
+                // Only the symmetry-duplicate restriction may be bypassed for
+                // the policy argmax; all other root restrictions still apply.
+                if !(self.is_allowed_root_move(move_loc)
+                    || self.root_sym_dup_loc[move_loc as usize])
+                {
+                    continue;
+                }
+                if !avoid_move_until_by_loc.is_empty() {
+                    if (move_loc as usize) < avoid_move_until_by_loc.len() {
+                        let until_depth = avoid_move_until_by_loc[move_loc as usize];
+                        let depth_since_root = thread
+                            .history
+                            .move_history
+                            .len()
+                            .saturating_sub(self.root_history.move_history.len());
+                        if (depth_since_root as i32) < until_depth {
+                            continue;
+                        }
+                    }
+                }
+                if anti_mirror {
+                    let mut prob_f = nn_policy_prob;
+                    self.maybe_apply_anti_mirror_policy(
+                        &mut prob_f,
+                        move_loc,
+                        active_policy_probs,
+                        node.next_pla,
+                        Some(thread),
+                    );
+                    nn_policy_prob = prob_f;
+                }
+                if nn_policy_prob > best_exempt_prob {
+                    best_exempt_prob = nn_policy_prob;
+                    sym_argmax_exempt_loc = move_loc;
+                }
+            }
+        }
         for move_pos in 0..policy_size {
             let move_pos_usize = move_pos as usize;
             if move_pos_usize < poses_with_child_buf.len() && poses_with_child_buf[move_pos_usize] {
@@ -6430,7 +6490,10 @@ impl<'a> Search<'a> {
             if is_root {
                 debug_assert_eq!(thread.board.pos_hash, self.root_board.pos_hash);
                 debug_assert_eq!(thread.pla, self.root_pla);
-                if !self.is_allowed_root_move(move_loc) {
+                // Exempt the global policy argmax from the symmetry-duplicate
+                // restriction so the first visit explores the policy peak
+                // (see the comment above where `sym_argmax_exempt_loc` is set).
+                if move_loc != sym_argmax_exempt_loc && !self.is_allowed_root_move(move_loc) {
                     continue;
                 }
             }
@@ -6479,29 +6542,6 @@ impl<'a> Search<'a> {
                 parent_weight_per_visit,
                 true,
             );
-            if std::env::var("KATA_DEBUG_SELECT").is_ok() && is_root {
-                let mut special = String::new();
-                for (i, &v) in active_policy_probs.iter().enumerate().take(policy_size as usize)
-                {
-                    if v > 0.003 {
-                        let loc =
-                            nn_pos::pos_to_loc(i as i32, 19, 19, self.nn_x_len, self.nn_y_len);
-                        special.push_str(&format!(" pos{}->loc{}={:.4}", i, loc, v));
-                    }
-                }
-                eprintln!(
-                    "[select] root nchildren={} best_new={} prob={} fpu={:.4} sel={:.4} maxsel={:.4} pol288={:.6} pol361={:.6} special:{}",
-                    num_children_found,
-                    best_new_move_loc,
-                    best_new_nn_policy_prob,
-                    fpu_value,
-                    selection_value,
-                    max_selection_value,
-                    active_policy_probs[288],
-                    active_policy_probs[361],
-                    special
-                );
-            }
             if selection_value > max_selection_value {
                 max_selection_value = selection_value;
                 *best_child_idx = *num_children_found;
@@ -8147,6 +8187,43 @@ impl<'a> Search<'a> {
                 return false;
             }
 
+            // Same policy-argmax exemption as in select_best_child_to_descend:
+            // at zero visits the direct-policy fallback (C++
+            // `Search::getPlaySelectionValues`, searchresults.cpp) should still
+            // select the policy peak, not the highest-policy symmetry
+            // representative, when the peak happens to be a duplicate.
+            let mut sym_argmax_exempt_loc = NULL_LOC;
+            if self.search_params.root_symmetry_pruning {
+                let mut best_exempt_prob = -1.0f32;
+                for pos in 0..self.policy_size as usize {
+                    let policy_prob = policy_probs[pos];
+                    if policy_prob < 0.0 {
+                        continue;
+                    }
+                    let move_loc = nn_pos::pos_to_loc(
+                        pos as i32,
+                        self.root_board.x_size,
+                        self.root_board.y_size,
+                        self.nn_x_len,
+                        self.nn_y_len,
+                    );
+                    if move_loc == NULL_LOC {
+                        continue;
+                    }
+                    // Only the symmetry-duplicate restriction may be bypassed
+                    // for the policy argmax; all other root restrictions apply.
+                    if !(self.is_allowed_root_move(move_loc)
+                        || self.root_sym_dup_loc[move_loc as usize])
+                    {
+                        continue;
+                    }
+                    if policy_prob > best_exempt_prob {
+                        best_exempt_prob = policy_prob;
+                        sym_argmax_exempt_loc = move_loc;
+                    }
+                }
+            }
+
             let mut obey_allowed_root_move = true;
             loop {
                 for pos in 0..self.policy_size as usize {
@@ -8162,7 +8239,9 @@ impl<'a> Search<'a> {
                         move_loc,
                         policy_prob,
                         obey_allowed_root_move,
-                    ) {
+                    ) && !(move_loc == sym_argmax_exempt_loc
+                        && self.root_sym_dup_loc[move_loc as usize])
+                    {
                         continue;
                     }
                     if suppress_pass && move_loc == PASS_LOC {
