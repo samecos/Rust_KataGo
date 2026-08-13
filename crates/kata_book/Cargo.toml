@@ -1,0 +1,17 @@
+[package]
+name = "kata_book"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kata_core = { path = "../kata_core" }
+kata_game = { path = "../kata_game" }
+kata_search = { path = "../kata_search" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

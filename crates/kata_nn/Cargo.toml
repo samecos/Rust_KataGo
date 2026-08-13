@@ -1,0 +1,31 @@
+[package]
+name = "kata_nn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Enables the TensorRT backend module. Real inference still requires the
+# NVIDIA TensorRT native libraries to be available at build/link time.
+trt = []
+
+[dependencies]
+flate2 = { workspace = true }
+kata_core = { path = "../kata_core" }
+kata_game = { path = "../kata_game" }
+ndarray = { workspace = true }
+parking_lot = { workspace = true }
+prost = "0.13"
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+cc = "1"
+prost-build = "0.13"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+kata_data = { path = "../kata_data" }

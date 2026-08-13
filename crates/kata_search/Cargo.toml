@@ -1,0 +1,20 @@
+[package]
+name = "kata_search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kata_core = { path = "../kata_core" }
+kata_data = { path = "../kata_data" }
+kata_game = { path = "../kata_game" }
+kata_nn = { path = "../kata_nn" }
+serde_json = { workspace = true }
+rand = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]

@@ -1,0 +1,29 @@
+[package]
+name = "katago"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "katago-rs"
+path = "src/main.rs"
+
+[dependencies]
+kata_core = { path = "../kata_core" }
+kata_game = { path = "../kata_game" }
+kata_data = { path = "../kata_data" }
+kata_nn = { path = "../kata_nn" }
+kata_search = { path = "../kata_search" }
+kata_program = { path = "../kata_program" }
+kata_book = { path = "../kata_book" }
+kata_distributed = { path = "../kata_distributed" }
+clap = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

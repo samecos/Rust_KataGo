@@ -1,0 +1,12 @@
+/target/
+gtp_logs/
+*.log
+__pycache__/
+.venv/
+venv/
+
+# 模型与大数据文件（不入库）
+*.onnx
+*.bin.gz
+*.txt.gz
+*.bin

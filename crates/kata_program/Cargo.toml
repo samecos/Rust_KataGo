@@ -1,0 +1,17 @@
+[package]
+name = "kata_program"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kata_core = { path = "../kata_core" }
+kata_game = { path = "../kata_game" }
+kata_data = { path = "../kata_data" }
+kata_nn = { path = "../kata_nn" }
+kata_search = { path = "../kata_search" }
+parking_lot = { workspace = true }
+
+[dev-dependencies]

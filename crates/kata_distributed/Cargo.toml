@@ -1,0 +1,19 @@
+[package]
+name = "kata_distributed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kata_core = { path = "../kata_core" }
+kata_data = { path = "../kata_data" }
+kata_game = { path = "../kata_game" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }

@@ -1,0 +1,46 @@
+[workspace]
+members = [
+    "crates/kata_core",
+    "crates/kata_game",
+    "crates/kata_data",
+    "crates/kata_nn",
+    "crates/kata_search",
+    "crates/kata_program",
+    "crates/kata_book",
+    "crates/kata_distributed",
+    "crates/katago",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/lightvector/KataGo"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+rand = "0.8"
+parking_lot = "0.12"
+libm = "0.2"
+flate2 = "1.0"
+walkdir = "2"
+chrono = "0.4"
+ndarray = "0.16"
+crossbeam = "0.8"
+rayon = "1.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "multipart"] }
+sha2 = "0.10"
+hex = "0.4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
