@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 
 use parking_lot::{Condvar, Mutex as AsyncMutex};
 
-use kata_core::config::{Config, ConfigParser};
+use kata_core::config::ConfigParser;
 use kata_core::global::StringError;
 use kata_core::hash::Hash128;
 use kata_core::logger::Logger;
@@ -145,6 +145,7 @@ impl Drop for NnCacheTable {
 pub struct NnEvaluator {
     model_name: String,
     model_file_name: String,
+    expected_sha256: String,
     require_exact_nn_len: bool,
     inputs_use_nhwc: bool,
     using_fp16_mode: Enabled,
@@ -153,11 +154,11 @@ pub struct NnEvaluator {
     rand_seed: String,
     debug_skip_neural_net: bool,
     disable_warmup: bool,
+    cfg: ConfigParser,
 
     compute_context: Option<Box<dyn ComputeContext>>,
     loaded_model: Option<Box<dyn LoadedModel>>,
     compute_handle: Option<Box<dyn ComputeHandle>>,
-    input_buffers: Option<Box<dyn InputBuffers>>,
     backend: Option<Arc<dyn Backend>>,
     logger: Arc<Logger>,
 
@@ -205,6 +206,7 @@ struct SharedState {
     policy_size: i32,
     backend: Mutex<Option<Arc<dyn Backend>>>,
     compute_handles: Mutex<Vec<Box<dyn ComputeHandle>>>,
+    input_buffers: Mutex<Option<Box<dyn InputBuffers>>>,
 }
 
 impl SharedState {
@@ -259,11 +261,19 @@ impl SharedState {
                     bufs.iter_mut().map(|g| &mut **g).collect();
                 let mut output_refs: Vec<&mut NNOutput> = outputs.iter_mut().collect();
 
-                let dummy_buffers = DummyInputBuffers;
+                let buffers_guard = self.input_buffers.lock().unwrap();
+                let dummy_buffers;
+                let input_buffers: &dyn InputBuffers = match buffers_guard.as_deref() {
+                    Some(b) => b,
+                    None => {
+                        dummy_buffers = DummyInputBuffers;
+                        &dummy_buffers
+                    }
+                };
                 backend
                     .get_output(
                         handle_guard.as_ref(),
-                        &dummy_buffers,
+                        input_buffers,
                         n as i32,
                         &mut input_refs,
                         &mut output_refs,
@@ -340,7 +350,7 @@ impl NnEvaluator {
     pub fn new(
         model_name: String,
         model_file_name: String,
-        _expected_sha256: String,
+        expected_sha256: String,
         logger: Arc<Logger>,
         max_batch_size: i32,
         nn_x_len: i32,
@@ -358,7 +368,7 @@ impl NnEvaluator {
         do_randomize: bool,
         default_symmetry: i32,
         disable_warmup: bool,
-        _cfg: &ConfigParser,
+        cfg: &ConfigParser,
     ) -> Self {
         assert!(nn_x_len > 0, "nn_x_len must be positive");
         assert!(nn_y_len > 0, "nn_y_len must be positive");
@@ -386,11 +396,13 @@ impl NnEvaluator {
             policy_size: nn_x_len * nn_y_len + 1,
             backend: Mutex::new(None),
             compute_handles: Mutex::new(Vec::new()),
+            input_buffers: Mutex::new(None),
         });
 
         Self {
             model_name,
             model_file_name,
+            expected_sha256,
             require_exact_nn_len,
             inputs_use_nhwc,
             using_fp16_mode,
@@ -399,10 +411,10 @@ impl NnEvaluator {
             rand_seed,
             debug_skip_neural_net,
             disable_warmup,
+            cfg: cfg.clone(),
             compute_context: None,
             loaded_model: None,
             compute_handle: None,
-            input_buffers: None,
             backend: None,
             logger,
             internal_model_name: String::new(),
@@ -915,8 +927,9 @@ impl NnEvaluator {
     /// Load the configured model file using the currently set backend.
     ///
     /// Mirrors part of the model-loading path in
-    /// `cpp/program/setup.cpp`. In this slice the model is loaded
-    /// synchronously; server-thread creation remains future work.
+    /// `cpp/program/setup.cpp`. The model is loaded synchronously and the
+    /// per-server-thread compute handles and input buffers are prepared in
+    /// `SharedState` so that `spawn_server_threads` can pick them up.
     pub fn load_model(&mut self) -> Result<(), StringError> {
         if self.debug_skip_neural_net {
             return Ok(());
@@ -926,7 +939,7 @@ impl NnEvaluator {
             .as_ref()
             .ok_or_else(|| StringError::new("No backend set for NnEvaluator".to_string()))?;
         let model = backend
-            .load_model_file(&self.model_file_name, "")
+            .load_model_file(&self.model_file_name, &self.expected_sha256)
             .map_err(|e| StringError::new(format!("Could not load model file: {e}")))?;
         self.internal_model_name = model.model_desc().get_short_info_string();
         self.model_version = model.model_desc().model_version;
@@ -935,7 +948,7 @@ impl NnEvaluator {
         self.num_input_meta_channels = model.model_desc().num_input_meta_channels;
         self.post_process_params = model.model_desc().post_process_params;
 
-        let cfg = Config::new(false, true);
+        let cfg = &self.cfg;
         let compute_context = backend
             .create_compute_context(
                 &self.gpu_idx_by_server_thread,
@@ -945,7 +958,7 @@ impl NnEvaluator {
                 "",
                 self.using_fp16_mode,
                 &*model,
-                &cfg,
+                cfg,
             )
             .map_err(|e| StringError::new(format!("Could not create compute context: {e}")))?;
         let compute_handle = backend
@@ -971,7 +984,9 @@ impl NnEvaluator {
 
         self.compute_context = Some(compute_context);
         self.compute_handle = Some(compute_handle);
-        self.input_buffers = Some(input_buffers);
+        // Store the input buffers in SharedState so server threads can use
+        // them when processing batches.
+        *self.shared.input_buffers.lock().unwrap() = Some(input_buffers);
         self.loaded_model = Some(model);
 
         // Also store a clone of the backend and one compute handle per
@@ -1621,7 +1636,7 @@ mod tests {
         assert!(eval.model_version() > 0);
         assert!(eval.compute_context.is_some());
         assert!(eval.compute_handle.is_some());
-        assert!(eval.input_buffers.is_some());
+        assert!(eval.shared.input_buffers.lock().unwrap().is_some());
         assert!(eval.loaded_model.is_some());
     }
 

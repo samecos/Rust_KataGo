@@ -1601,6 +1601,38 @@ pub fn get_backend_prefixes() -> Vec<String> {
     ]
 }
 
+/// Select the neural-net backend name from the `nnBackend` config key.
+///
+/// `model_idx` selects the per-model key `nnBackend{i}`; `None` reads the
+/// base `nnBackend` key. Returns `Ok(None)` when the key is absent, and a
+/// normalized backend name otherwise ("dummybackend" / "trtbackend" /
+/// "cudabackend" / "eigenbackend").
+fn select_backend_prefix(
+    cfg: &ConfigParser,
+    model_idx: Option<usize>,
+) -> Result<Option<String>, StringError> {
+    let key = match model_idx {
+        Some(i) => format!("nnBackend{i}"),
+        None => "nnBackend".to_string(),
+    };
+    if !cfg.contains(&key) {
+        return Ok(None);
+    }
+    let value = cfg.get_string(&key).map_err(to_string_error)?;
+    let normalized = match value.as_str() {
+        "dummy" | "dummybackend" => "dummybackend".to_string(),
+        "trt" | "tensorrt" | "trtbackend" => "trtbackend".to_string(),
+        "cuda" | "cudabackend" => "cudabackend".to_string(),
+        "eigen" | "cpu" | "eigenbackend" => "eigenbackend".to_string(),
+        _ => {
+            return Err(StringError::new(format!(
+                "Unknown nnBackend value: {value}"
+            )))
+        }
+    };
+    Ok(Some(normalized))
+}
+
 /// Compute a reasonable default number of Eigen backend threads.
 ///
 /// Mirrors `Setup::computeDefaultEigenBackendThreads` in `cpp/program/setup.cpp`.
@@ -1690,13 +1722,15 @@ pub fn initialize_nn_evaluators(
         ));
     }
 
-    // Only the dummy backend is fully implemented in Rust, so default to it.
-    let backend_prefix = "dummybackend";
+    // Backend selection: `nnBackend` config key (per-model override via
+    // `nnBackend{i}`). Defaults to the dummy backend.
+    let default_backend_prefix = select_backend_prefix(cfg, None)?
+        .unwrap_or_else(|| "dummybackend".to_string());
 
     // Flag keys for other backends as used so that unused-backend config keys
     // do not trigger unused-key warnings.
     for prefix in get_backend_prefixes() {
-        if prefix != backend_prefix {
+        if prefix != default_backend_prefix {
             cfg.mark_all_keys_used_with_prefix(&prefix);
         }
     }
@@ -1712,6 +1746,8 @@ pub fn initialize_nn_evaluators(
         } else {
             expected_sha256s[i].clone()
         };
+        let backend_prefix = select_backend_prefix(cfg, Some(i))?
+            .unwrap_or_else(|| default_backend_prefix.clone());
 
         let debug_skip_neural_net_default = nn_model_file == "/dev/null";
         let debug_skip_neural_net = if setup_for == SetupFor::Distributed {
@@ -2079,6 +2115,21 @@ pub fn initialize_nn_evaluators(
             disable_warmup,
             cfg,
         );
+
+        // Wire the selected backend into the evaluator before spawning its
+        // server threads (spawn only happens once compute handles exist).
+        match backend_prefix.as_str() {
+            "dummybackend" => {}
+            "trtbackend" => {
+                nn_eval.set_backend(Arc::new(kata_nn::backends::trt::TensorRtBackend));
+                nn_eval.load_model().map_err(to_string_error)?;
+            }
+            other => {
+                return Err(StringError::new(format!(
+                    "Backend '{other}' is not implemented yet"
+                )));
+            }
+        }
 
         nn_eval.spawn_server_threads();
 

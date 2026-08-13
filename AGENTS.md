@@ -6,9 +6,15 @@ KataGo 围棋引擎的 Rust 移植（基座：KataGo-Lite/katago-rs，约 10 万
 ## 构建与运行
 
 - 构建（默认特性，dummy 后端）：`cargo build --workspace`
-- 全特性（含 `trt`，需本机 CUDA + TensorRT 头文件）：`cargo build --workspace --all-features`
+- 全特性（含 `trt`，需本机 CUDA + TensorRT 头文件）：`cargo build -p katago --features trt`
 - 测试：`cargo test --workspace`
 - GTP 冒烟：`scripts/gtp_smoke.sh`（或手动 `cargo run --bin katago-rs -- gtp --config configs/gtp_smoke.cfg --model D:/code/b11fix.onnx`）
+
+## 后端选择
+
+- 配置键 `nnBackend`（每模型可用 `nnBackend{i}` 覆盖）：`dummybackend`（默认）/ `trtbackend` / `cudabackend` / `eigenbackend`（后两者未实现，选择即报错）
+- `trtbackend` 需要 `katago` 的 `trt` feature（透传 `kata_nn/trt`），构建时探测本机 CUDA+TensorRT；未启用 feature 时选择 trtbackend 会得到明确的报错
+- 命令行示例：`--override-config nnBackend=trtbackend`
 
 ## 目录
 

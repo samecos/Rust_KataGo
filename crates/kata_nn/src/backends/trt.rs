@@ -140,7 +140,6 @@ mod imp {
     // ------------------------------------------------------------------
 
     pub struct TensorRtLoadedModel {
-        model_path: String,
         model_desc: ModelDesc,
     }
 
@@ -207,9 +206,10 @@ mod imp {
             file: &str,
             _expected_sha256: &str,
         ) -> Result<Box<dyn LoadedModel>, NeuralNetError> {
+            let model_desc = crate::model_parser::load_model_file(file)
+                .map_err(|e| NeuralNetError(format!("model load failed: {e}")))?;
             Ok(Box::new(TensorRtLoadedModel {
-                model_path: file.to_string(),
-                model_desc: ModelDesc::default(),
+                model_desc,
             }))
         }
 
@@ -222,19 +222,24 @@ mod imp {
             _home_data_dir_override: &str,
             use_fp16_mode: Enabled,
             loaded_model: &dyn LoadedModel,
-            _cfg: &Config,
+            cfg: &Config,
         ) -> Result<Box<dyn ComputeContext>, NeuralNetError> {
             let model = loaded_model
                 .as_any()
                 .downcast_ref::<TensorRtLoadedModel>()
                 .ok_or_else(|| NeuralNetError("Wrong loaded model type".to_string()))?;
 
-            let max_batch_size: i32 = 8; // TODO: from config
+            // Engine optimization-profile batch size; mirrors the evaluator's
+            // nnMaxBatchSize when present.
+            let max_batch_size: i32 = if cfg.contains("nnMaxBatchSize") {
+                cfg.get_int("nnMaxBatchSize", 1, 65536).unwrap_or(8)
+            } else {
+                8
+            };
             let use_fp16 = !matches!(use_fp16_mode, Enabled::False);
 
-            // 1. Load the model file → ModelDesc
-            let model_desc = crate::model_parser::load_model_file(&model.model_path)
-                .map_err(|e| NeuralNetError(format!("model load failed: {e}")))?;
+            // 1. Use the ModelDesc parsed during load_model_file.
+            let model_desc = model.model_desc.clone();
 
             // 2. Build ONNX from ModelDesc
             let onnx_result = crate::onnx_builder::build(
