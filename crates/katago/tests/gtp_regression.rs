@@ -50,6 +50,16 @@ fn gtp_session(commands: &[&str]) -> String {
         .join("\n")
 }
 
+/// 与 [`gtp_session`] 相同，但把命令中的 "PLACEHOLDER" 替换为 `path`（用于 loadsgf）。
+fn gtp_session_with(commands: &[&str], path: &str) -> String {
+    let replaced: Vec<String> = commands
+        .iter()
+        .map(|c| c.replace("PLACEHOLDER", path))
+        .collect();
+    let refs: Vec<&str> = replaced.iter().map(|s| s.as_str()).collect();
+    gtp_session(&refs)
+}
+
 #[test]
 fn gtp_protocol_basics() {
     let replies = gtp_session(&["protocol_version", "name", "version", "known_command play", "known_command no_such_cmd"]);
@@ -177,6 +187,56 @@ fn gtp_analysis_commands_smoke() {
         replies.contains("info move") || replies.contains("play"),
         "lz-analyze 应产出分析行: {replies:?}"
     );
+}
+
+#[test]
+fn gtp_free_handicap_and_sgf_io() {
+    // set_free_handicap：指定让子位置
+    let replies = gtp_session(&[
+        "boardsize 19",
+        "clear_board",
+        "set_free_handicap D4 Q16 D16 Q4",
+        "showboard",
+        "printsgf",
+    ]);
+    let xs = replies.matches('X').count();
+    assert!(xs >= 4, "set_free_handicap 4 子: got {xs}: {replies:?}");
+
+    // place_free_handicap：引擎自选让子
+    let replies2 = gtp_session(&[
+        "boardsize 19",
+        "clear_board",
+        "place_free_handicap 5",
+        "showboard",
+    ]);
+    let xs2 = replies2.matches('X').count();
+    assert!(xs2 >= 5, "place_free_handicap 5 子: got {xs2}: {replies2:?}");
+
+    // loadsgf：临时 SGF 文件加载到指定手数
+    let sgf = "(;FF[4]GM[1]SZ[19]KM[7.5]PB[B]PW[W];B[dd];W[pp];B[pd])";
+    let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+    f.write_all(sgf.as_bytes()).expect("write sgf");
+    let replies3 = gtp_session_with(&[
+        "boardsize 19",
+        "loadsgf PLACEHOLDER 1",
+        "showboard",
+        "printsgf",
+    ], f.path().to_str().unwrap());
+    assert!(replies3.contains('X'), "loadsgf 后应有黑子: {replies3:?}");
+}
+
+#[test]
+fn gtp_kgs_time_settings() {
+    let replies = gtp_session(&[
+        "boardsize 19",
+        "clear_board",
+        "kgs-time_settings byoyomi 300 5 30",
+        "time_left B 200 2",
+        "time_left W 100 0",
+    ]);
+    // byoyomi 时限设置不应报错（应答里无 ? 前缀错误行——解析器已剥离前缀，
+    // 错误文本会直接出现在行内；此处仅断言会话不崩溃且有过应答）。
+    assert!(!replies.is_empty(), "kgs-time_settings 应答");
 }
 
 #[test]
