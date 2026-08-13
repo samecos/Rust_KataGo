@@ -46,3 +46,9 @@
 - GEMM 主循环 mma.sync.aligned.m16n8k16（已实现并数值验证，见 cuda-kernels/gemm.cu）
 - attention 主循环（M4 换 FA both16 tile 版，v1 已数值验证）
 - 后续探索：sm_120a 的 FP8 块缩放 mma（fork 未做，风险项）
+
+## 已知缺口（待修，按优先级）
+
+1. **GTP 参数系统**：`kata_search/src/params.rs` 的 changeable 参数表仅 9 条，C++ `searchparams.cpp` 有 115 条；`kata-set-params`（JSON 批量）未实现。影响 kata-get/set-param、kata-list-params、kata-set-params 的完整性（需求 F2）。修法：对照 C++ changeableParametersToJson 补齐 + gtp.rs 的批量设置。
+2. **analysis allowMoves**：每请求限 1 条（C++ 允许每玩家 1 条共 2 条）。
+3. **M4 待做**：见上方决策组表。
