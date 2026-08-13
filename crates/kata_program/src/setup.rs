@@ -1847,7 +1847,8 @@ pub fn initialize_nn_evaluators(
         }
 
         // TensorRT 后端使用 NCHW 布局（与 C++ setup 一致：TRT 强制 NCHW）。
-        if backend_prefix == "trtbackend" {
+        // 手写 CUDA 后端（cuda_exec）同样只支持 NCHW（im2col 输入 [B,22,19,19]）。
+        if backend_prefix == "trtbackend" || backend_prefix == "cudabackend" {
             inputs_use_nhwc = false;
         }
 

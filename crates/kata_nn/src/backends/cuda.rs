@@ -674,6 +674,18 @@ mod backend_impl {
 
             // --- 上传 + 前向 -------------------------------------------------
             let stream = h.rt.device.default_stream();
+
+            // 调试钩子：dump 后端收到的输入（KATAGO_CUDA_DUMP_INPUT=<dir>）。
+            if let Ok(d) = std::env::var("KATAGO_CUDA_DUMP_INPUT") {
+                let _ = std::fs::create_dir_all(&d);
+                let w = |name: &str, data: &[f32]| {
+                    let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+                    let _ = std::fs::write(format!("{d}/{name}.bin"), bytes);
+                };
+                w("spatial", &spatial_host);
+                w("global", &global_host);
+            }
+
             let mut d_spatial: cudarc::driver::CudaSlice<f32> =
                 unsafe { stream.alloc(spatial_host.len()) }
                     .map_err(|e| NeuralNetError(format!("alloc spatial: {e}")))?;
