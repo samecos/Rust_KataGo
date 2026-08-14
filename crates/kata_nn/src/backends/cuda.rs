@@ -451,7 +451,7 @@ mod backend_impl {
         Backend, ComputeContext, ComputeHandle, Enabled, InputBuffers, LoadedModel, NNOutput,
         NNResultBuf, NeuralNetError,
     };
-    use crate::backends::cuda_exec::{set_capturing, CudaModel, CudaWorkspace};
+    use crate::backends::cuda_exec::{set_capturing, CudaModel, CudaOutputsHost, CudaWorkspace};
     use crate::desc::ModelDesc;
     use kata_core::config::Config;
     use kata_core::logger::Logger;
@@ -494,11 +494,20 @@ mod backend_impl {
 
     /// per-handle 的 CUDA Graph 状态：固定 batch 的输入缓冲 + 工作区 + 已捕获图。
     /// 首次前向捕获（180 kernel → 1 次 graph 提交），后续复用。
+    /// 输入/输出走 pinned host 内存（htod/dtoh 真正异步，避免非 pinned
+    /// 的退化同步往返；每次前向仅一次 event 同步）。
     struct CudaGraphState {
         graph: cudarc::driver::CudaGraph,
         ws: CudaWorkspace,
         in_spatial: cudarc::driver::CudaSlice<f32>,
         in_global: cudarc::driver::CudaSlice<f32>,
+        in_sp_pin: cudarc::driver::PinnedHostSlice<f32>,
+        in_gl_pin: cudarc::driver::PinnedHostSlice<f32>,
+        out_policy_pin: cudarc::driver::PinnedHostSlice<f32>,
+        out_value_pin: cudarc::driver::PinnedHostSlice<f32>,
+        out_misc_pin: cudarc::driver::PinnedHostSlice<f32>,
+        out_moremisc_pin: cudarc::driver::PinnedHostSlice<f32>,
+        out_own_pin: cudarc::driver::PinnedHostSlice<f32>,
     }
 
     // 图与其中指针仅在其归属的 serve 线程内创建/launch；Mutex 只是
@@ -734,19 +743,28 @@ mod backend_impl {
                     None => true,
                 };
                 if need_capture {
-                    // 固定地址输入缓冲 + 工作区，捕获整图（htod/dtoh 在图外）。
+                    // 固定地址输入缓冲 + 工作区 + pinned host 缓冲，
+                    // 捕获整图（htod/dtoh 在图外）。
                     let mut in_spatial: cudarc::driver::CudaSlice<f32> =
                         unsafe { stream.alloc(spatial_host.len()) }
                             .map_err(|e| NeuralNetError(format!("alloc in_spatial: {e}")))?;
                     let mut in_global: cudarc::driver::CudaSlice<f32> =
                         unsafe { stream.alloc(global_host.len()) }
                             .map_err(|e| NeuralNetError(format!("alloc in_global: {e}")))?;
-                    stream
-                        .memcpy_htod(spatial_host.as_slice(), &mut in_spatial)
-                        .map_err(|e| NeuralNetError(format!("upload spatial: {e}")))?;
-                    stream
-                        .memcpy_htod(global_host.as_slice(), &mut in_global)
-                        .map_err(|e| NeuralNetError(format!("upload global: {e}")))?;
+                    let in_sp_pin = unsafe { h.rt.device.alloc_pinned::<f32>(spatial_host.len()) }
+                        .map_err(|e| NeuralNetError(format!("pinned in_sp: {e}")))?;
+                    let in_gl_pin = unsafe { h.rt.device.alloc_pinned::<f32>(global_host.len()) }
+                        .map_err(|e| NeuralNetError(format!("pinned in_gl: {e}")))?;
+                    let out_policy_pin = unsafe { h.rt.device.alloc_pinned::<f32>(n * 6 * 362) }
+                        .map_err(|e| NeuralNetError(format!("pinned out_policy: {e}")))?;
+                    let out_value_pin = unsafe { h.rt.device.alloc_pinned::<f32>(n * 3) }
+                        .map_err(|e| NeuralNetError(format!("pinned out_value: {e}")))?;
+                    let out_misc_pin = unsafe { h.rt.device.alloc_pinned::<f32>(n * 10) }
+                        .map_err(|e| NeuralNetError(format!("pinned out_misc: {e}")))?;
+                    let out_moremisc_pin = unsafe { h.rt.device.alloc_pinned::<f32>(n * 8) }
+                        .map_err(|e| NeuralNetError(format!("pinned out_moremisc: {e}")))?;
+                    let out_own_pin = unsafe { h.rt.device.alloc_pinned::<f32>(n * policy_area) }
+                        .map_err(|e| NeuralNetError(format!("pinned out_own: {e}")))?;
                     let mut ws = CudaWorkspace::new(stream, &h.model, n)
                         .map_err(|e| NeuralNetError(format!("CUDA workspace alloc failed: {e}")))?;
                     set_capturing(true);
@@ -774,24 +792,86 @@ mod backend_impl {
                         ws,
                         in_spatial,
                         in_global,
+                        in_sp_pin,
+                        in_gl_pin,
+                        out_policy_pin,
+                        out_value_pin,
+                        out_misc_pin,
+                        out_moremisc_pin,
+                        out_own_pin,
                     });
                 }
                 let st = g.as_mut().unwrap();
-                // 覆盖输入（固定设备地址，与捕获时一致）。
+                // 填 pinned 输入 → 异步 htod（固定设备地址）→ graph 提交 →
+                // 异步 dtoh 到 pinned → 一次同步后读。
+                {
+                    let sp = st
+                        .in_sp_pin
+                        .as_mut_slice()
+                        .map_err(|e| NeuralNetError(format!("pin in_sp: {e}")))?;
+                    sp.copy_from_slice(&spatial_host);
+                    let gl = st
+                        .in_gl_pin
+                        .as_mut_slice()
+                        .map_err(|e| NeuralNetError(format!("pin in_gl: {e}")))?;
+                    gl.copy_from_slice(&global_host);
+                }
                 stream
-                    .memcpy_htod(spatial_host.as_slice(), &mut st.in_spatial)
+                    .memcpy_htod(&st.in_sp_pin, &mut st.in_spatial)
                     .map_err(|e| NeuralNetError(format!("upload spatial: {e}")))?;
                 stream
-                    .memcpy_htod(global_host.as_slice(), &mut st.in_global)
+                    .memcpy_htod(&st.in_gl_pin, &mut st.in_global)
                     .map_err(|e| NeuralNetError(format!("upload global: {e}")))?;
                 st.graph
                     .launch()
                     .map_err(|e| NeuralNetError(format!("graph launch: {e}")))?;
-                // 不显式 synchronize：to_host 的 memcpy_dtoh 经 SyncOnDrop
-                // 在拷贝完成时同步流（减少一次 WDDM 同步往返）。
-                st.ws
-                    .to_host(stream)
-                    .map_err(|e| NeuralNetError(format!("CUDA download failed: {e}")))?
+                stream
+                    .memcpy_dtoh(&st.ws.out_policy, &mut st.out_policy_pin)
+                    .map_err(|e| NeuralNetError(format!("dtoh policy: {e}")))?;
+                stream
+                    .memcpy_dtoh(&st.ws.out_value, &mut st.out_value_pin)
+                    .map_err(|e| NeuralNetError(format!("dtoh value: {e}")))?;
+                stream
+                    .memcpy_dtoh(&st.ws.out_misc, &mut st.out_misc_pin)
+                    .map_err(|e| NeuralNetError(format!("dtoh misc: {e}")))?;
+                stream
+                    .memcpy_dtoh(&st.ws.out_moremisc, &mut st.out_moremisc_pin)
+                    .map_err(|e| NeuralNetError(format!("dtoh moremisc: {e}")))?;
+                stream
+                    .memcpy_dtoh(&st.ws.out_ownership, &mut st.out_own_pin)
+                    .map_err(|e| NeuralNetError(format!("dtoh ownership: {e}")))?;
+                // 流级同步（WC pinned 内存的 host 读需设备写全局可见）
+                stream
+                    .synchronize()
+                    .map_err(|e| NeuralNetError(format!("sync: {e}")))?;
+                let host = CudaOutputsHost {
+                    policy: st
+                        .out_policy_pin
+                        .as_slice()
+                        .map_err(|e| NeuralNetError(format!("sync policy: {e}")))?
+                        .to_vec(),
+                    value: st
+                        .out_value_pin
+                        .as_slice()
+                        .map_err(|e| NeuralNetError(format!("sync value: {e}")))?
+                        .to_vec(),
+                    misc: st
+                        .out_misc_pin
+                        .as_slice()
+                        .map_err(|e| NeuralNetError(format!("sync misc: {e}")))?
+                        .to_vec(),
+                    moremisc: st
+                        .out_moremisc_pin
+                        .as_slice()
+                        .map_err(|e| NeuralNetError(format!("sync moremisc: {e}")))?
+                        .to_vec(),
+                    ownership: st
+                        .out_own_pin
+                        .as_slice()
+                        .map_err(|e| NeuralNetError(format!("sync ownership: {e}")))?
+                        .to_vec(),
+                };
+                host
             };
 
             // --- 解码 v15 输出（与 trt.rs generic_get_output 同口径） --------

@@ -234,3 +234,54 @@ fn cuda_graph_minimal_capture() {
     assert!((out_h[0] - 1.0).abs() < 1e-4, "out[0] should be 1.0");
     assert!((out_h[5] - 6.0).abs() < 1e-4, "out[5] should be 6.0");
 }
+
+#[test]
+fn cuda_graph_launch_sync_latency() {
+    let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else {
+        eprintln!("skipped: CUDA runtime unavailable");
+        return;
+    };
+    use cudarc::driver::PushKernelArg;
+    let f = rt.get_func("f32_add_kernel").expect("kernel");
+    let stream = rt.device.new_stream().expect("stream");
+    let n = 1024usize;
+    let mut a: cudarc::driver::CudaSlice<f32> = unsafe { stream.alloc(n) }.expect("a");
+    let mut b: cudarc::driver::CudaSlice<f32> = unsafe { stream.alloc(n) }.expect("b");
+    let mut out: cudarc::driver::CudaSlice<f32> = stream.alloc_zeros(n).expect("out");
+    use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
+    stream.synchronize().expect("presync");
+    stream
+        .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL)
+        .expect("begin");
+    let cfg = cudarc::driver::LaunchConfig::for_num_elems(n as u32);
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(&a)
+            .arg(&b)
+            .arg(&mut out)
+            .arg(&(n as i32))
+            .launch(cfg)
+    }
+    .expect("launch");
+    let flags: CUgraphInstantiate_flags = unsafe { std::mem::transmute(0u32) };
+    let graph = stream.end_capture(flags).expect("end").expect("graph");
+    graph.upload().expect("upload");
+    // 热身
+    for _ in 0..10 {
+        graph.launch().expect("l");
+        stream.synchronize().expect("s");
+    }
+    let t0 = std::time::Instant::now();
+    let iters = 1000u32;
+    for _ in 0..iters {
+        graph.launch().expect("l");
+        stream.synchronize().expect("s");
+    }
+    let dt = t0.elapsed();
+    eprintln!(
+        "graph launch+sync latency: {:.1} µs/iter ({} iters, total {dt:.2?})",
+        dt.as_secs_f64() * 1e6 / iters as f64,
+        iters
+    );
+}
