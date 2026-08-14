@@ -413,21 +413,27 @@ hgemm_v2_gatesilu_f16_kernel(const __half* __restrict__ A,
 
 #define T64_BM 64
 #define T64_BN 64
-#define T64_BK 32
+#define T64_BK 64
 #define T64_STAGES 2
 
-// 每 k-tile：A/B 各 64×32 f16 = 4KB = 256 个 16B chunk（每线程 1 个）。
+// 64 列 tile 打包偏移（行组 = 8 行 × 128B = 1024B）。
+__device__ __forceinline__ unsigned t64_smem_off64(int r, int c) {
+    return ((unsigned)(r >> 3) << 10) | ((unsigned)(c >> 3) << 7) |
+           ((unsigned)(r & 7) << 4) | ((unsigned)(c & 7) << 1);
+}
+
+// 每 k-tile：A/B 各 64×64 f16 = 8KB = 512 个 16B chunk（每线程 2 个）。
 template <bool IS_B>
 __device__ __forceinline__ void t64_load_chunk(
     __half* sA, __half* sB, const __half* __restrict__ A,
     const __half* __restrict__ B, int stage, int cid, int kk,
     int M, int N, int K, int blockM, int blockN) {
-    const int row = cid >> 2;
-    const int c16 = cid & 3;
+    const int row = cid >> 3;
+    const int c16 = cid & 7;
     const int k_start = kk + c16 * 8;
     const unsigned saddr =
         (unsigned)__cvta_generic_to_shared(IS_B ? sB : sA) +
-        stage * (T64_BM * T64_BK * 2) + v2_smem_off(row, c16 * 8);
+        stage * (T64_BM * T64_BK * 2) + t64_smem_off64(row, c16 * 8);
     if (k_start >= K) {
         v2_smem_zero16(saddr);
         return;
@@ -469,11 +475,15 @@ __device__ __forceinline__ void t64_hgemm_impl(
         for (int r = 0; r < 4; ++r) c[j][r] = 0.0f;
 
     auto issue_stage = [&](int stage, int kk) {
-        // 每级 256 chunk，每线程 1 个 A + 1 个 B
+        // 每级 512 chunk，每线程 2 个 A + 2 个 B
         t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M,
                               N, K, blockM, blockN);
+        t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid + 256,
+                              kk, M, N, K, blockM, blockN);
         t64_load_chunk<true>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M, N,
                              K, blockM, blockN);
+        t64_load_chunk<true>(&sA[0][0], &sB[0][0], A, B, stage, tid + 256, kk,
+                             M, N, K, blockM, blockN);
     };
 
     issue_stage(0, 0);
@@ -497,26 +507,29 @@ __device__ __forceinline__ void t64_hgemm_impl(
         const int wrow = warp >> 1;  // 0..3（16 行组）
         const int wcol = warp & 1;   // 0..1（32 列组）
 
-        // B：4 个 N 步 × 4 个 k8 窗口（每步 4 个 8×8：k0/k8/k16/k24）。
-        unsigned b_frag[4][4];
+        // B：4 个 N 步 × 8 个 k8 窗口（64 列：2 个 ldmatrix_x4 各覆盖 32 列）。
+        unsigned b_frag[4][8];
 #pragma unroll
         for (int t = 0; t < 4; ++t) {
             const unsigned b_base =
-                sB_base + (((wcol * 32 + t * 8) >> 3) << 9);
+                sB_base + (((wcol * 32 + t * 8) >> 3) << 10);
             v2_ldmatrix_x4(b_frag[t][0], b_frag[t][1], b_frag[t][2],
                            b_frag[t][3], b_base, 256, lane);
+            v2_ldmatrix_x4(b_frag[t][4], b_frag[t][5], b_frag[t][6],
+                           b_frag[t][7], b_base + 512, 256, lane);
         }
-        // A：1 个 M 步 × 2 个 k16 步（每步 4 个 8×8）。
-        unsigned a_frag[2][4];
+        // A：1 个 M 步 × 4 个 k16 步（每步 4 个 8×8）。
+        // 64 列布局行组 = 8 行 × 128B = 1024B → delta2=1024（r+8 行组）。
+        unsigned a_frag[4][4];
 #pragma unroll
-        for (int s = 0; s < 2; ++s) {
+        for (int s = 0; s < 4; ++s) {
             const unsigned a_base =
-                sA_base + (((wrow * 16) >> 3) << 9) + s * 256;
+                sA_base + (((wrow * 16) >> 3) << 10) + s * 256;
             v2_ldmatrix_x4(a_frag[s][0], a_frag[s][1], a_frag[s][2],
-                           a_frag[s][3], a_base, 512, lane);
+                           a_frag[s][3], a_base, 1024, lane);
         }
 #pragma unroll
-        for (int s = 0; s < 2; ++s) {
+        for (int s = 0; s < 4; ++s) {
             const unsigned a0 = a_frag[s][0];
             const unsigned a1 = a_frag[s][2];
             const unsigned a2 = a_frag[s][1];
