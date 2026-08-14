@@ -139,8 +139,8 @@ enum LayerBuf {
         channels: usize,
     },
     PolicyHead {
-        conv1p: WeightBuf,
-        conv1g: WeightBuf,
+        /// 合并的 conv1p/conv1g [192, 768]（G4 头融合，-1 kernel）。
+        conv1pg: WeightBuf,
         g_bias: ParamBuf,
         g_matmul: WeightBuf,
         pass1: WeightBuf,
@@ -246,6 +246,7 @@ impl CudaModel {
         let vec_a = &mut ws.vec_a;
         let vec_b = &mut ws.vec_b;
         let vall = &mut ws.vall;
+        let conv1pg = &mut ws.conv1pg;
         let pass_logits = &mut ws.pass_logits;
         let out_policy = &mut ws.out_policy;
         let out_value = &mut ws.out_value;
@@ -471,8 +472,7 @@ impl CudaModel {
                     false
                 }
                 LayerBuf::PolicyHead {
-                    conv1p: c1p,
-                    conv1g: c1g,
+                    conv1pg: c1pg,
                     g_bias,
                     g_matmul,
                     pass1,
@@ -482,10 +482,10 @@ impl CudaModel {
                     conv2p,
                     mask_scale,
                 } => {
-                    // conv1p / conv1g（1x1，A=gated768 f16 激活流，K=768）
-                    hgemm(rt, gated768, c1p, conv1p, m)?;
-                    hgemm(rt, gated768, c1g, gemm_out, m)?;
-                    add_bias_silu_f16(rt, gemm_out, &g_bias.data, p192, m * 96, 96)?;
+                    // conv1p|conv1g 合并 GEMM（N=192，G4）→ conv1pg [M,192] f32
+                    hgemm(rt, gated768, c1pg, conv1pg, m)?;
+                    // conv1g 部分（后 96 列）→ BN+silu → p192
+                    add_bias_silu_f16_ld(rt, conv1pg, 96, 192, &g_bias.data, p192, m * 96, 96)?;
                     // 池化：[mean, mean*scale, max]（f32；小头链路保持 f32 精度）
                     pool_mean_max(rt, p192, pooled, batch, s, 96, *mask_scale)?;
                     // pass 分支：Gemm+bias → SiLU → Gemm（f32×f16 混合小 GEMM）
@@ -494,7 +494,8 @@ impl CudaModel {
                     sgemm(rt, vec_a, pass2, pass_logits, batch)?;
                     // g 分支：Gemm → +conv1p → +bias2 → SiLU → conv2p
                     sgemm(rt, pooled, g_matmul, vec_b, batch)?;
-                    policy_g(rt, conv1p, vec_b, &bias2.data, p96f, batch, s, 96)?;
+                    // conv1p 部分（前 96 列）
+                    policy_g_ld(rt, conv1pg, 0, 192, vec_b, &bias2.data, p96f, batch, s, 96)?;
                     sgemm(rt, p96f, conv2p, gemm_out, m)?;
                     // 拼接 [B,6,362]；penalty=0（19 路无非法落点，结构保留）
                     policy_concat(rt, gemm_out, pass_logits, out_policy, batch, s, 6, 0.0)?;
@@ -739,8 +740,13 @@ fn upload_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
             channels: l.channels,
         },
         Layer::PolicyHead(l) => LayerBuf::PolicyHead {
-            conv1p: upload_weight(stream, &l.conv1p_weight, 96, 768)?,
-            conv1g: upload_weight(stream, &l.conv1g_weight, 96, 768)?,
+            conv1pg: upload_weight_concat2(
+                stream,
+                &l.conv1p_weight,
+                &l.conv1g_weight,
+                96,
+                768,
+            )?,
             g_bias: upload_param(stream, &l.g_bias, 96)?,
             g_matmul: upload_weight(stream, &l.g_matmul, 96, 288)?,
             pass1: upload_weight(stream, &l.pass_matmul1, 96, 288)?,
@@ -1298,6 +1304,36 @@ fn add_bias_silu_f16(
     Ok(())
 }
 
+/// 带输入 leading-dim/offset 的 add_bias_silu（G4 合并 GEMM 输出子段读取）。
+#[allow(clippy::too_many_arguments)]
+fn add_bias_silu_f16_ld(
+    rt: &CudaRuntime,
+    x: &CudaSlice<f32>,
+    in_off: usize,
+    in_ld: usize,
+    bias: &CudaSlice<f32>,
+    out: &mut CudaSlice<u16>,
+    n: usize,
+    c: usize,
+) -> Result<(), String> {
+    let f = rt.get_func("add_bias_silu_f16_ld_kernel")?;
+    let stream = active_stream(rt);
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(x)
+            .arg(bias)
+            .arg(out)
+            .arg(&(n as i32))
+            .arg(&(c as i32))
+            .arg(&(in_ld as i32))
+            .arg(&(in_off as i32))
+            .launch(LaunchConfig::for_num_elems(n as u32))
+    }
+    .map_err(|e| format!("add_bias_silu_f16_ld launch failed: {e}"))?;
+    Ok(())
+}
+
 /// f32 就地 bias + SiLU。
 fn bias_silu_f32(
     rt: &CudaRuntime,
@@ -1777,6 +1813,41 @@ fn policy_g(
     Ok(())
 }
 
+/// 带 conv1p leading-dim/offset 的 policy_g（G4 合并 GEMM 输出子段读取）。
+#[allow(clippy::too_many_arguments)]
+fn policy_g_ld(
+    rt: &CudaRuntime,
+    conv1p: &CudaSlice<f32>,
+    c1_off: usize,
+    c1_ld: usize,
+    gproj: &CudaSlice<f32>,
+    bias2: &CudaSlice<f32>,
+    out: &mut CudaSlice<f32>,
+    batch: usize,
+    s: usize,
+    c: usize,
+) -> Result<(), String> {
+    let f = rt.get_func("policy_g_ld_kernel")?;
+    let stream = active_stream(rt);
+    let n = batch * s * c;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(conv1p)
+            .arg(gproj)
+            .arg(bias2)
+            .arg(out)
+            .arg(&(batch as i32))
+            .arg(&(s as i32))
+            .arg(&(c as i32))
+            .arg(&(c1_ld as i32))
+            .arg(&(c1_off as i32))
+            .launch(LaunchConfig::for_num_elems(n as u32))
+    }
+    .map_err(|e| format!("policy_g_ld launch failed: {e}"))?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn policy_concat(
     rt: &CudaRuntime,
@@ -1838,6 +1909,8 @@ pub struct CudaWorkspace {
     pub vec_b: CudaSlice<f32>,
     /// ValueHead 合并输出 [B,21]（value|misc|moremisc，G4 头融合）。
     pub vall: CudaSlice<f32>,
+    /// PolicyHead 合并的 conv1p|conv1g 输出 [M,192] f32。
+    pub conv1pg: CudaSlice<f32>,
     pub pass_logits: CudaSlice<f32>,
     /// `[B, 6, 362]` 策略 logits（通道 0 基策略、通道 5 乐观策略，pass 位 361）。
     pub out_policy: CudaSlice<f32>,
@@ -1883,6 +1956,7 @@ impl CudaWorkspace {
             vec_a: zeros32(stream, batch * 192)?,
             vec_b: zeros32(stream, batch * 96)?,
             vall: zeros32(stream, batch * 21)?,
+            conv1pg: zeros32(stream, m * 192)?,
             pass_logits: zeros32(stream, batch * 6)?,
             out_policy: zeros32(stream, batch * 6 * (s + 1))?,
             out_value: zeros32(stream, batch * 3)?,

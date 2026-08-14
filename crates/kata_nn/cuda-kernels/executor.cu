@@ -206,6 +206,20 @@ extern "C" __global__ void add_bias_silu_f16_kernel(const float* __restrict__ in
     out[i] = __float2half(v);
 }
 
+// 带输入 leading-dim/offset 的变体（G4 合并 GEMM 输出的子段读取）：
+// 读 in[row*in_ld + in_off + (i%c)]。
+extern "C" __global__ void add_bias_silu_f16_ld_kernel(
+    const float* __restrict__ in, const float* __restrict__ bias,
+    __half* __restrict__ out, int n, int c, int in_ld, int in_off) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int row = i / c;
+    const int col = i % c;
+    float v = in[(size_t)row * in_ld + in_off + col] + bias[col];
+    v = v / (1.0f + expf(-v));
+    out[i] = __float2half(v);
+}
+
 // bias + SiLU（f32 就地）：x[i] = silu(x[i] + bias[i%c])。
 extern "C" __global__ void bias_silu_f32_kernel(float* __restrict__ x,
                                                 const float* __restrict__ bias,
@@ -374,6 +388,24 @@ extern "C" __global__ void policy_g_kernel(const float* __restrict__ conv1p,
     int c = i % C;
     int b = i / (S * C);
     float v = conv1p[i] + gproj[(size_t)b * C + c] + bias2[c];
+    v = v / (1.0f + expf(-v));
+    out[i] = v;
+}
+
+// 带 conv1p leading-dim/offset 的变体（G4 合并 GEMM 输出的子段读取）。
+extern "C" __global__ void policy_g_ld_kernel(const float* __restrict__ conv1p,
+                                              const float* __restrict__ gproj,
+                                              const float* __restrict__ bias2,
+                                              float* __restrict__ out,
+                                              int B, int S, int C, int c1_ld,
+                                              int c1_off) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B * S * C) return;
+    const int c = i % C;
+    const int row = i / C;  // b*S + s
+    const int b = row / S;
+    float v = conv1p[(size_t)row * c1_ld + c1_off + c] +
+              gproj[(size_t)b * C + c] + bias2[c];
     v = v / (1.0f + expf(-v));
     out[i] = v;
 }
