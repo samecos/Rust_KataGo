@@ -65,6 +65,11 @@ mod imp {
         /// 初始化设备 0 并加载最优 SM 目标的全部 kernel（fail-closed）。
         pub fn new() -> Result<Self, String> {
             let device = CudaContext::new(0).map_err(|e| format!("CUDA device 0 init failed: {e}"))?;
+            // 关闭 cudarc 自动 event 跟踪：graph capture 会因未记录 event 的
+            // 跨流 wait 报 CUDA_ERROR_STREAM_CAPTURE_ISOLATION。本后端显式
+            // 管理同步（每 handle 单流、加载后 device 级同步、每次前向后
+            // stream.synchronize），host 回拷由 SyncOnDrop 直接同步流保证。
+            unsafe { device.disable_event_tracking() };
             let (target_id, kernels) = select_target(&device)?;
             let mut modules = Vec::new();
             for (name, ptx) in kernels {
@@ -446,13 +451,13 @@ mod backend_impl {
         Backend, ComputeContext, ComputeHandle, Enabled, InputBuffers, LoadedModel, NNOutput,
         NNResultBuf, NeuralNetError,
     };
-    use crate::backends::cuda_exec::CudaModel;
+    use crate::backends::cuda_exec::{set_capturing, CudaModel, CudaWorkspace};
     use crate::desc::ModelDesc;
     use kata_core::config::Config;
     use kata_core::logger::Logger;
     use kata_game::symmetry::{copy_inputs_with_symmetry, copy_outputs_with_symmetry, invert};
     use std::any::Any;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     /// CUDA 后端（手写 kernel，sm-targets.json 选择编译目标）。
     pub struct CudaBackend;
@@ -487,10 +492,26 @@ mod backend_impl {
         }
     }
 
-    /// 每线程计算句柄（本实现无需 per-thread 状态，共享模型/运行时）。
+    /// per-handle 的 CUDA Graph 状态：固定 batch 的输入缓冲 + 工作区 + 已捕获图。
+    /// 首次前向捕获（180 kernel → 1 次 graph 提交），后续复用。
+    struct CudaGraphState {
+        graph: cudarc::driver::CudaGraph,
+        ws: CudaWorkspace,
+        in_spatial: cudarc::driver::CudaSlice<f32>,
+        in_global: cudarc::driver::CudaSlice<f32>,
+    }
+
+    // 图与其中指针仅在其归属的 serve 线程内创建/launch；Mutex 只是
+    // ComputeHandle 内部可变性的手段，跨线程移动本身安全。
+    unsafe impl Send for CudaGraphState {}
+
+    /// 每线程计算句柄：专属 non-blocking 流（多 server 线程可并行提交推理）。
     pub struct CudaComputeHandle {
         model: Arc<CudaModel>,
         rt: Arc<CudaRuntime>,
+        stream: Arc<cudarc::driver::CudaStream>,
+        /// 捕获的 graph + 固定地址输入缓冲 + 工作区（按 batch 惰性创建）。
+        graph_state: Mutex<Option<CudaGraphState>>,
         nn_x_len: i32,
         nn_y_len: i32,
         max_batch_size: i32,
@@ -539,10 +560,18 @@ mod backend_impl {
             let rt = Arc::new(
                 CudaRuntime::new().map_err(|e| NeuralNetError(format!("CUDA init failed: {e}")))?,
             );
+            // 权重上传用独立流，完成后设备级同步，保证后续任意流可见。
+            let load_stream = rt
+                .device
+                .new_stream()
+                .map_err(|e| NeuralNetError(format!("CUDA stream create failed: {e}")))?;
             let model = Arc::new(
-                CudaModel::load(&graph, &rt)
+                CudaModel::load(&graph, &rt, &load_stream)
                     .map_err(|e| NeuralNetError(format!("CUDA model upload failed: {e}")))?,
             );
+            rt.device
+                .synchronize()
+                .map_err(|e| NeuralNetError(format!("CUDA sync failed: {e}")))?;
             Ok(Box::new(CudaLoadedModel {
                 model_desc: parsed.model_desc,
                 model,
@@ -588,9 +617,18 @@ mod backend_impl {
                 .as_any()
                 .downcast_ref::<CudaComputeContext>()
                 .ok_or_else(|| NeuralNetError("Wrong compute context type".to_string()))?;
+            // 每 handle 独立 non-blocking 流：多 server 线程并行提交推理，
+            // 避免 legacy 默认流全设备串行化。
+            let stream = c
+                .rt
+                .device
+                .new_stream()
+                .map_err(|e| NeuralNetError(format!("CUDA stream create failed: {e}")))?;
             Ok(Box::new(CudaComputeHandle {
                 model: c.model.clone(),
                 rt: c.rt.clone(),
+                stream,
+                graph_state: Mutex::new(None),
                 nn_x_len: c.nn_x_len,
                 nn_y_len: c.nn_y_len,
                 max_batch_size,
@@ -675,7 +713,7 @@ mod backend_impl {
             }
 
             // --- 上传 + 前向 -------------------------------------------------
-            let stream = h.rt.device.default_stream();
+            let stream = &h.stream;
 
             // 调试钩子：dump 后端收到的输入（KATAGO_CUDA_DUMP_INPUT=<dir>）。
             if let Ok(d) = std::env::var("KATAGO_CUDA_DUMP_INPUT") {
@@ -688,26 +726,73 @@ mod backend_impl {
                 w("global", &global_host);
             }
 
-            let mut d_spatial: cudarc::driver::CudaSlice<f32> =
-                unsafe { stream.alloc(spatial_host.len()) }
-                    .map_err(|e| NeuralNetError(format!("alloc spatial: {e}")))?;
-            let mut d_global: cudarc::driver::CudaSlice<f32> =
-                unsafe { stream.alloc(global_host.len()) }
-                    .map_err(|e| NeuralNetError(format!("alloc global: {e}")))?;
-            stream
-                .memcpy_htod(spatial_host.as_slice(), &mut d_spatial)
-                .map_err(|e| NeuralNetError(format!("upload spatial: {e}")))?;
-            stream
-                .memcpy_htod(global_host.as_slice(), &mut d_global)
-                .map_err(|e| NeuralNetError(format!("upload global: {e}")))?;
-
-            let outs = h
-                .model
-                .apply(&h.rt, &d_spatial, &d_global, n)
-                .map_err(|e| NeuralNetError(format!("CUDA forward failed: {e}")))?;
-            let host = outs
-                .to_host(&h.rt)
-                .map_err(|e| NeuralNetError(format!("CUDA download failed: {e}")))?;
+            // --- 上传 + 前向（CUDA Graph：首次捕获，后续 1 次提交） ----------
+            let host = {
+                let mut g = h.graph_state.lock().unwrap();
+                let need_capture = match g.as_ref() {
+                    Some(s) => s.ws.batch() != n,
+                    None => true,
+                };
+                if need_capture {
+                    // 固定地址输入缓冲 + 工作区，捕获整图（htod/dtoh 在图外）。
+                    let mut in_spatial: cudarc::driver::CudaSlice<f32> =
+                        unsafe { stream.alloc(spatial_host.len()) }
+                            .map_err(|e| NeuralNetError(format!("alloc in_spatial: {e}")))?;
+                    let mut in_global: cudarc::driver::CudaSlice<f32> =
+                        unsafe { stream.alloc(global_host.len()) }
+                            .map_err(|e| NeuralNetError(format!("alloc in_global: {e}")))?;
+                    stream
+                        .memcpy_htod(spatial_host.as_slice(), &mut in_spatial)
+                        .map_err(|e| NeuralNetError(format!("upload spatial: {e}")))?;
+                    stream
+                        .memcpy_htod(global_host.as_slice(), &mut in_global)
+                        .map_err(|e| NeuralNetError(format!("upload global: {e}")))?;
+                    let mut ws = CudaWorkspace::new(stream, &h.model, n)
+                        .map_err(|e| NeuralNetError(format!("CUDA workspace alloc failed: {e}")))?;
+                    set_capturing(true);
+                    let cap_result = (|| -> Result<cudarc::driver::CudaGraph, NeuralNetError> {
+                        stream.begin_capture(
+                            cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
+                        ).map_err(|e| NeuralNetError(format!("begin_capture: {e}")))?;
+                        h.model
+                            .apply(&h.rt, stream, &mut ws, &in_spatial, &in_global)
+                            .map_err(|e| NeuralNetError(format!("CUDA forward (capture) failed: {e}")))?;
+                        let flags: cudarc::driver::sys::CUgraphInstantiate_flags =
+                            unsafe { std::mem::transmute(0u32) };
+                        stream
+                            .end_capture(flags)
+                            .map_err(|e| NeuralNetError(format!("end_capture: {e}")))?
+                            .ok_or_else(|| NeuralNetError("capture produced no graph".to_string()))
+                    })();
+                    set_capturing(false);
+                    let graph = cap_result?;
+                    graph
+                        .upload()
+                        .map_err(|e| NeuralNetError(format!("graph upload: {e}")))?;
+                    *g = Some(CudaGraphState {
+                        graph,
+                        ws,
+                        in_spatial,
+                        in_global,
+                    });
+                }
+                let st = g.as_mut().unwrap();
+                // 覆盖输入（固定设备地址，与捕获时一致）。
+                stream
+                    .memcpy_htod(spatial_host.as_slice(), &mut st.in_spatial)
+                    .map_err(|e| NeuralNetError(format!("upload spatial: {e}")))?;
+                stream
+                    .memcpy_htod(global_host.as_slice(), &mut st.in_global)
+                    .map_err(|e| NeuralNetError(format!("upload global: {e}")))?;
+                st.graph
+                    .launch()
+                    .map_err(|e| NeuralNetError(format!("graph launch: {e}")))?;
+                // 不显式 synchronize：to_host 的 memcpy_dtoh 经 SyncOnDrop
+                // 在拷贝完成时同步流（减少一次 WDDM 同步往返）。
+                st.ws
+                    .to_host(stream)
+                    .map_err(|e| NeuralNetError(format!("CUDA download failed: {e}")))?
+            };
 
             // --- 解码 v15 输出（与 trt.rs generic_get_output 同口径） --------
             let single_policy = 6 * (policy_area + 1);

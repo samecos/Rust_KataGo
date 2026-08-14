@@ -184,3 +184,53 @@ fn cuda_hgemm_m16n8k16_vs_cpu_reference() {
     }
     eprintln!("hgemm_m16n8k16_kernel OK");
 }
+
+#[test]
+fn cuda_graph_minimal_capture() {
+    let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else {
+        eprintln!("skipped: CUDA runtime unavailable");
+        return;
+    };
+    use cudarc::driver::PushKernelArg;
+    let f = rt.get_func("f32_add_kernel").expect("kernel");
+    let stream = rt.device.new_stream().expect("stream");
+    let n = 1024usize;
+    let mut a: cudarc::driver::CudaSlice<f32> = unsafe { stream.alloc(n) }.expect("alloc a");
+    let mut b: cudarc::driver::CudaSlice<f32> = unsafe { stream.alloc(n) }.expect("alloc b");
+    let mut out: cudarc::driver::CudaSlice<f32> =
+        stream.alloc_zeros(n).expect("alloc out");
+    let a_h: Vec<f32> = (0..n).map(|i| i as f32).collect();
+    let b_h: Vec<f32> = (0..n).map(|i| 1.0f32).collect();
+    stream.memcpy_htod(&a_h, &mut a).expect("htod a");
+    stream.memcpy_htod(&b_h, &mut b).expect("htod b");
+
+    use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
+    stream.synchronize().expect("presync");
+    rt.device.synchronize().expect("dev presync");
+    stream
+        .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL)
+        .expect("begin");
+    let cfg = cudarc::driver::LaunchConfig::for_num_elems(n as u32);
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(&a)
+            .arg(&b)
+            .arg(&mut out)
+            .arg(&(n as i32))
+            .launch(cfg)
+    }
+    .expect("launch");
+    let flags: CUgraphInstantiate_flags = unsafe { std::mem::transmute(0u32) };
+    let graph = stream.end_capture(flags).expect("end").expect("graph");
+    graph.upload().expect("upload");
+    graph.launch().expect("graph launch");
+    stream.synchronize().expect("sync");
+    let mut out_h = vec![0.0f32; n];
+    stream.memcpy_dtoh(&out, &mut out_h).expect("dtoh");
+    stream.synchronize().expect("sync2");
+    eprintln!("minimal graph out[0]={} out[5]={} out[1023]={}",
+        out_h[0], out_h[5], out_h[1023]);
+    assert!((out_h[0] - 1.0).abs() < 1e-4, "out[0] should be 1.0");
+    assert!((out_h[5] - 6.0).abs() < 1e-4, "out[5] should be 6.0");
+}

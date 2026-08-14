@@ -36,10 +36,42 @@
 use crate::backends::cuda::{f16_to_f32_bits, f32_to_f16_bits, CudaRuntime};
 use crate::onnx_parser::{Layer, LayerGraph, Tensor, TensorData};
 use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use std::cell::RefCell;
 use std::sync::Arc;
 
 /// cudarc 0.19 的流方法定义在 `Arc<CudaStream>` 上（`self: &Arc<Self>`）。
 type StreamRef = Arc<CudaStream>;
+
+/// 当前线程活跃的 CUDA 流（apply 入口设置，各 kernel 辅助函数从这里取）。
+///
+/// 每线程独立的 non-blocking 流使多个 server 线程可并行提交推理；
+/// 未设置时回退到 legacy 默认流（单算子测试路径）。
+thread_local! {
+    static ACTIVE_STREAM: RefCell<Option<Arc<CudaStream>>> = const { RefCell::new(None) };
+    /// CUDA Graph capture 进行中：跳过 profile 事件与 debug 的 host 回拷
+    /// （两者都会破坏 capture 或使 graph 重放产生悬垂 host 缓冲）。
+    static CAPTURING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 取当前活跃流，未设置则回退 legacy 默认流。
+fn active_stream(rt: &CudaRuntime) -> Arc<CudaStream> {
+    ACTIVE_STREAM.with(|s| {
+        s.borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| rt.device.default_stream())
+    })
+}
+
+/// capture 模式是否开启（apply 内部据此跳过不可重放的操作）。
+pub fn capturing() -> bool {
+    CAPTURING.with(|c| c.get())
+}
+
+/// 设置当前线程的 capture 模式（CUDA Graph 捕获前后调用）。
+pub fn set_capturing(v: bool) {
+    CAPTURING.with(|c| c.set(v));
+}
 
 // ---------------------------------------------------------------------------
 // 设备侧权重缓冲
@@ -152,8 +184,9 @@ pub struct CudaModel {
 
 impl CudaModel {
     /// 把层图全部权重上传设备（f32 → f16，GEMM K pad 16）。
-    pub fn load(graph: &LayerGraph, rt: &CudaRuntime) -> Result<Self, String> {
-        let stream = rt.device.default_stream();
+    /// 在 `stream` 上执行（调用方负责与其他流间的同步）。
+    pub fn load(graph: &LayerGraph, rt: &CudaRuntime, stream: &Arc<CudaStream>) -> Result<Self, String> {
+        let stream = stream.clone();
         let mut layers = Vec::with_capacity(graph.layers.len());
         for layer in &graph.layers {
             layers.push(upload_layer(&stream, layer)?);
@@ -174,14 +207,19 @@ impl CudaModel {
 
     /// 前向推理：`spatial` [B,22,19,19] NCHW f32、`global` [B,19] f32。
     ///
-    /// 输出为模型原始张量（未 softmax、未后处理），与 ONNX 逐位对齐口径。
+    /// 输出为模型原始张量（未 softmax、未后处理），写入 `ws` 的 out_* 缓冲，
+    /// 与 ONNX 逐位对齐口径。全部 kernel 在 `stream` 上提交
+    /// （线程内设置活跃流供辅助函数取用）。
     pub fn apply(
         &self,
         rt: &CudaRuntime,
+        stream: &Arc<CudaStream>,
+        ws: &mut CudaWorkspace,
         spatial: &CudaSlice<f32>,
         global: &CudaSlice<f32>,
-        batch: usize,
-    ) -> Result<CudaOutputs, String> {
+    ) -> Result<(), String> {
+        ACTIVE_STREAM.with(|s| *s.borrow_mut() = Some(stream.clone()));
+        let batch = ws.batch;
         let s = self.seq_len;
         let m = batch * s;
         let h = self.num_heads;
@@ -189,41 +227,39 @@ impl CudaModel {
         let trunk = self.trunk;
         let mid = self.mid;
         assert_eq!((mid, h, d, s), (384, 12, 32, 361), "执行器仅支持 b11 19 路架构");
-        let stream = rt.device.default_stream();
+        let stream = active_stream(rt);
 
-        // --- 工作区（一次分配，层间复用；batch 上限由调用方保证） ---------
-        let mut cols: CudaSlice<u16> = zeros16(&stream, m * 208)?; // im2col [M,208]
-        let mut act768: CudaSlice<f32> = zeros32(&stream, m * trunk)?; // raw 768 流（f32 残差累积）
-        let mut gated768: CudaSlice<u16> = zeros16(&stream, m * trunk)?; // gate 后 768 流（f16 喂 GEMM）
-        let mut act384: CudaSlice<f32> = zeros32(&stream, m * mid)?; // f32 残差流
-        let mut act384f16: CudaSlice<u16> = zeros16(&stream, m * mid)?; // 上投影 GEMM 输入
-        let mut normed: CudaSlice<u16> = zeros16(&stream, m * mid)?; // RMSNorm 输出（GEMM 输入）
-        let mut act1152: CudaSlice<u16> = zeros16(&stream, m * (3 * mid))?; // FFN gate 支路
-        let mut act1152b: CudaSlice<u16> = zeros16(&stream, m * (3 * mid))?; // FFN up 支路
-        let mut gemm_out: CudaSlice<f32> = zeros32(&stream, m * (3 * mid))?;
-        let qkv_elts = batch * h * s * d;
-        let mut qbuf: CudaSlice<u16> = zeros16(&stream, qkv_elts)?;
-        let mut kbuf: CudaSlice<u16> = zeros16(&stream, qkv_elts)?;
-        let mut vbuf: CudaSlice<u16> = zeros16(&stream, qkv_elts)?;
-        let mut attn: CudaSlice<u16> = zeros16(&stream, qkv_elts)?;
-        let mut p96f: CudaSlice<f32> = zeros32(&stream, m * 96)?; // 策略头 g 激活（f32）
-        let mut p192: CudaSlice<u16> = zeros16(&stream, m * 192)?; // 价值头 v 激活（f16 激活流）
-        let mut conv1p: CudaSlice<f32> = zeros32(&stream, m * 96)?; // conv1p 输出
-        let mut pooled: CudaSlice<f32> = zeros32(&stream, batch * 576)?; // 池化向量（f32）
-        let mut vec_a: CudaSlice<f32> = zeros32(&stream, batch * 192)?;
-        let mut vec_b: CudaSlice<f32> = zeros32(&stream, batch * 96)?;
-        let mut pass_logits: CudaSlice<f32> = zeros32(&stream, batch * 6)?;
-
-        // 输出缓冲
-        let mut out_policy: CudaSlice<f32> = zeros32(&stream, batch * 6 * (s + 1))?;
-        let mut out_value: CudaSlice<f32> = zeros32(&stream, batch * 3)?;
-        let mut out_misc: CudaSlice<f32> = zeros32(&stream, batch * 10)?;
-        let mut out_moremisc: CudaSlice<f32> = zeros32(&stream, batch * 8)?;
-        let mut out_ownership: CudaSlice<f32> = zeros32(&stream, m)?;
+        // --- 工作区（预分配复用；batch 由 ws 决定） ------------------------
+        let cols = &mut ws.cols;
+        let act768 = &mut ws.act768;
+        let gated768 = &mut ws.gated768;
+        let act384 = &mut ws.act384;
+        let act384f16 = &mut ws.act384f16;
+        let normed = &mut ws.normed;
+        let act1152 = &mut ws.act1152;
+        let act1152b = &mut ws.act1152b;
+        let gemm_out = &mut ws.gemm_out;
+        let qbuf = &mut ws.qbuf;
+        let kbuf = &mut ws.kbuf;
+        let vbuf = &mut ws.vbuf;
+        let attn = &mut ws.attn;
+        let p96f = &mut ws.p96f;
+        let p192 = &mut ws.p192;
+        let conv1p = &mut ws.conv1p;
+        let pooled = &mut ws.pooled;
+        let vec_a = &mut ws.vec_a;
+        let vec_b = &mut ws.vec_b;
+        let pass_logits = &mut ws.pass_logits;
+        let out_policy = &mut ws.out_policy;
+        let out_value = &mut ws.out_value;
+        let out_misc = &mut ws.out_misc;
+        let out_moremisc = &mut ws.out_moremisc;
+        let out_ownership = &mut ws.out_ownership;
 
         // --- 逐层执行 ----------------------------------------------------
         // per-layer 剖析（KATAGO_CUDA_PROFILE=1）：每层一对事件计时。
-        let profiling = std::env::var("KATAGO_CUDA_PROFILE").is_ok();
+        // capture 模式下跳过（事件同步会破坏 graph capture）。
+        let profiling = !capturing() && std::env::var("KATAGO_CUDA_PROFILE").is_ok();
         let mut layer_times: Vec<(i64, &'static str, f32)> = Vec::new();
         let (ev_start, ev_end) = if profiling {
             let f = Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT);
@@ -237,7 +273,7 @@ impl CudaModel {
         if profiling {
             let _ = ev_start.as_ref().unwrap().record(&stream);
         }
-        im2col(rt, spatial, &mut cols, batch, s)?;
+        im2col(rt, spatial, cols, batch, s)?;
         if profiling {
             let _ = ev_end.as_ref().unwrap().record(&stream);
             let ms = ev_start
@@ -265,14 +301,14 @@ impl CudaModel {
             match lb {
                 LayerBuf::InitialConv { w, gw, g, gate_scale, gate_bias } => {
                     // raw 768 流（块残差加的是 gate 前的值）→ 异位门控 SiLU
-                    hgemm(rt, &cols, w, &mut gemm_out, m)?;
-                    conv_bias_gate(rt, &gemm_out, global, gw, &mut act768, batch, s, trunk, *g)?;
+                    hgemm(rt, cols, w, gemm_out, m)?;
+                    conv_bias_gate(rt, gemm_out, global, gw, act768, batch, s, trunk, *g)?;
                     gate_silu_out(
                         rt,
-                        &act768,
+                        act768,
                         &gate_scale.data,
                         &gate_bias.data,
-                        &mut gated768,
+                        gated768,
                         m * trunk,
                         trunk,
                     )?;
@@ -286,18 +322,18 @@ impl CudaModel {
                         "Linear 的 bias/act/residual 组合本执行器未实现（IR 恒为 None/false/false）"
                     );
                     if w.k == trunk && w.n == mid {
-                        hgemm(rt, &gated768, w, &mut act384, m)?;
+                        hgemm(rt, gated768, w, act384, m)?;
                     } else if w.k == mid && w.n == trunk {
-                        f32_to_f16(rt, &act384, &mut act384f16, m * mid)?;
+                        f32_to_f16(rt, act384, act384f16, m * mid)?;
                         // 上投影 GEMM beta=1 直接残差进 act768（省独立残差 kernel）
-                        hgemm_residual(rt, &act384f16, w, &mut act768, m)?;
+                        hgemm_residual(rt, act384f16, w, act768, m)?;
                     } else {
                         return Err(format!("Linear 形状不支持: k={} n={}", w.k, w.n));
                     }
                 }
                 LayerBuf::RmsNorm { scale, eps, channels } => {
                     assert_eq!(*channels, mid, "RMSNorm 仅出现在 384 维流");
-                    rms_norm_f32(rt, &act384, &mut normed, &scale.data, *eps, *channels, m)?;
+                    rms_norm_f32(rt, act384, normed, &scale.data, *eps, *channels, m)?;
                 }
                 LayerBuf::Attention { qkv, out, cos, sin, qk_scale, h: lh, d: ld, s: ls } => {
                     let (lh, ld, ls) = (*lh, *ld, *ls);
@@ -321,19 +357,19 @@ impl CudaModel {
                             }
                         };
                     }
-                    timed!("qkv", hgemm(rt, &normed, qkv, &mut gemm_out, m));
+                    timed!("qkv", hgemm(rt, normed, qkv, gemm_out, m));
                     timed!(
                         "rope",
                         qkv_rope(
-                            rt, &gemm_out, cos, sin, &mut qbuf, &mut kbuf, &mut vbuf, batch, lh, ls,
+                            rt, gemm_out, cos, sin, qbuf, kbuf, vbuf, batch, lh, ls,
                             ld,
                         )
                     );
                     let scale = qk_scale * qk_scale; // 导出图 q、k 各乘 1/∜d
-                    timed!("attn", attention_row(rt, &qbuf, &kbuf, &vbuf, &mut attn, ls, ld, batch * lh, scale));
-                    timed!("merge", attn_merge(rt, &attn, &mut normed, batch, lh, ls, ld));
+                    timed!("attn", attention_row(rt, qbuf, kbuf, vbuf, attn, ls, ld, batch * lh, scale));
+                    timed!("merge", attn_merge(rt, attn, normed, batch, lh, ls, ld));
                     // 输出投影 beta=1 直接残差进 act384（省独立残差 kernel）
-                    timed!("outproj", hgemm_residual(rt, &normed, out, &mut act384, m));
+                    timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
                     if sub_profile {
                         let total: f32 = sub_times.iter().map(|t| t.1.max(0.0)).sum();
                         eprintln!("[cuda-profile] attention l{li} total {total:.3} ms: {}",
@@ -344,23 +380,23 @@ impl CudaModel {
                     let hidden = *hidden;
                     assert_eq!(hidden, 3 * mid, "FFN 隐层维度不符");
                     // gate/up 支路：GEMM epilogue 直接 f16 输出（省 2 次转换 launch）
-                    hgemm_f16(rt, &normed, gate, &mut act1152, m)?;
-                    hgemm_f16(rt, &normed, up, &mut act1152b, m)?;
+                    hgemm_f16(rt, normed, gate, act1152, m)?;
+                    hgemm_f16(rt, normed, up, act1152b, m)?;
                     // silu(gate) * up → 下投影 beta=1 直接残差进 act384
-                    swiglu(rt, &act1152b, &mut act1152, m * hidden)?;
-                    hgemm_residual(rt, &act1152, down, &mut act384, m)?;
+                    swiglu(rt, act1152b, act1152, m * hidden)?;
+                    hgemm_residual(rt, act1152, down, act384, m)?;
                 }
                 LayerBuf::GateSilu { scale, bias, channels } => {
                     // 384 维（块尾）与 768 维（块边界）两种门
                     if *channels == mid {
-                        gate_silu_f32(rt, &mut act384, &scale.data, &bias.data, m * mid, *channels)?;
+                        gate_silu_f32(rt, act384, &scale.data, &bias.data, m * mid, *channels)?;
                     } else if *channels == trunk {
                         gate_silu_out(
                             rt,
-                            &act768,
+                            act768,
                             &scale.data,
                             &bias.data,
-                            &mut gated768,
+                            gated768,
                             m * trunk,
                             *channels,
                         )?;
@@ -371,8 +407,8 @@ impl CudaModel {
                 LayerBuf::TrunkFinal { mean, std, gamma, beta, channels } => {
                     assert_eq!(*channels, trunk, "TrunkFinal 仅支持 768 维");
                     bn_silu(
-                        rt, &act768, &mean.data, &std.data, &gamma.data, &beta.data,
-                        &mut gated768, m * trunk, *channels,
+                        rt, act768, &mean.data, &std.data, &gamma.data, &beta.data,
+                        gated768, m * trunk, *channels,
                     )?;
                 }
                 LayerBuf::PolicyHead {
@@ -388,21 +424,21 @@ impl CudaModel {
                     mask_scale,
                 } => {
                     // conv1p / conv1g（1x1，A=gated768 f16 激活流，K=768）
-                    hgemm(rt, &gated768, c1p, &mut conv1p, m)?;
-                    hgemm(rt, &gated768, c1g, &mut gemm_out, m)?;
-                    add_bias_silu_f16(rt, &gemm_out, &g_bias.data, &mut p192, m * 96, 96)?;
+                    hgemm(rt, gated768, c1p, conv1p, m)?;
+                    hgemm(rt, gated768, c1g, gemm_out, m)?;
+                    add_bias_silu_f16(rt, gemm_out, &g_bias.data, p192, m * 96, 96)?;
                     // 池化：[mean, mean*scale, max]（f32；小头链路保持 f32 精度）
-                    pool_mean_max(rt, &p192, &mut pooled, batch, s, 96, *mask_scale)?;
+                    pool_mean_max(rt, p192, pooled, batch, s, 96, *mask_scale)?;
                     // pass 分支：Gemm+bias → SiLU → Gemm（f32×f16 混合小 GEMM）
-                    sgemm(rt, &pooled, pass1, &mut vec_a, batch)?;
-                    bias_silu_f32(rt, &mut vec_a, &pass_b1.data, batch * 96, 96)?;
-                    sgemm(rt, &vec_a, pass2, &mut pass_logits, batch)?;
+                    sgemm(rt, pooled, pass1, vec_a, batch)?;
+                    bias_silu_f32(rt, vec_a, &pass_b1.data, batch * 96, 96)?;
+                    sgemm(rt, vec_a, pass2, pass_logits, batch)?;
                     // g 分支：Gemm → +conv1p → +bias2 → SiLU → conv2p
-                    sgemm(rt, &pooled, g_matmul, &mut vec_b, batch)?;
-                    policy_g(rt, &conv1p, &vec_b, &bias2.data, &mut p96f, batch, s, 96)?;
-                    sgemm(rt, &p96f, conv2p, &mut gemm_out, m)?;
+                    sgemm(rt, pooled, g_matmul, vec_b, batch)?;
+                    policy_g(rt, conv1p, vec_b, &bias2.data, p96f, batch, s, 96)?;
+                    sgemm(rt, p96f, conv2p, gemm_out, m)?;
                     // 拼接 [B,6,362]；penalty=0（19 路无非法落点，结构保留）
-                    policy_concat(rt, &gemm_out, &pass_logits, &mut out_policy, batch, s, 6, 0.0)?;
+                    policy_concat(rt, gemm_out, pass_logits, out_policy, batch, s, 6, 0.0)?;
                 }
                 LayerBuf::ValueHead {
                     conv1,
@@ -420,22 +456,22 @@ impl CudaModel {
                     mask_quad,
                 } => {
                     // conv1 + bias + SiLU → v_act [M,192]
-                    hgemm(rt, &gated768, conv1, &mut gemm_out, m)?;
-                    add_bias_silu_f16(rt, &gemm_out, &bias1.data, &mut p192, m * 192, 192)?;
+                    hgemm(rt, gated768, conv1, gemm_out, m)?;
+                    add_bias_silu_f16(rt, gemm_out, &bias1.data, p192, m * 192, 192)?;
                     // 池化：[mean, mean*scale, mean*quad]（f32）
-                    pool_mean3(rt, &p192, &mut pooled, batch, s, 192, *mask_scale, *mask_quad)?;
+                    pool_mean3(rt, p192, pooled, batch, s, 192, *mask_scale, *mask_quad)?;
                     // linear2 + bias + SiLU（f32×f16 混合小 GEMM）
-                    sgemm(rt, &pooled, l2, &mut vec_a, batch)?;
-                    bias_silu_f32(rt, &mut vec_a, &l2_bias.data, batch * 192, 192)?;
+                    sgemm(rt, pooled, l2, vec_a, batch)?;
+                    bias_silu_f32(rt, vec_a, &l2_bias.data, batch * 192, 192)?;
                     // 三个输出 Gemm（+bias）
-                    sgemm(rt, &vec_a, value_w, &mut out_value, batch)?;
-                    f32_bias_add(rt, &mut out_value, &value_b.data, batch * 3, 3)?;
-                    sgemm(rt, &vec_a, misc_w, &mut out_misc, batch)?;
-                    f32_bias_add(rt, &mut out_misc, &misc_b.data, batch * 10, 10)?;
-                    sgemm(rt, &vec_a, moremisc_w, &mut out_moremisc, batch)?;
-                    f32_bias_add(rt, &mut out_moremisc, &moremisc_b.data, batch * 8, 8)?;
+                    sgemm(rt, vec_a, value_w, out_value, batch)?;
+                    f32_bias_add(rt, out_value, &value_b.data, batch * 3, 3)?;
+                    sgemm(rt, vec_a, misc_w, out_misc, batch)?;
+                    f32_bias_add(rt, out_misc, &misc_b.data, batch * 10, 10)?;
+                    sgemm(rt, vec_a, moremisc_w, out_moremisc, batch)?;
+                    f32_bias_add(rt, out_moremisc, &moremisc_b.data, batch * 8, 8)?;
                     // ownership 1x1（×mask 恒 1，省略；v_act 为 f16 激活流）
-                    hgemm(rt, &p192, own_w, &mut out_ownership, m)?;
+                    hgemm(rt, p192, own_w, out_ownership, m)?;
                 }
             }
             if profiling {
@@ -448,6 +484,8 @@ impl CudaModel {
                 layer_times.push((li as i64, layer_tag, ms));
             }
             // --- 临时调试钩子：KATAGO_CUDA_DEBUG_LAYER=<i> 时 dump 两路流 ---
+            // capture 模式下跳过（host 回拷不可重放）。
+            if !capturing() {
             if let Ok(spec) = std::env::var("KATAGO_CUDA_DEBUG_LAYER") {
                 if spec == li.to_string() {
                     let tag = match lb {
@@ -475,12 +513,12 @@ impl CudaModel {
                             .map_err(|e| e.to_string())?;
                         Ok(())
                     };
-                    w("act384f16", &act384f16)?;
+                    w("act384f16", act384f16)?;
                     {
                         // act384 为 f32 流，走 f32 导出
                         let mut host = vec![0.0f32; act384.len()];
                         stream
-                            .memcpy_dtoh(&act384, &mut host)
+                            .memcpy_dtoh(act384, &mut host)
                             .map_err(|e| e.to_string())?;
                         let bytes: Vec<u8> =
                             host.iter().flat_map(|f| f.to_le_bytes()).collect();
@@ -491,7 +529,7 @@ impl CudaModel {
                         // act768 为 f32 流，走 f32 导出
                         let mut host = vec![0.0f32; act768.len()];
                         stream
-                            .memcpy_dtoh(&act768, &mut host)
+                            .memcpy_dtoh(act768, &mut host)
                             .map_err(|e| e.to_string())?;
                         let bytes: Vec<u8> =
                             host.iter().flat_map(|f| f.to_le_bytes()).collect();
@@ -499,9 +537,9 @@ impl CudaModel {
                             .map_err(|e| e.to_string())?;
                     }
                     for (name, d) in [
-                        ("normed", &normed),
-                        ("act1152", &act1152),
-                        ("act1152b", &act1152b),
+                        ("normed", &*normed),
+                        ("act1152", &*act1152),
+                        ("act1152b", &*act1152b),
                     ] {
                         let mut host = vec![0u16; d.len()];
                         stream
@@ -524,11 +562,12 @@ impl CudaModel {
                                 .map_err(|e| e.to_string())?;
                             Ok(())
                         };
-                        wf("pooled", &pooled)?;
-                        wf("vec_a", &vec_a)?;
+                        wf("pooled", pooled)?;
+                        wf("vec_a", vec_a)?;
                     }
                 }
             }
+            } // !capturing
         }
 
         if profiling {
@@ -540,13 +579,8 @@ impl CudaModel {
             }
         }
 
-        Ok(CudaOutputs {
-            policy: out_policy,
-            value: out_value,
-            misc: out_misc,
-            moremisc: out_moremisc,
-            ownership: out_ownership,
-        })
+        ACTIVE_STREAM.with(|s| *s.borrow_mut() = None);
+        Ok(())
     }
 }
 
@@ -742,7 +776,7 @@ fn hgemm(
     m: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("hgemm_v2_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
@@ -777,7 +811,7 @@ fn hgemm_f16(
     m: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("hgemm_v2_f16out_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
@@ -812,7 +846,7 @@ fn hgemm_residual(
     m: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("hgemm_v2_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
@@ -847,7 +881,7 @@ fn sgemm(
     m: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("sgemm_f16b_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let n = m * b.n;
     unsafe {
         stream
@@ -876,7 +910,7 @@ fn im2col(
     const K: i32 = C * 9;
     const KP: i32 = 208;
     let f = rt.get_func("im2col_f16_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let n = batch * s * K as usize;
     unsafe {
         stream
@@ -908,7 +942,7 @@ fn conv_bias_gate(
     g: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("conv_bias_gate_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let n = batch * s * c;
     unsafe {
         stream
@@ -938,7 +972,7 @@ fn gate_silu_out(
     c: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("gate_silu_out_f16_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -964,7 +998,7 @@ fn gate_silu(
     c: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("gate_silu_f16_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -988,7 +1022,7 @@ fn add_bias_silu_f16(
     c: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("add_bias_silu_f16_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1012,7 +1046,7 @@ fn bias_silu_f32(
     c: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("bias_silu_f32_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1035,7 +1069,7 @@ fn f32_bias_add(
     c: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("f32_bias_add_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1057,7 +1091,7 @@ fn f32_to_f16(
     n: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("f32_to_half_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1078,7 +1112,7 @@ fn f32_add_inplace(
     n: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("f32_add_inplace_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1099,7 +1133,7 @@ fn f32_add_f16(
     n: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("f32_add_f16_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1123,7 +1157,7 @@ fn rms_norm_f32(
     rows: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("rms_norm_f32_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let cfg = LaunchConfig {
         grid_dim: (rows as u32, 1, 1),
         block_dim: (128, 1, 1),
@@ -1153,7 +1187,7 @@ fn gate_silu_f32(
     c: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("gate_silu_f32_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1175,7 +1209,7 @@ fn swiglu(
     n: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("swiglu_f16_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1203,7 +1237,7 @@ fn qkv_rope(
     d: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("qkv_rope_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let cfg = LaunchConfig {
         grid_dim: (s as u32, (batch * h) as u32, 1),
         block_dim: (32, 1, 1),
@@ -1247,7 +1281,7 @@ fn attention_row(
     // v2 整段 K/V 46KB smem 只 4 块/SM、串行依赖链长（ABBA 40 < 47 被证伪）。
     // v1/v2 保留在 attention.cu 作参考。数值：FP32 全程 + RNE 舍回 half。
     let f = rt.get_func("attention_row_v3_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let cfg = LaunchConfig {
         grid_dim: (((s + 7) / 8) as u32, bh as u32, 1),
         block_dim: (256, 1, 1),
@@ -1279,7 +1313,7 @@ fn attn_merge(
     d: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("attn_merge_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let n = batch * s * h * d;
     unsafe {
         stream
@@ -1309,7 +1343,7 @@ fn bn_silu(
     c: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("bn_silu_f16_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1337,7 +1371,7 @@ fn pool_mean_max(
     scale: f32,
 ) -> Result<(), String> {
     let f = rt.get_func("pool_mean_max_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1364,7 +1398,7 @@ fn pool_mean3(
     quad: f32,
 ) -> Result<(), String> {
     let f = rt.get_func("pool_mean3_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     unsafe {
         stream
             .launch_builder(&f)
@@ -1393,7 +1427,7 @@ fn policy_g(
     c: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("policy_g_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let n = batch * s * c;
     unsafe {
         stream
@@ -1423,7 +1457,7 @@ fn policy_concat(
     penalty: f32,
 ) -> Result<(), String> {
     let f = rt.get_func("policy_concat_kernel")?;
-    let stream = rt.device.default_stream();
+    let stream = active_stream(rt);
     let n = batch * c * (s + 1);
     unsafe {
         stream
@@ -1442,21 +1476,90 @@ fn policy_concat(
 }
 
 // ---------------------------------------------------------------------------
-// 输出
+// 工作区与输出
 // ---------------------------------------------------------------------------
 
-/// 模型原始输出（未 softmax、未后处理，与 ONNX 模型一致）。
-pub struct CudaOutputs {
+/// 前向推理工作区：全部中间/输出缓冲一次性预分配，多次前向复用。
+///
+/// 消除每次 apply 的 20+ 次设备内存分配（WDDM 下 malloc 虽为
+/// stream-ordered，但配合 CUDA Graph capture 需预分配固定地址）。
+pub struct CudaWorkspace {
+    pub cols: CudaSlice<u16>,   // im2col [M,208]
+    pub act768: CudaSlice<f32>, // raw 768 流（f32 残差累积）
+    pub gated768: CudaSlice<u16>,
+    pub act384: CudaSlice<f32>,
+    pub act384f16: CudaSlice<u16>,
+    pub normed: CudaSlice<u16>,
+    pub act1152: CudaSlice<u16>,
+    pub act1152b: CudaSlice<u16>,
+    pub gemm_out: CudaSlice<f32>,
+    pub qbuf: CudaSlice<u16>,
+    pub kbuf: CudaSlice<u16>,
+    pub vbuf: CudaSlice<u16>,
+    pub attn: CudaSlice<u16>,
+    pub p96f: CudaSlice<f32>,
+    pub p192: CudaSlice<u16>,
+    pub conv1p: CudaSlice<f32>,
+    pub pooled: CudaSlice<f32>,
+    pub vec_a: CudaSlice<f32>,
+    pub vec_b: CudaSlice<f32>,
+    pub pass_logits: CudaSlice<f32>,
     /// `[B, 6, 362]` 策略 logits（通道 0 基策略、通道 5 乐观策略，pass 位 361）。
-    pub policy: CudaSlice<f32>,
+    pub out_policy: CudaSlice<f32>,
     /// `[B, 3]` 价值 logits。
-    pub value: CudaSlice<f32>,
+    pub out_value: CudaSlice<f32>,
     /// `[B, 10]`（scoreMean/scoreMeanSq/lead/varTimeLeft/…）。
-    pub misc: CudaSlice<f32>,
+    pub out_misc: CudaSlice<f32>,
     /// `[B, 8]`（shortterm winloss/score error/…）。
-    pub moremisc: CudaSlice<f32>,
+    pub out_moremisc: CudaSlice<f32>,
     /// `[B, 361]` 所有权。
-    pub ownership: CudaSlice<f32>,
+    pub out_ownership: CudaSlice<f32>,
+    batch: usize,
+}
+
+impl CudaWorkspace {
+    /// 按模型形状与 batch 一次性预分配全部工作区。
+    pub fn new(stream: &Arc<CudaStream>, model: &CudaModel, batch: usize) -> Result<Self, String> {
+        let s = model.seq_len;
+        let m = batch * s;
+        let trunk = model.trunk;
+        let mid = model.mid;
+        let h = model.num_heads;
+        let d = model.head_dim;
+        let qkv_elts = batch * h * s * d;
+        Ok(Self {
+            cols: zeros16(stream, m * 208)?,
+            act768: zeros32(stream, m * trunk)?,
+            gated768: zeros16(stream, m * trunk)?,
+            act384: zeros32(stream, m * mid)?,
+            act384f16: zeros16(stream, m * mid)?,
+            normed: zeros16(stream, m * mid)?,
+            act1152: zeros16(stream, m * (3 * mid))?,
+            act1152b: zeros16(stream, m * (3 * mid))?,
+            gemm_out: zeros32(stream, m * (3 * mid))?,
+            qbuf: zeros16(stream, qkv_elts)?,
+            kbuf: zeros16(stream, qkv_elts)?,
+            vbuf: zeros16(stream, qkv_elts)?,
+            attn: zeros16(stream, qkv_elts)?,
+            p96f: zeros32(stream, m * 96)?,
+            p192: zeros16(stream, m * 192)?,
+            conv1p: zeros32(stream, m * 96)?,
+            pooled: zeros32(stream, batch * 576)?,
+            vec_a: zeros32(stream, batch * 192)?,
+            vec_b: zeros32(stream, batch * 96)?,
+            pass_logits: zeros32(stream, batch * 6)?,
+            out_policy: zeros32(stream, batch * 6 * (s + 1))?,
+            out_value: zeros32(stream, batch * 3)?,
+            out_misc: zeros32(stream, batch * 10)?,
+            out_moremisc: zeros32(stream, batch * 8)?,
+            out_ownership: zeros32(stream, m)?,
+            batch,
+        })
+    }
+
+    pub fn batch(&self) -> usize {
+        self.batch
+    }
 }
 
 /// 主机侧输出（对拍/测试用）。
@@ -1469,9 +1572,9 @@ pub struct CudaOutputsHost {
     pub ownership: Vec<f32>,
 }
 
-impl CudaOutputs {
-    pub fn to_host(&self, rt: &CudaRuntime) -> Result<CudaOutputsHost, String> {
-        let stream = rt.device.default_stream();
+impl CudaWorkspace {
+    pub fn to_host(&self, stream: &Arc<CudaStream>) -> Result<CudaOutputsHost, String> {
+        let stream = stream.clone();
         let get = |d: &CudaSlice<f32>| -> Result<Vec<f32>, String> {
             let mut v = vec![0.0f32; d.len()];
             stream
@@ -1480,11 +1583,11 @@ impl CudaOutputs {
             Ok(v)
         };
         Ok(CudaOutputsHost {
-            policy: get(&self.policy)?,
-            value: get(&self.value)?,
-            misc: get(&self.misc)?,
-            moremisc: get(&self.moremisc)?,
-            ownership: get(&self.ownership)?,
+            policy: get(&self.out_policy)?,
+            value: get(&self.out_value)?,
+            misc: get(&self.out_misc)?,
+            moremisc: get(&self.out_moremisc)?,
+            ownership: get(&self.out_ownership)?,
         })
     }
 }
