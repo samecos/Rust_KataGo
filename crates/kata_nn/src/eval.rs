@@ -236,8 +236,13 @@ impl SharedState {
             //   队列临时为空也短暂重试，等并发搜索线程的新请求到达。
             let mut batch = vec![request];
             let target_batch_size = self.current_batch_size.load(Ordering::Relaxed).max(1) as usize;
+            // 凑批窗口可由 KATAGO_NN_BATCH_WINDOW_US 覆盖（调优）。
+            let busy_us: u64 = std::env::var("KATAGO_NN_BATCH_WINDOW_US")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8000);
             let window_us = if self.gpu_busy.load(Ordering::Relaxed) {
-                4000
+                busy_us
             } else {
                 200
             };

@@ -1874,8 +1874,8 @@ pub fn initialize_nn_evaluators(
 
         cfg.mark_all_keys_used_with_prefix("numNNServerThreadsPerModel");
         // NN server 线程数（消费请求队列、凑批并执行推理）。
-        // 关键：线程过多会把并发请求拆散（每个消费者各拿 1 个请求，
-        // batch 恒为 1）；少量消费者集中凑批（C++ 默认 2 per model）。
+        // 1 个消费者集中凑批（实测 t=8 吞吐 +27%：多消费者会把并发请求
+        // 拆散导致 batch 凑不满）。C++ 官方默认 1 per model。
         let num_threads = if cfg.contains("numNNServerThreadsPerModel") {
             cfg.get_int("numNNServerThreadsPerModel", 1, 1024)
                 .map_err(to_string_error)?
@@ -1883,7 +1883,7 @@ pub fn initialize_nn_evaluators(
             cfg.get_int("numEigenThreadsPerModel", 1, 1024)
                 .map_err(to_string_error)?
         } else {
-            2
+            1
         };
 
         let mut gpu_idx_by_server_thread = Vec::new();
