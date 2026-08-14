@@ -1873,11 +1873,17 @@ pub fn initialize_nn_evaluators(
         logger.write(&("nnRandSeed".to_string() + &idx_str + " = " + &nn_rand_seed));
 
         cfg.mark_all_keys_used_with_prefix("numNNServerThreadsPerModel");
-        let num_threads = if cfg.contains("numEigenThreadsPerModel") {
+        // NN server 线程数（消费请求队列、凑批并执行推理）。
+        // 关键：线程过多会把并发请求拆散（每个消费者各拿 1 个请求，
+        // batch 恒为 1）；少量消费者集中凑批（C++ 默认 2 per model）。
+        let num_threads = if cfg.contains("numNNServerThreadsPerModel") {
+            cfg.get_int("numNNServerThreadsPerModel", 1, 1024)
+                .map_err(to_string_error)?
+        } else if cfg.contains("numEigenThreadsPerModel") {
             cfg.get_int("numEigenThreadsPerModel", 1, 1024)
                 .map_err(to_string_error)?
         } else {
-            compute_default_eigen_backend_threads(expected_concurrent_evals, logger)
+            2
         };
 
         let mut gpu_idx_by_server_thread = Vec::new();
