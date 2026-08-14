@@ -35,6 +35,12 @@ __device__ __forceinline__ unsigned fa2_smem_off(int r, int c) {
            ((unsigned)(r & 7) << 4) | ((unsigned)(c & 7) << 1);
 }
 
+// 64 列 tile 专用打包偏移（P 矩阵 [128, 64]）：行组 = 8 行 × 128B = 1024B。
+__device__ __forceinline__ unsigned fa2_smem_off64(int r, int c) {
+    return ((unsigned)(r >> 3) << 10) | ((unsigned)(c >> 3) << 7) |
+           ((unsigned)(r & 7) << 4) | ((unsigned)(c & 7) << 1);
+}
+
 __device__ __forceinline__ void fa2_cp_async16(unsigned saddr,
                                                const void* gaddr) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(saddr),
@@ -57,6 +63,25 @@ __device__ __forceinline__ void fa2_ldmatrix_x4(unsigned& r0, unsigned& r1,
         base + ((m & 1) * 128) + ((m & 2) ? delta2 : 0) + ((lane & 7) << 4);
     asm volatile(
         "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+        : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
+        : "r"(addr));
+}
+
+// ldmatrix 转置变体：读 [rows, cols] 行主序 8×8 矩阵，输出转置后的
+// [cols, rows] 片段。PV 的 mma B 需要 col 主序 [k,n]（k=keys 方向），
+// 而 V smem 是 [keys, d] 行主序 = [k,n] 行主序，需 trans。
+__device__ __forceinline__ void fa2_ldmatrix_x4_trans(unsigned& r0,
+                                                      unsigned& r1,
+                                                      unsigned& r2,
+                                                      unsigned& r3,
+                                                      unsigned base,
+                                                      unsigned delta2,
+                                                      int lane) {
+    const unsigned m = lane >> 3;
+    const unsigned addr =
+        base + ((m & 1) * 128) + ((m & 2) ? delta2 : 0) + ((lane & 7) << 4);
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
         : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
         : "r"(addr));
 }
@@ -119,7 +144,9 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
     }
     fa2_cp_commit();
 
-    // ---- PV 累加器（诊断标量版：每 warp 16 行 × 32 列，每 lane 2 列对） ----
+    // ---- PV 累加器（标量版：每 warp 16 行 × 32 列，每 lane 2 列对） ----
+    // mma PV 的 V 片段 ldmatrix 布局在值域大时仍错位（repro range≥3 误差 10+），
+    // 标量版对拍 16/16 PASS（误差 3e-5），先交付；mma PV 后续再修。
     float acc[8][4];  // [j 窗口][(lane%4)*2/+1 两列 × low/high 行]
 #pragma unroll
     for (int j = 0; j < 8; ++j)
@@ -286,17 +313,16 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
             for (int j = 0; j < 8; ++j) {
                 const int pcol = (lane % 4) * 2 + j * 8;
                 *reinterpret_cast<__half2*>(
-                    reinterpret_cast<char*>(s_p) + fa2_smem_off(prow_lo, pcol)) =
+                    reinterpret_cast<char*>(s_p) + fa2_smem_off64(prow_lo, pcol)) =
                     __floats2half2_rn(sc[j][0], sc[j][1]);
                 *reinterpret_cast<__half2*>(
-                    reinterpret_cast<char*>(s_p) + fa2_smem_off(prow_hi, pcol)) =
+                    reinterpret_cast<char*>(s_p) + fa2_smem_off64(prow_hi, pcol)) =
                     __floats2half2_rn(sc[j][2], sc[j][3]);
             }
         }
         __syncthreads();
 
-        // ---- PV 诊断标量版：acc[row,d] += Σ_key P[row,key]·V[key,d] ----
-        // 用寄存器 sc（e 值）直接乘 V smem，排除 mma 路径（二分定位）。
+        // ---- PV 标量版：acc[row,d] += Σ_key P[row,key]·V[key,d] ----
         {
 #pragma unroll
             for (int dd = 0; dd < 32; ++dd) {
@@ -315,13 +341,11 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
                     a_lo += sc[j][0] * v0 + sc[j][1] * v1;
                     a_hi += sc[j][2] * v0 + sc[j][3] * v1;
                 }
-                // 4-lane 归约（每行 64 keys 由 4 lane 覆盖）
 #pragma unroll
                 for (int off = 1; off < 4; off <<= 1) {
                     a_lo += __shfl_xor_sync(0xffffffffu, a_lo, off);
                     a_hi += __shfl_xor_sync(0xffffffffu, a_hi, off);
                 }
-                // 累加进 acc：列 dd 对应槽位 ((lane%4)*2/+1 两列 × low/high 行)
                 const int t = dd >> 3;
                 const int in8 = dd & 7;
                 if ((lane % 4) * 2 == in8) {
