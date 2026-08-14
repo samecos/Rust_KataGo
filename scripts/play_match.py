@@ -11,13 +11,14 @@
 """
 import argparse
 import random
+import shlex
 import subprocess
 import sys
 
 
 def start_engine(cmdline: str):
     return subprocess.Popen(
-        cmdline, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        shlex.split(cmdline), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, text=True, bufsize=1,
     )
 
@@ -27,8 +28,8 @@ def cmd(proc, line: str) -> str:
     proc.stdin.flush()
     while True:
         out = proc.stdout.readline()
-        if out is None:
-            raise RuntimeError("engine died")
+        if out == "":
+            raise RuntimeError(f"engine died (exit {proc.poll()})")
         out = out.rstrip("\n")
         if out.startswith("= "):
             return out[2:]
@@ -52,10 +53,14 @@ def play_game(cmd_a, cmd_b, a_black: bool, visits: int) -> str:
         eng = black if turn % 2 == 0 else white
         color = "B" if turn % 2 == 0 else "W"
         mv = cmd(eng, f"genmove {color}").strip()
+        print(f"[dbg] turn {turn} {color} -> {mv}", flush=True)
         moves.append((color, mv))
         if mv.lower() == "resign":
             return "W" if color == "B" else "B"
+        # genmove 方已自行落子（GTP 规范），只需同步给对方引擎
         for e in (black, white):
+            if e is eng:
+                continue
             cmd(e, f"play {color} {mv}")
         if mv.lower() == "pass" and len(moves) >= 2 and moves[-2][1].lower() == "pass":
             # 双 pass 终局
