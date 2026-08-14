@@ -47,11 +47,12 @@
 - attention 主循环（M4 换 FA both16 tile 版，v1 已数值验证）
 - 后续探索：sm_120a 的 FP8 块缩放 mma（fork 未做，风险项）
 
-## 已知缺口（待修，按优先级）
+## 已知缺口（2026-08-14 状态：1、2 已修并提交；剩余即 M4）
 
-1. **GTP 参数系统**：`kata_search/src/params.rs` 的 changeable 参数表仅 9 条，C++ `searchparams.cpp` 有 115 条；`kata-set-params`（JSON 批量）未实现。影响 kata-get/set-param、kata-list-params、kata-set-params 的完整性（需求 F2）。修法：对照 C++ changeableParametersToJson 补齐 + gtp.rs 的批量设置。
-2. **analysis allowMoves**：每请求限 1 条（C++ 允许每玩家 1 条共 2 条）。**已修**（2026-08-14：放宽到 2 条 + 同玩家重复报错，消息与 C++ 逐字对齐；rustfmt 语法验证通过，待编译验证后提交）。
-3. **M4 待做**：见上方决策组表。
+1. **GTP 参数系统**：✅ 已实现（85931e5）——changeable 100 键 list/get/set + 9 特殊参数，回归测试行级断言全绿。
+2. **analysis allowMoves**：✅ 已修（89ca543）。
+3. **cudabackend 输入布局**：✅ 已修（154ad92）——强制 NCHW，空盘 whiteWin 0.655 与 TRT 0.656 对齐；genmove=R16。
+4. **M4 待做**：见上方决策组表。
 
 ## GTP 参数系统补齐规格（2026-08-14 调研，供实现对照）
 

@@ -132,8 +132,10 @@ mod imp {
         /// FP16 张量核 GEMM：`C[M,N] = alpha * A[M,K] * B[N,K]^T + beta * C`。
         ///
         /// `a`/`b` 为 f32 主机数据（主机侧转 half），`c` 就地读写；K 必须是
-        /// 16 的倍数（调用方负责 padding）。对应 `cuda-kernels/gemm.cu` 的
-        /// `hgemm_m16n8k16_kernel`（内联 PTX mma.sync m16n8k16）。
+        /// 16 的倍数（调用方负责 padding）。对应 `cuda-kernels/gemm_v2.cu` 的
+        /// `hgemm_v2_kernel`（tile 128×128×32 + smem 双缓冲 + cp.async +
+        /// 内联 PTX mma.sync m16n8k16）。v1（`hgemm_m16n8k16_kernel`，无 smem）
+        /// 保留在 gemm.cu 中，ABBA 对比后退位。
         #[allow(clippy::too_many_arguments)]
         pub fn hgemm_m16n8k16(
             &self,
@@ -154,7 +156,7 @@ mod imp {
             let a_half: Vec<u16> = a.iter().map(|&x| f32_to_f16_bits(x)).collect();
             let b_half: Vec<u16> = b.iter().map(|&x| f32_to_f16_bits(x)).collect();
 
-            let f = self.get_func("hgemm_m16n8k16_kernel")?;
+            let f = self.get_func("hgemm_v2_kernel")?;
             let stream = self.device.default_stream();
             let mut d_a: CudaSlice<u16> =
                 unsafe { stream.alloc(a_half.len()) }.map_err(|e| e.to_string())?;
@@ -173,11 +175,11 @@ mod imp {
                 .map_err(|e| e.to_string())?;
 
             let grid = (
-                m.div_ceil(64) as u32,
-                n.div_ceil(64) as u32,
+                m.div_ceil(128) as u32,
+                n.div_ceil(128) as u32,
                 1u32,
             );
-            let block = (4 * 32) as u32;
+            let block = (8 * 32) as u32;
             let cfg = cudarc::driver::LaunchConfig {
                 grid_dim: grid,
                 block_dim: (block, 1, 1),

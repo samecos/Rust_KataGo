@@ -737,6 +737,7 @@ fn zeros32(stream: &StreamRef, n: usize) -> Result<CudaSlice<f32>, String> {
 // ---------------------------------------------------------------------------
 
 /// `C[M,N] = A[M,K] @ B[N,K]^T`（f16 张量核；A 的列 stride 必须为 `b.kp`）。
+/// v2：tile 128×128×32、smem 双缓冲 + cp.async 流水（gemm_v2.cu）。
 fn hgemm(
     rt: &CudaRuntime,
     a: &CudaSlice<u16>,
@@ -744,12 +745,12 @@ fn hgemm(
     c: &mut CudaSlice<f32>,
     m: usize,
 ) -> Result<(), String> {
-    let f = rt.get_func("hgemm_m16n8k16_kernel")?;
+    let f = rt.get_func("hgemm_v2_kernel")?;
     let stream = rt.device.default_stream();
-    let grid = (m.div_ceil(64) as u32, b.n.div_ceil(64) as u32, 1u32);
+    let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
-        block_dim: (128, 1, 1),
+        block_dim: (256, 1, 1),
         shared_mem_bytes: 0,
     };
     let (alpha, beta) = (1.0f32, 0.0f32);
@@ -767,6 +768,76 @@ fn hgemm(
             .launch(cfg)
     }
     .map_err(|e| format!("hgemm launch failed: {e}"))?;
+    Ok(())
+}
+
+/// `C[M,N] = A[M,K] @ B[N,K]^T` 的 f16 输出变体（GEMM epilogue 直接
+/// `__float2half_rn`，取代 f32 GEMM + `f32_to_f16` 两次 launch）。
+fn hgemm_f16(
+    rt: &CudaRuntime,
+    a: &CudaSlice<u16>,
+    b: &WeightBuf,
+    c: &mut CudaSlice<u16>,
+    m: usize,
+) -> Result<(), String> {
+    let f = rt.get_func("hgemm_v2_f16out_kernel")?;
+    let stream = rt.device.default_stream();
+    let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let (alpha, beta) = (1.0f32, 0.0f32);
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&b.data)
+            .arg(c)
+            .arg(&(m as i32))
+            .arg(&(b.n as i32))
+            .arg(&(b.kp as i32))
+            .arg(&alpha)
+            .arg(&beta)
+            .launch(cfg)
+    }
+    .map_err(|e| format!("hgemm_f16 launch failed: {e}"))?;
+    Ok(())
+}
+
+/// `C[M,N] = A[M,K] @ B[N,K]^T + C`（beta=1 原位残差：epilogue 先读 C 再写 D，
+/// C 与 D 同指针，省去独立的残差加 kernel）。
+fn hgemm_residual(
+    rt: &CudaRuntime,
+    a: &CudaSlice<u16>,
+    b: &WeightBuf,
+    c: &mut CudaSlice<f32>,
+    m: usize,
+) -> Result<(), String> {
+    let f = rt.get_func("hgemm_v2_kernel")?;
+    let stream = rt.device.default_stream();
+    let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let (alpha, beta) = (1.0f32, 1.0f32);
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&b.data)
+            .arg(c)
+            .arg(&(m as i32))
+            .arg(&(b.n as i32))
+            .arg(&(b.kp as i32))
+            .arg(&alpha)
+            .arg(&beta)
+            .launch(cfg)
+    }
+    .map_err(|e| format!("hgemm_residual launch failed: {e}"))?;
     Ok(())
 }
 
