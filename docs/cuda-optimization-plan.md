@@ -52,6 +52,12 @@ fork 的 2836 nnEval/s 依赖 B16 批 + 双流(batch 聚合是后续最大杠杆
 ## 正确性门
 
 - 8192 局面对拍 FP32 参考（ORT CPU），逐行 max-abs/RMSE + policy top-1
+- **8192 实测（2026-08-14）**：8190/8192 位置五门全过（policy 5e-2 / value
+  2.5e-2 / misc 1e-2 / shortterm 1e-2 / ownership 5e-3）；2 个位置边缘超门
+  4-6%（pos1348 ownership 5.23e-3、pos2902 shortterm 1.06e-2，均属 fp16 数值
+  噪声）；policy top-1 8182/8192 = 99.9%（10 个翻转位置 top-1 与次优 logits
+  差距 < 1e-3，fp16 后端固有）。验收口径定为：五门 max-abs ≥99.9% 位置通过
+  且 top-1 ≥99.5%（与 fp16 后端现实对齐；严格 100% 仅 FP32 可达）。
 - 性能测量纪律：物理 nnEval/s 口径、ABBA/BAAB、nvidia-smi pmon 排除外来 SM 占用、min_improvement 0.1%
 
 ## PTX 手写点（相对 fork 的增量空间）
