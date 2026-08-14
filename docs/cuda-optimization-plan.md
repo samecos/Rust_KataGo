@@ -19,14 +19,32 @@
 | (证伪) | dual FFN(gate+up 单 GEMM) | 回退 | agent-16 ABBA 慢于基线 |
 | cdfbb4b | **CUDA Graph + 多流 + 工作区预分配**(WDDM 提交瓶颈三连击) | 131 | 单前向 kernel 执行 8.5ms→**0.15ms**(graph 一次提交);launch+sync 仅 8.5µs |
 | 8536506 | pinned host 内存 + WC 可见性修复 | 131 | 同口径持平;WC 读需流级 synchronize |
+| 83b49fe..1fded6e | serve 锁外执行 + 搜索 playout 并行化 | 130 | 多线程请求并发到达修复 |
+| 971601e | kernel 融合(merge/gatesilu/dual FFN)+ **tile-64 GEMM**(M<1024 grid×4) | **169** | t=1 +29%;修复 row+8 越界与 N=1 标量边界 |
+| d8b04d9 | **FA2 tensor-core attention 收敛**(QK mma + online softmax + 标量 PV) | **190** | t=8 197→240 首超 TRT |
+| ffcfe6e | GEMM t64 BK=64(K 迭代减半,行组偏移 1024B 修复) | 193 | t=8 248 |
+| 10c4f1c | **RoPE 融合进 FA2**(packed qkv f16 + 加载时旋转,-12 kernel) | 193 | t=8 256 |
+| 83ba18d | **FA2 全 tensor core**(PV mma 修复:P 片段 64 列布局 delta2=1024) | **210** | t=8 281(+26% vs TRT) |
+| 5b5c490 | G4 ValueHead 三输出 GEMM 合并 | 211 | -4 kernel |
+| (本轮) | G4 PolicyHead conv1p/g 合并 + 头分支融合 + ValueHead 拆写 | 211 | -6 kernel |
+| (本轮) | **serve 线程默认 1 + 凑批窗口 8ms**(对齐 C++,batch 2.68→4.0) | t=8 **359** | t=16 441 |
 
-**2026-08-14 第二轮优化后同口径数据(release,benchmark v=1000 n=10 t=1)**：
-- CUDA = 131 nnEvals/s(7.3ms/前向),TRT = 234(3.8ms/前向),差距 1.8×。
-- 后端已非瓶颈:graph 执行 0.15ms、launch+sync 8.5µs、htod/dtoh pinned 异步;
-  剩余 3.5ms 差距在 host 链路(特征生成、serve 线程往返、树操作)——共享
-  代码,需 host 侧 profile(下一步)。
-- 多线程不涨(4/8 线程仍 ~130):搜索侧请求未并发到达(树锁/请求串行),
-  是搜索层问题,非后端。
+**2026-08-14 最终口径(release,benchmark v=1500 n=1)**：
+
+| 线程 | CUDA(nnEvals/s) | TRT 参照 | 比值 |
+|---|---|---|---|
+| t=1 | 208.6 | 253 | 82% |
+| t=4 | 238.7 | ~220 | 108% |
+| t=8 | 351.8 | 223.6 | **157%** |
+| t=12 | 430.2 | — | — |
+| t=16 | 441.3 | — | — |
+
+- 正确性门:512 位置五门全 PASS + top-1 100%;2048 位置 top-1 99.9%
+  (fp16 固有噪声,与 8192 历史口径一致);GTP genmove 正常(R16)。
+- t=1 剩余差距在 WDDM graph node 开销(~22µs/kernel × 137 kernel ≈ 3ms),
+  计算本身仅 ~1.2ms/前向——平台限制,非 kernel 质量。
+- 未交付:swiglu 融合(ABBA 评估净负,A 加载普通读破坏 cp.async 流水);
+  PV mma 的进一步调优;G6 L2 persisting(当前 batch 工作集已驻留 L2)。
 
 ## 决策组（严格有序，后组不得改写前组配置键）
 
