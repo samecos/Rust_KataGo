@@ -3,18 +3,31 @@
 > 方法论与战术清单移植自 KataGomo_fork（SM120 plan 驱动优化，5080 上 2836 nnEval/s）。
 > 本机目标：RTX 5070 Ti（SM 12.0，16GB），模型 b11c768h12nbt3tflrs-fson-silu（75M 参数，FP16/NHWC）。
 
-## 基线（待 M3 执行器落地后实测记录）
+## 基线（2026-08-14 实测，release 构建，单线程单 batch）
 
-- 官方参照（本机无 cuDNN，用 TensorRT 10.16 兜底作基准）：nnEval/s 待测
-- M3 手写后端 v1（正确优先，单流）：nnEval/s 待测
+- TRT 10.x 参照：**180 nnEvals/s**（单前向 ~5.5ms）
+- M3 手写后端 v1（正确优先，单流）：**47 nnEvals/s**（单前向 ~21ms，180 kernel/前向）
+
+## M4 实测进度（ABBA 记录，全部对拍 PASS 后提交）
+
+| 提交 | 改动 | nnEvals/s | 附注 |
+|---|---|---|---|
+| 85931e5 | 执行器 v1 落地 | 47 | 基线 |
+| 271be9b | GEMM v2(smem 双缓冲+cp.async+ldmatrix,tile 128×128×32) | 58.5 | +24% |
+| 8f24fb0 | kernel 融合(FFN 6→4、attn 6→5、Linear 3→2 launch) | 61.5 | +5% |
+| 05c44a8 | attention v3(warp-per-row+cp.async 64 键分块+128B 打包 smem) | **114** | attn 0.27→0.056ms/层(4.8×);v2 方案此前被证伪(40<47) |
+| (进行中) | dual FFN(gate+up 单 GEMM) | 待测 | agent-16 |
+
+单 batch 下 M=361 的 GEMM grid 仅 3×N/128 块,SM 利用率低是根本限制;
+fork 的 2836 nnEval/s 依赖 B16 批 + 双流(batch 聚合是后续最大杠杆)。
 
 ## 决策组（严格有序，后组不得改写前组配置键）
 
 | # | 组 | 战术 | 状态 |
 |---|---|---|---|
-| G1 | fa4 / wide_projection / qkv_rope / dual_ffn | 宽 QKV 单 GEMM（M=B×361、N=1152、K=384，packed 行 [Q384\|K384\|V384]，tile M128×N128×K64 s2）；FA attention（tile M128×N64、stages=1、noncausal 无掩码、both16 双 FP16 累加 + **rescale 舍回 FP16 累加器**、128 线程）；Q/K RoPE 为**独立 batch 共享 kernel**（361×192 线程、half2 对、按 B 展开，非 GEMM epilogue——SM120 证伪了融合）；dual FFN 共享 A + SwiGLU epilogue（CUTLASS LeftSiLUAndMul） | 待做 |
-| G2 | fused_residual / linear2 / outproj | GEMM beta=1 原位残差（C==D 同指针，epilogue 先读 C 再写 D；tile 128×128×32、warp 64×64×32、3 stages） | 待做 |
-| G3 | postconv_bn / preconv / pointwise | affine+SiLU（half2 `__hfma2`，sigmoid 逐 half 转 float）；RMSNorm C384 用 warp4-vec8（**零共享内存**：uint4+uint2 载入 12 half/lane、单 XOR 链归约、4 行/块）；SwiGLU 已折入 G1 FFN epilogue | 待做 |
+| G1 | fa4 / wide_projection / qkv_rope / dual_ffn | 宽 QKV 单 GEMM（M=B×361、N=1152、K=384，packed 行 [Q384\|K384\|V384]，tile M128×N128×K64 s2）；FA attention（tile M128×N64、stages=1、noncausal 无掩码、both16 双 FP16 累加 + **rescale 舍回 FP16 累加器**、128 线程）；Q/K RoPE 为**独立 batch 共享 kernel**（361×192 线程、half2 对、按 B 展开，非 GEMM epilogue——SM120 证伪了融合）；dual FFN 共享 A + SwiGLU epilogue（CUTLASS LeftSiLUAndMul） | 部分：attention 已换 v3(非 FA4 tile 但达标)；dual FFN 进行中；宽 QKV/RoPE 未做 |
+| G2 | fused_residual / linear2 / outproj | GEMM beta=1 原位残差（C==D 同指针，epilogue 先读 C 再写 D；tile 128×128×32、warp 64×64×32、3 stages） | ✅ 已做(8f24fb0)：hgemm_residual beta=1 + hgemm_f16 直出 epilogue |
+| G3 | postconv_bn / preconv / pointwise | affine+SiLU（half2 `__hfma2`，sigmoid 逐 half 转 float）；RMSNorm C384 用 warp4-vec8（**零共享内存**：uint4+uint2 载入 12 half/lane、单 XOR 链归约、4 行/块）；SwiGLU 已折入 G1 FFN epilogue | 待做(RMSNorm/affine 仍是简单版) |
 | G4 | wide_head / policy_p1 / head_bn | wide head 投影（三合一 GEMM，full-c384：P1@0..96、G1@96..192、V1@192..384）；fused policy P1（half→float 直出 + BN fold + silu）；head BN half→float（V1 写 half+float 双输出） | 待做 |
 | G5 | rmsnorm | （已并入 G3） | — |
 | G6 | l2 | persisting-L2（trunk 窗口 = B×361×768×2B ≈ 8.5MB、inner = B×361×384×2B ≈ 4.2MB；cudaDeviceSetLimit + cudaStreamSetAttribute access-policy；**5070 Ti 48MB L2/36MB persisting 上限，2 流 26.6MB 可 fit**） | 待做 |
