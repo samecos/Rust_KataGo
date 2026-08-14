@@ -285,6 +285,8 @@ fn compile_cuda_kernels() {
         }
     };
     println!("cargo:rerun-if-changed={}", targets_json.display());
+    // 目录级监听：新增 .cu 文件时也触发重编译（文件级列表覆盖不了新文件）。
+    println!("cargo:rerun-if-changed={}", kernels_dir.display());
     for cu in &cu_files {
         println!("cargo:rerun-if-changed={}", cu.display());
     }

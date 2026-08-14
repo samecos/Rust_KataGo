@@ -611,6 +611,8 @@ impl CudaModel {
                         std::fs::write(format!("target/cuda_debug_l{li}_{name}.bin"), bytes)
                             .map_err(|e| e.to_string())?;
                     }
+                    // 全部 dump 的 memcpy 排队后统一同步（消除 host 读竞态）。
+                    let _ = stream.synchronize();
                     if li == self.layers.len() - 1 {
                         let wf = |name: &str, d: &CudaSlice<f32>| -> Result<(), String> {
                             let mut host = vec![0.0f32; d.len()];
@@ -1471,18 +1473,30 @@ fn attention_row(
     heads: usize,
 ) -> Result<(), String> {
     assert!(s <= 512, "attention_row 要求 S <= 512");
-    assert_eq!(d, 32, "attention_row v3 要求 D=32（smem/打包布局按 D=32 编译期定）");
-    // v3（warp-per-row + K/V 64 键分块 cp.async 双缓冲 + 128B 打包 smem）：
-    // v1 每行一块、512 线程两遍 18 次 syncthreads 树归约且 p·V 仅 32 线程串行；
-    // v2 整段 K/V 46KB smem 只 4 块/SM、串行依赖链长（ABBA 40 < 47 被证伪）。
-    // v1/v2 保留在 attention.cu 作参考。数值：FP32 全程 + RNE 舍回 half。
+    assert_eq!(d, 32, "attention 要求 D=32（smem/打包布局按 D=32 编译期定）");
+    // FA2（tensor core）仍有值域相关数值偏差未收敛（repro 单 tile V=1 下
+    // sum 偏差 ~9%），默认走 v3；KATAGO_CUDA_ATTN=fa2 显式启用 FA2 供调试。
+    let use_v3 = std::env::var("KATAGO_CUDA_ATTN").as_deref() != Ok("fa2");
+    // v3（warp-per-row 标量点积，数值已验证）；
     // 输出直接写 merge 后布局 [B*S, H*D]（省 attn_merge 独立 kernel）。
-    let f = rt.get_func("attention_row_v3_kernel")?;
+    let f = if use_v3 {
+        rt.get_func("attention_row_v3_kernel")?
+    } else {
+        rt.get_func("attention_fa2_kernel")?
+    };
     let stream = active_stream(rt);
-    let cfg = LaunchConfig {
-        grid_dim: (((s + 7) / 8) as u32, bh as u32, 1),
-        block_dim: (256, 1, 1),
-        shared_mem_bytes: 0,
+    let cfg = if use_v3 {
+        LaunchConfig {
+            grid_dim: (((s + 7) / 8) as u32, bh as u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        }
+    } else {
+        LaunchConfig {
+            grid_dim: (s.div_ceil(128) as u32, bh as u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        }
     };
     unsafe {
         stream
@@ -1497,7 +1511,7 @@ fn attention_row(
             .arg(&(heads as i32))
             .launch(cfg)
     }
-    .map_err(|e| format!("attention_row launch failed: {e}"))?;
+    .map_err(|e| format!("attention launch failed: {e}"))?;
     Ok(())
 }
 

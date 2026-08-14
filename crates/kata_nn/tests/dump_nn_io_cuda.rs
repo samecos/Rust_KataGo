@@ -164,9 +164,12 @@ fn cuda_model_smoke() {
         ("moremisc", out.moremisc.as_slice(), 60.0f32),
         ("ownership", out.ownership.as_slice(), 2.0f32),
     ] {
-        for &x in v {
-            assert!(x.is_finite(), "{name} 含非有限值: {x}");
-            assert!(x.abs() < bound, "{name} 数值越界: {x}");
+        for (i, &x) in v.iter().enumerate() {
+            if !x.is_finite() {
+                eprintln!("SMOKE {name}[{i}] = {x}");
+            }
+            assert!(x.is_finite(), "{name}[{i}] 含非有限值: {x}");
+            assert!(x.abs() < bound, "{name}[{i}] 数值越界: {x}");
         }
     }
     // 空盘策略 top-1 不应是 pass（361），且最大值显著（策略集中）。
