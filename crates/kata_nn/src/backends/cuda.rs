@@ -417,6 +417,7 @@ mod imp {
                 .arg(&(s as i32))
                 .arg(&(d as i32))
                 .arg(&scale)
+                .arg(&(bh as i32)) // heads：输出写 [b*s*H + h] 布局（bh 全为 batch 时=恒等）
                 .launch(cfg)
         }
         .map_err(|e| format!("attention launch failed: {e}"))?;
@@ -696,13 +697,22 @@ mod backend_impl {
                 )));
             }
 
+            // host 计时（KATAGO_CUDA_HOST_PROFILE=1）：fill / exec / decode 三段累计。
+            let host_prof = std::env::var("KATAGO_CUDA_HOST_PROFILE").is_ok();
+            let t0 = std::time::Instant::now();
+
             // --- 填输入（NCHW spatial + global，空间特征带对称性） ----------
             const NUM_SPATIAL_CHANNELS: i32 = 22;
             const NUM_GLOBAL_CHANNELS: usize = 19;
             let single_spatial = (NUM_SPATIAL_CHANNELS * nn_x_len * nn_y_len) as usize;
 
-            let mut spatial_host = vec![0.0f32; n * single_spatial];
-            let mut global_host = vec![0.0f32; n * NUM_GLOBAL_CHANNELS];
+            // 物理 batch：batch=1 用专用小图（单线程/串行请求不浪费 GPU）；
+            // 其余按实际 batch（kernel 计算随 batch 线性增长，padding 会
+            // 放大 GPU 时间——ABBA 证伪了固定 max 物理 batch 的尾批复制）。
+            let phys_batch = n;
+
+            let mut spatial_host = vec![0.0f32; phys_batch * single_spatial];
+            let mut global_host = vec![0.0f32; phys_batch * NUM_GLOBAL_CHANNELS];
             for i in 0..n {
                 let sym_idx = input_bufs[i].symmetry;
                 let sp_off = i * single_spatial;
@@ -721,9 +731,19 @@ mod backend_impl {
                 let copy_len = NUM_GLOBAL_CHANNELS.min(gb.len());
                 global_host[gl_off..gl_off + copy_len].copy_from_slice(&gb[..copy_len]);
             }
+            // padding 行（仅 phys_batch > n 时；当前 phys_batch == n，循环为空）。
+            for i in n..phys_batch {
+                let src = (i - 1) * single_spatial;
+                let dst = i * single_spatial;
+                spatial_host.copy_within(src..src + single_spatial, dst);
+                let gsrc = (i - 1) * NUM_GLOBAL_CHANNELS;
+                let gdst = i * NUM_GLOBAL_CHANNELS;
+                global_host.copy_within(gsrc..gsrc + NUM_GLOBAL_CHANNELS, gdst);
+            }
 
             // --- 上传 + 前向 -------------------------------------------------
             let stream = &h.stream;
+            let t1 = std::time::Instant::now();
 
             // 调试钩子：dump 后端收到的输入（KATAGO_CUDA_DUMP_INPUT=<dir>）。
             if let Ok(d) = std::env::var("KATAGO_CUDA_DUMP_INPUT") {
@@ -745,17 +765,24 @@ mod backend_impl {
             let _exec_guard = CUDA_EXEC_LOCK.lock().unwrap();
             let host = {
                 let mut g = h.graph_state.lock().unwrap();
-                let need_capture = match g.as_ref() {
-                    Some(s) => s.ws.batch() != n,
+                // KATAGO_CUDA_NOGRAPH=1：强制直连路径（逐 kernel 提交），
+                // 配合 KATAGO_CUDA_PROFILE 定位 graph 重放外的真实 kernel 耗时。
+                let force_direct = std::env::var("KATAGO_CUDA_NOGRAPH").is_ok();
+                // workspace/缓冲 需要（重新）创建（物理 batch 变化或首次）。
+                let need_rebuild = match g.as_ref() {
+                    Some(s) => s.ws.batch() != phys_batch,
                     None => true,
                 };
-                if need_capture {
+                if need_rebuild {
                     // 清场：等待设备全部工作完成，避免与其他流的未完成
                     // 工作产生 capture 依赖（STREAM_CAPTURE_INVALIDATED）。
-                    h.rt
-                        .device
-                        .synchronize()
-                        .map_err(|e| NeuralNetError(format!("pre-capture sync: {e}")))?;
+                    // 直连模式无需（无 capture）。
+                    if !force_direct {
+                        h.rt
+                            .device
+                            .synchronize()
+                            .map_err(|e| NeuralNetError(format!("pre-capture sync: {e}")))?;
+                    }
                     // 固定地址输入缓冲 + 工作区 + pinned host 缓冲，
                     // 捕获整图（htod/dtoh 在图外）。
                     let mut in_spatial: cudarc::driver::CudaSlice<f32> =
@@ -768,46 +795,50 @@ mod backend_impl {
                         .map_err(|e| NeuralNetError(format!("pinned in_sp: {e}")))?;
                     let in_gl_pin = unsafe { h.rt.device.alloc_pinned::<f32>(global_host.len()) }
                         .map_err(|e| NeuralNetError(format!("pinned in_gl: {e}")))?;
-                    let out_policy_pin = unsafe { h.rt.device.alloc_pinned::<f32>(n * 6 * 362) }
+                    let out_policy_pin = unsafe { h.rt.device.alloc_pinned::<f32>(phys_batch * 6 * 362) }
                         .map_err(|e| NeuralNetError(format!("pinned out_policy: {e}")))?;
-                    let out_value_pin = unsafe { h.rt.device.alloc_pinned::<f32>(n * 3) }
+                    let out_value_pin = unsafe { h.rt.device.alloc_pinned::<f32>(phys_batch * 3) }
                         .map_err(|e| NeuralNetError(format!("pinned out_value: {e}")))?;
-                    let out_misc_pin = unsafe { h.rt.device.alloc_pinned::<f32>(n * 10) }
+                    let out_misc_pin = unsafe { h.rt.device.alloc_pinned::<f32>(phys_batch * 10) }
                         .map_err(|e| NeuralNetError(format!("pinned out_misc: {e}")))?;
-                    let out_moremisc_pin = unsafe { h.rt.device.alloc_pinned::<f32>(n * 8) }
+                    let out_moremisc_pin = unsafe { h.rt.device.alloc_pinned::<f32>(phys_batch * 8) }
                         .map_err(|e| NeuralNetError(format!("pinned out_moremisc: {e}")))?;
-                    let out_own_pin = unsafe { h.rt.device.alloc_pinned::<f32>(n * policy_area) }
+                    let out_own_pin = unsafe { h.rt.device.alloc_pinned::<f32>(phys_batch * policy_area) }
                         .map_err(|e| NeuralNetError(format!("pinned out_own: {e}")))?;
-                    let mut ws = CudaWorkspace::new(stream, &h.model, n)
+                    let mut ws = CudaWorkspace::new(stream, &h.model, phys_batch)
                         .map_err(|e| NeuralNetError(format!("CUDA workspace alloc failed: {e}")))?;
-                    set_capturing(true);
-                    let cap_result = (|| -> Result<cudarc::driver::CudaGraph, NeuralNetError> {
-                        stream.begin_capture(
-                            cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
-                        ).map_err(|e| NeuralNetError(format!("begin_capture: {e}")))?;
-                        h.model
-                            .apply(&h.rt, stream, &mut ws, &in_spatial, &in_global)
-                            .map_err(|e| NeuralNetError(format!("CUDA forward (capture) failed: {e}")))?;
-                        let flags: cudarc::driver::sys::CUgraphInstantiate_flags =
-                            unsafe { std::mem::transmute(0u32) };
-                        stream
-                            .end_capture(flags)
-                            .map_err(|e| NeuralNetError(format!("end_capture: {e}")))?
-                            .ok_or_else(|| NeuralNetError("capture produced no graph".to_string()))
-                    })();
-                    set_capturing(false);
-                    let graph = match cap_result {
-                        Ok(g) => Some(g),
-                        Err(e) => {
-                            // capture 失败：清理流的 capture 状态（丢弃残余图），
-                            // 降级为直连路径（每前向逐 kernel 提交，慢但正确）。
+                    let graph = if force_direct {
+                        None
+                    } else {
+                        set_capturing(true);
+                        let cap_result = (|| -> Result<cudarc::driver::CudaGraph, NeuralNetError> {
+                            stream.begin_capture(
+                                cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
+                            ).map_err(|e| NeuralNetError(format!("begin_capture: {e}")))?;
+                            h.model
+                                .apply(&h.rt, stream, &mut ws, &in_spatial, &in_global)
+                                .map_err(|e| NeuralNetError(format!("CUDA forward (capture) failed: {e}")))?;
                             let flags: cudarc::driver::sys::CUgraphInstantiate_flags =
                                 unsafe { std::mem::transmute(0u32) };
-                            let _ = stream.end_capture(flags);
-                            eprintln!(
-                                "WARNING: CUDA graph capture failed ({e}); falling back to direct launch path"
-                            );
-                            None
+                            stream
+                                .end_capture(flags)
+                                .map_err(|e| NeuralNetError(format!("end_capture: {e}")))?
+                                .ok_or_else(|| NeuralNetError("capture produced no graph".to_string()))
+                        })();
+                        set_capturing(false);
+                        match cap_result {
+                            Ok(g) => Some(g),
+                            Err(e) => {
+                                // capture 失败：清理流的 capture 状态（丢弃残余图），
+                                // 降级为直连路径（每前向逐 kernel 提交，慢但正确）。
+                                let flags: cudarc::driver::sys::CUgraphInstantiate_flags =
+                                    unsafe { std::mem::transmute(0u32) };
+                                let _ = stream.end_capture(flags);
+                                eprintln!(
+                                    "WARNING: CUDA graph capture failed ({e}); falling back to direct launch path"
+                                );
+                                None
+                            }
                         }
                     };
                     if let Some(g) = graph.as_ref() {
@@ -831,6 +862,7 @@ mod backend_impl {
                 let st = g.as_mut().unwrap();
                 // 填 pinned 输入 → 异步 htod（固定设备地址）→ graph 提交 →
                 // 异步 dtoh 到 pinned → 一次同步后读。
+                let e0 = std::time::Instant::now();
                 {
                     let sp = st
                         .in_sp_pin
@@ -843,22 +875,25 @@ mod backend_impl {
                         .map_err(|e| NeuralNetError(format!("pin in_gl: {e}")))?;
                     gl.copy_from_slice(&global_host);
                 }
+                let e1 = std::time::Instant::now();
                 stream
                     .memcpy_htod(&st.in_sp_pin, &mut st.in_spatial)
                     .map_err(|e| NeuralNetError(format!("upload spatial: {e}")))?;
                 stream
                     .memcpy_htod(&st.in_gl_pin, &mut st.in_global)
                     .map_err(|e| NeuralNetError(format!("upload global: {e}")))?;
+                let e2 = std::time::Instant::now();
                 match st.graph.as_ref() {
-                    Some(graph) => graph
+                    Some(graph) if !force_direct => graph
                         .launch()
                         .map_err(|e| NeuralNetError(format!("graph launch: {e}")))?,
                     // 降级直连：逐 kernel 提交（慢但正确）。
-                    None => h
+                    _ => h
                         .model
                         .apply(&h.rt, stream, &mut st.ws, &st.in_spatial, &st.in_global)
                         .map_err(|e| NeuralNetError(format!("CUDA forward failed: {e}")))?,
                 }
+                let e3 = std::time::Instant::now();
                 stream
                     .memcpy_dtoh(&st.ws.out_policy, &mut st.out_policy_pin)
                     .map_err(|e| NeuralNetError(format!("dtoh policy: {e}")))?;
@@ -874,10 +909,12 @@ mod backend_impl {
                 stream
                     .memcpy_dtoh(&st.ws.out_ownership, &mut st.out_own_pin)
                     .map_err(|e| NeuralNetError(format!("dtoh ownership: {e}")))?;
+                let e4 = std::time::Instant::now();
                 // 流级同步（WC pinned 内存的 host 读需设备写全局可见）
                 stream
                     .synchronize()
                     .map_err(|e| NeuralNetError(format!("sync: {e}")))?;
+                let e5 = std::time::Instant::now();
                 let host = CudaOutputsHost {
                     policy: st
                         .out_policy_pin
@@ -905,8 +942,39 @@ mod backend_impl {
                         .map_err(|e| NeuralNetError(format!("sync ownership: {e}")))?
                         .to_vec(),
                 };
+                let e6 = std::time::Instant::now();
+                if host_prof {
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static CNT: AtomicU64 = AtomicU64::new(0);
+                    static A_FILLPIN: AtomicU64 = AtomicU64::new(0);
+                    static A_HTOD: AtomicU64 = AtomicU64::new(0);
+                    static A_LAUNCH: AtomicU64 = AtomicU64::new(0);
+                    static A_DTOH: AtomicU64 = AtomicU64::new(0);
+                    static A_SYNC: AtomicU64 = AtomicU64::new(0);
+                    static A_VEC: AtomicU64 = AtomicU64::new(0);
+                    let c = CNT.fetch_add(1, Ordering::Relaxed) + 1;
+                    let push = |acc: &AtomicU64, d: std::time::Duration| {
+                        let us = d.as_micros() as u64;
+                        acc.fetch_add(us, Ordering::Relaxed) + us
+                    };
+                    let a1 = push(&A_FILLPIN, e1 - e0);
+                    let a2 = push(&A_HTOD, e2 - e1);
+                    let a3 = push(&A_LAUNCH, e3 - e2);
+                    let a4 = push(&A_DTOH, e4 - e3);
+                    let a5 = push(&A_SYNC, e5 - e4);
+                    let a6 = push(&A_VEC, e6 - e5);
+                    if c % 100 == 0 {
+                        eprintln!(
+                            "[cuda-exec] n={c} fillpin={:.1}us htod={:.1}us launch={:.1}us dtoh={:.1}us sync={:.1}us tovec={:.1}us",
+                            a1 as f64 / c as f64, a2 as f64 / c as f64,
+                            a3 as f64 / c as f64, a4 as f64 / c as f64,
+                            a5 as f64 / c as f64, a6 as f64 / c as f64
+                        );
+                    }
+                }
                 host
             };
+            let t2 = std::time::Instant::now();
 
             // --- 解码 v15 输出（与 trt.rs generic_get_output 同口径） --------
             let single_policy = 6 * (policy_area + 1);
@@ -971,6 +1039,31 @@ mod backend_impl {
                 outputs[i].nn_x_len = nn_x_len;
                 outputs[i].nn_y_len = nn_y_len;
                 outputs[i].policy_optimism_used = input_bufs[i].policy_optimism as f32;
+            }
+
+            let t3 = std::time::Instant::now();
+            if host_prof {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static CNT: AtomicU64 = AtomicU64::new(0);
+                static ACC_FILL: AtomicU64 = AtomicU64::new(0);
+                static ACC_EXEC: AtomicU64 = AtomicU64::new(0);
+                static ACC_DECODE: AtomicU64 = AtomicU64::new(0);
+                let c = CNT.fetch_add(1, Ordering::Relaxed) + 1;
+                let fill = (t1 - t0).as_micros() as u64;
+                let exec = (t2 - t1).as_micros() as u64;
+                let decode = (t3 - t2).as_micros() as u64;
+                let a_fill = ACC_FILL.fetch_add(fill, Ordering::Relaxed) + fill;
+                let a_exec = ACC_EXEC.fetch_add(exec, Ordering::Relaxed) + exec;
+                let a_decode = ACC_DECODE.fetch_add(decode, Ordering::Relaxed) + decode;
+                if c % 100 == 0 {
+                    eprintln!(
+                        "[cuda-host] n={c} avg fill={:.1}us exec={:.1}us decode={:.1}us total={:.1}us",
+                        a_fill as f64 / c as f64,
+                        a_exec as f64 / c as f64,
+                        a_decode as f64 / c as f64,
+                        (a_fill + a_exec + a_decode) as f64 / c as f64
+                    );
+                }
             }
 
             Ok(())

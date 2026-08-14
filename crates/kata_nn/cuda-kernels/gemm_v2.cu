@@ -141,6 +141,76 @@ __device__ __forceinline__ void v2_epilogue(
     }
 }
 
+// 融合逐通道门控 SiLU epilogue：res = alpha*acc + beta*C，silu(res*scale+bias)。
+// - F16_OUT=true（up 门）：C 写回 silu 前的 f32 残差 res（供下一块残差累积），
+//   Ch 写 silu(affine(res)) 的 f16（gated 流）。
+// - F16_OUT=false（down 门）：C 原位写回 silu(affine(res)) 的 f32。
+// 数值与独立 kernel 完全一致：原路径 = GEMM 写 res → gate_silu 读 res。
+// mma 累加器布局：c[i][j][0..1] = row 的 (col, col+1)；c[i][j][2..3] = row+8。
+template <bool F16_OUT>
+__device__ __forceinline__ void v2_epilogue_gatesilu(
+    float* __restrict__ Cf, __half* __restrict__ Ch, const float c[2][8][4],
+    const float* __restrict__ scale, const float* __restrict__ bias,
+    int M, int N, int blockM, int blockN, int warpM, int warpN, int lane,
+    float alpha, float beta) {
+    const int row0 = warpM + lane / 4;
+    const int col0 = warpN + (lane % 4) * 2;
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        const int row = row0 + i * 16;
+        if (row >= M) continue;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const int col = col0 + j * 8;
+            if (col >= N) continue;
+            float* cp = Cf + (size_t)row * N + col;
+            // 残差（原位读 C）：r0/r1 = row 的 col..col+1。
+            const float r0 = alpha * c[i][j][0] + beta * cp[0];
+            const float r1 = alpha * c[i][j][1] + beta * cp[1];
+            // r2/r3 = row+8（越界行只读不写，与原 epilogue 同规则）。
+            const bool has_hi = row + 8 < M;
+            float* cp2 = cp + 8 * N;
+            const float r2 =
+                has_hi ? alpha * c[i][j][2] + beta * cp2[0] : 0.0f;
+            const float r3 =
+                has_hi ? alpha * c[i][j][3] + beta * cp2[1] : 0.0f;
+            // affine + silu（精确 expf，与 gate_silu kernel 同公式）
+            float a0 = r0 * scale[col] + bias[col];
+            float a1 = r1 * scale[col + 1] + bias[col + 1];
+            float a2 = r2 * scale[col] + bias[col];
+            float a3 = r3 * scale[col + 1] + bias[col + 1];
+            a0 = a0 / (1.0f + expf(-a0));
+            a1 = a1 / (1.0f + expf(-a1));
+            a2 = a2 / (1.0f + expf(-a2));
+            a3 = a3 / (1.0f + expf(-a3));
+            if (F16_OUT) {
+                // f32 残差保留（silu 前）+ f16 gated 输出
+                cp[0] = r0;
+                cp[1] = r1;
+                if (has_hi) {
+                    cp2[0] = r2;
+                    cp2[1] = r3;
+                }
+                __half* hp = Ch + (size_t)row * N + col;
+                __half* hp2 = hp + 8 * N;
+                hp[0] = __float2half_rn(a0);
+                hp[1] = __float2half_rn(a1);
+                if (has_hi) {
+                    hp2[0] = __float2half_rn(a2);
+                    hp2[1] = __float2half_rn(a3);
+                }
+            } else {
+                cp[0] = a0;
+                cp[1] = a1;
+                if (has_hi) {
+                    cp2[0] = a2;
+                    cp2[1] = a3;
+                }
+            }
+        }
+    }
+}
+
 // 加载一个 16B chunk 到 smem（k 越界置零；行越界跳过——越界行只进
 // 不会被写回的累加器，无需清零）。
 template <bool IS_B>
@@ -170,11 +240,12 @@ __device__ __forceinline__ void v2_load_chunk(
     }
 }
 
-template <bool F16_OUT>
+template <bool F16_OUT, bool GATESILU>
 __device__ __forceinline__ void v2_hgemm_impl(
     const __half* __restrict__ A, const __half* __restrict__ B,
     float* __restrict__ Cf, __half* __restrict__ Ch, int M, int N, int K,
-    float alpha, float beta) {
+    float alpha, float beta, const float* __restrict__ scale,
+    const float* __restrict__ bias) {
     __shared__ __half sA[V2_STAGES][V2_BM * V2_BK];
     __shared__ __half sB[V2_STAGES][V2_BN * V2_BK];
 
@@ -286,19 +357,226 @@ __device__ __forceinline__ void v2_hgemm_impl(
         __syncthreads();
     }
 
-    v2_epilogue<F16_OUT>(Cf, Ch, c, M, N, blockM, blockN, warpM, warpN, lane,
-                         alpha, beta);
+    if (GATESILU) {
+        v2_epilogue_gatesilu<F16_OUT>(Cf, Ch, c, scale, bias, M, N, blockM,
+                                      blockN, warpM, warpN, lane, alpha, beta);
+    } else {
+        v2_epilogue<F16_OUT>(Cf, Ch, c, M, N, blockM, blockN, warpM, warpN,
+                             lane, alpha, beta);
+    }
 }
 
 extern "C" __global__ void __launch_bounds__(V2_THREADS) hgemm_v2_kernel(
     const __half* __restrict__ A, const __half* __restrict__ B,
     float* __restrict__ C, int M, int N, int K, float alpha, float beta) {
-    v2_hgemm_impl<false>(A, B, C, nullptr, M, N, K, alpha, beta);
+    v2_hgemm_impl<false, false>(A, B, C, nullptr, M, N, K, alpha, beta,
+                                nullptr, nullptr);
 }
 
 extern "C" __global__ void __launch_bounds__(V2_THREADS)
 hgemm_v2_f16out_kernel(const __half* __restrict__ A,
                        const __half* __restrict__ B, __half* __restrict__ C,
                        int M, int N, int K, float alpha, float beta) {
-    v2_hgemm_impl<true>(A, B, nullptr, C, M, N, K, alpha, beta);
+    v2_hgemm_impl<true, false>(A, B, nullptr, C, M, N, K, alpha, beta,
+                               nullptr, nullptr);
+}
+
+// 融合门控 SiLU（down 门，f32 原位）：C = silu((A@B + C) * scale + bias)。
+extern "C" __global__ void __launch_bounds__(V2_THREADS)
+hgemm_v2_gatesilu_f32_kernel(const __half* __restrict__ A,
+                             const __half* __restrict__ B,
+                             float* __restrict__ C,
+                             const float* __restrict__ scale,
+                             const float* __restrict__ bias, int M, int N,
+                             int K, float alpha, float beta) {
+    v2_hgemm_impl<false, true>(A, B, C, nullptr, M, N, K, alpha, beta, scale,
+                               bias);
+}
+
+// 融合门控 SiLU（up 门）：C 保留 f32 残差（silu 前），out 写 f16 gated。
+extern "C" __global__ void __launch_bounds__(V2_THREADS)
+hgemm_v2_gatesilu_f16_kernel(const __half* __restrict__ A,
+                             const __half* __restrict__ B,
+                             float* __restrict__ C,
+                             __half* __restrict__ out,
+                             const float* __restrict__ scale,
+                             const float* __restrict__ bias, int M, int N,
+                             int K, float alpha, float beta) {
+    v2_hgemm_impl<true, true>(A, B, C, out, M, N, K, alpha, beta, scale, bias);
+}
+
+// ---------------------------------------------------------------------------
+// GEMM tile 64×64×32 变体（小 batch 场景：M=361 时 grid 6×N/64，blocks 是
+// 128-tile 的 4 倍，缓解 grid-starved SM 空闲）。warp 布局 4×2（每 warp
+// 16 行 × 32 列），ldmatrix/mma 指令形状与 v2 相同，smem 4KB/级/矩阵。
+// ---------------------------------------------------------------------------
+
+#define T64_BM 64
+#define T64_BN 64
+#define T64_BK 32
+#define T64_STAGES 2
+
+// 每 k-tile：A/B 各 64×32 f16 = 4KB = 256 个 16B chunk（每线程 1 个）。
+template <bool IS_B>
+__device__ __forceinline__ void t64_load_chunk(
+    __half* sA, __half* sB, const __half* __restrict__ A,
+    const __half* __restrict__ B, int stage, int cid, int kk,
+    int M, int N, int K, int blockM, int blockN) {
+    const int row = cid >> 2;
+    const int c16 = cid & 3;
+    const int k_start = kk + c16 * 8;
+    const unsigned saddr =
+        (unsigned)__cvta_generic_to_shared(IS_B ? sB : sA) +
+        stage * (T64_BM * T64_BK * 2) + v2_smem_off(row, c16 * 8);
+    if (k_start >= K) {
+        v2_smem_zero16(saddr);
+        return;
+    }
+    if (IS_B) {
+        if (blockN + row < N) {
+            const __half* g = B + (size_t)(blockN + row) * K + k_start;
+            v2_cp_async16(saddr, g);
+        }
+    } else {
+        if (blockM + row < M) {
+            const __half* g = A + (size_t)(blockM + row) * K + k_start;
+            v2_cp_async16(saddr, g);
+        }
+    }
+}
+
+template <bool F16_OUT>
+__device__ __forceinline__ void t64_hgemm_impl(
+    const __half* __restrict__ A, const __half* __restrict__ B,
+    float* __restrict__ Cf, __half* __restrict__ Ch, int M, int N, int K,
+    float alpha, float beta) {
+    __shared__ __half sA[T64_STAGES][T64_BM * T64_BK];
+    __shared__ __half sB[T64_STAGES][T64_BN * T64_BK];
+
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int blockM = blockIdx.x * T64_BM;
+    const int blockN = blockIdx.y * T64_BN;
+    const int warpM = blockM + (warp >> 1) * 16;  // 4 行组 × 16 行
+    const int warpN = blockN + (warp & 1) * 32;   // 2 列组 × 32 列
+
+    // 累加器：1 M 步 × 4 N 步 × 4 f32
+    float c[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int r = 0; r < 4; ++r) c[j][r] = 0.0f;
+
+    auto issue_stage = [&](int stage, int kk) {
+        // 每级 256 chunk，每线程 1 个 A + 1 个 B
+        t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M,
+                              N, K, blockM, blockN);
+        t64_load_chunk<true>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M, N,
+                             K, blockM, blockN);
+    };
+
+    issue_stage(0, 0);
+    v2_cp_commit();
+
+    for (int kk = 0; kk < K; kk += T64_BK) {
+        const int stage = (kk / T64_BK) & 1;
+        if (kk + T64_BK < K) {
+            issue_stage(stage ^ 1, kk + T64_BK);
+            v2_cp_commit();
+            v2_cp_wait<1>();
+        } else {
+            v2_cp_wait<0>();
+        }
+        __syncthreads();
+
+        const unsigned sA_base =
+            (unsigned)__cvta_generic_to_shared(&sA[stage][0]);
+        const unsigned sB_base =
+            (unsigned)__cvta_generic_to_shared(&sB[stage][0]);
+        const int wrow = warp >> 1;  // 0..3（16 行组）
+        const int wcol = warp & 1;   // 0..1（32 列组）
+
+        // B：4 个 N 步 × 4 个 k8 窗口（每步 4 个 8×8：k0/k8/k16/k24）。
+        unsigned b_frag[4][4];
+#pragma unroll
+        for (int t = 0; t < 4; ++t) {
+            const unsigned b_base =
+                sB_base + (((wcol * 32 + t * 8) >> 3) << 9);
+            v2_ldmatrix_x4(b_frag[t][0], b_frag[t][1], b_frag[t][2],
+                           b_frag[t][3], b_base, 256, lane);
+        }
+        // A：1 个 M 步 × 2 个 k16 步（每步 4 个 8×8）。
+        unsigned a_frag[2][4];
+#pragma unroll
+        for (int s = 0; s < 2; ++s) {
+            const unsigned a_base =
+                sA_base + (((wrow * 16) >> 3) << 9) + s * 256;
+            v2_ldmatrix_x4(a_frag[s][0], a_frag[s][1], a_frag[s][2],
+                           a_frag[s][3], a_base, 512, lane);
+        }
+#pragma unroll
+        for (int s = 0; s < 2; ++s) {
+            const unsigned a0 = a_frag[s][0];
+            const unsigned a1 = a_frag[s][2];
+            const unsigned a2 = a_frag[s][1];
+            const unsigned a3 = a_frag[s][3];
+#pragma unroll
+            for (int t = 0; t < 4; ++t) {
+                const unsigned b0 = b_frag[t][s * 2];
+                const unsigned b1 = b_frag[t][s * 2 + 1];
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                    : "+f"(c[t][0]), "+f"(c[t][1]), "+f"(c[t][2]),
+                      "+f"(c[t][3])
+                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+            }
+        }
+        __syncthreads();
+    }
+
+    // epilogue 复用 v2（2 M 步 × 8 N 步的形状不匹配，此处 1×4，直接内联）。
+    const int row0 = warpM + lane / 4;
+    const int col0 = warpN + (lane % 4) * 2;
+#pragma unroll
+    for (int t = 0; t < 4; ++t) {
+        const int row = row0;
+        const int col = col0 + t * 8;
+        if (row >= M || col >= N) continue;
+        const float v0 = alpha * c[t][0];
+        const float v1 = alpha * c[t][1];
+        const float v2 = alpha * c[t][2];
+        const float v3 = alpha * c[t][3];
+        if (F16_OUT) {
+            __half* cp = Ch + (size_t)row * N + col;
+            cp[0] = __float2half_rn(v0);
+            if (col + 1 < N) cp[1] = __float2half_rn(v1);
+            if (row + 8 < M) {
+                cp[8 * N] = __float2half_rn(v2);
+                if (col + 1 < N) cp[8 * N + 1] = __float2half_rn(v3);
+            }
+        } else {
+            float* cp = Cf + (size_t)row * N + col;
+            cp[0] = v0 + beta * cp[0];
+            if (col + 1 < N) cp[1] = v1 + beta * cp[1];
+            if (row + 8 < M) {
+                cp[8 * N] = v2 + beta * cp[8 * N];
+                if (col + 1 < N) cp[8 * N + 1] = v3 + beta * cp[8 * N + 1];
+            }
+        }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(V2_THREADS) hgemm_t64_kernel(
+    const __half* __restrict__ A, const __half* __restrict__ B,
+    float* __restrict__ C, int M, int N, int K, float alpha, float beta) {
+    t64_hgemm_impl<false>(A, B, C, nullptr, M, N, K, alpha, beta);
+}
+
+extern "C" __global__ void __launch_bounds__(V2_THREADS)
+hgemm_t64_f16out_kernel(const __half* __restrict__ A,
+                        const __half* __restrict__ B, __half* __restrict__ C,
+                        int M, int N, int K, float alpha, float beta) {
+    t64_hgemm_impl<true>(A, B, nullptr, C, M, N, K, alpha, beta);
 }

@@ -122,8 +122,7 @@ enum LayerBuf {
         s: usize,
     },
     Ffn {
-        up: WeightBuf,
-        gate: WeightBuf,
+        dual: WeightBuf,
         down: WeightBuf,
         hidden: usize,
     },
@@ -237,12 +236,11 @@ impl CudaModel {
         let act384f16 = &mut ws.act384f16;
         let normed = &mut ws.normed;
         let act1152 = &mut ws.act1152;
-        let act1152b = &mut ws.act1152b;
+        let act2304 = &mut ws.act2304;
         let gemm_out = &mut ws.gemm_out;
         let qbuf = &mut ws.qbuf;
         let kbuf = &mut ws.kbuf;
         let vbuf = &mut ws.vbuf;
-        let attn = &mut ws.attn;
         let p96f = &mut ws.p96f;
         let p192 = &mut ws.p192;
         let conv1p = &mut ws.conv1p;
@@ -283,7 +281,9 @@ impl CudaModel {
                 .unwrap_or(-1.0);
             layer_times.push((-1, "im2col", ms));
         }
-        for (li, lb) in self.layers.iter().enumerate() {
+        let mut li = 0usize;
+        while li < self.layers.len() {
+            let lb = &self.layers[li];
             let layer_tag: &'static str = match lb {
                 LayerBuf::InitialConv { .. } => "InitialConv",
                 LayerBuf::Linear { .. } => "Linear",
@@ -298,7 +298,13 @@ impl CudaModel {
             if profiling {
                 let _ = ev_start.as_ref().unwrap().record(&stream);
             }
-            match lb {
+            // 融合前瞻：返回 true 表示已把下一层（GateSilu）一并消费。
+            // KATAGO_CUDA_FUSION=none|up|down|all（默认 all；诊断用）。
+            let fusion_mode = std::env::var("KATAGO_CUDA_FUSION")
+                .unwrap_or_else(|_| "all".to_string());
+            let fuse_up = fusion_mode == "all" || fusion_mode == "up";
+            let fuse_down = fusion_mode == "all" || fusion_mode == "down";
+            let skip_next = match lb {
                 LayerBuf::InitialConv { w, gw, g, gate_scale, gate_bias } => {
                     // raw 768 流（块残差加的是 gate 前的值）→ 异位门控 SiLU
                     hgemm(rt, cols, w, gemm_out, m)?;
@@ -312,6 +318,7 @@ impl CudaModel {
                         m * trunk,
                         trunk,
                     )?;
+                    false
                 }
                 // 1x1 线性。本模型两种：768→384 下投影（写 act384）与
                 // 384→768 上投影（残差加回 act768，IR 的块残差 Add）。
@@ -323,10 +330,39 @@ impl CudaModel {
                     );
                     if w.k == trunk && w.n == mid {
                         hgemm(rt, gated768, w, act384, m)?;
+                        false
                     } else if w.k == mid && w.n == trunk {
-                        f32_to_f16(rt, act384, act384f16, m * mid)?;
-                        // 上投影 GEMM beta=1 直接残差进 act768（省独立残差 kernel）
-                        hgemm_residual(rt, act384f16, w, act768, m)?;
+                        // 前瞻：后一层是 GateSilu(768) 时融合（up 残差 GEMM
+                        // epilogue 同时写 f32 残差与 f16 gated 流）。
+                        if fuse_up
+                            && let Some(LayerBuf::GateSilu { scale, bias, channels }) =
+                                self.layers.get(li + 1)
+                        {
+                            if *channels == trunk {
+                                f32_to_f16(rt, act384, act384f16, m * mid)?;
+                                hgemm_residual_gatesilu_f16(
+                                    rt,
+                                    act384f16,
+                                    w,
+                                    act768,
+                                    gated768,
+                                    &scale.data,
+                                    &bias.data,
+                                    m,
+                                )?;
+                                true
+                            } else {
+                                f32_to_f16(rt, act384, act384f16, m * mid)?;
+                                // 上投影 GEMM beta=1 直接残差进 act768（省独立残差 kernel）
+                                hgemm_residual(rt, act384f16, w, act768, m)?;
+                                false
+                            }
+                        } else {
+                            f32_to_f16(rt, act384, act384f16, m * mid)?;
+                            // 上投影 GEMM beta=1 直接残差进 act768（省独立残差 kernel）
+                            hgemm_residual(rt, act384f16, w, act768, m)?;
+                            false
+                        }
                     } else {
                         return Err(format!("Linear 形状不支持: k={} n={}", w.k, w.n));
                     }
@@ -334,6 +370,7 @@ impl CudaModel {
                 LayerBuf::RmsNorm { scale, eps, channels } => {
                     assert_eq!(*channels, mid, "RMSNorm 仅出现在 384 维流");
                     rms_norm_f32(rt, act384, normed, &scale.data, *eps, *channels, m)?;
+                    false
                 }
                 LayerBuf::Attention { qkv, out, cos, sin, qk_scale, h: lh, d: ld, s: ls } => {
                     let (lh, ld, ls) = (*lh, *ld, *ls);
@@ -366,8 +403,8 @@ impl CudaModel {
                         )
                     );
                     let scale = qk_scale * qk_scale; // 导出图 q、k 各乘 1/∜d
-                    timed!("attn", attention_row(rt, qbuf, kbuf, vbuf, attn, ls, ld, batch * lh, scale));
-                    timed!("merge", attn_merge(rt, attn, normed, batch, lh, ls, ld));
+                    // attn 直接写 merge 后布局 normed（省 attn_merge kernel）
+                    timed!("attn", attention_row(rt, qbuf, kbuf, vbuf, normed, ls, ld, batch * lh, scale, lh));
                     // 输出投影 beta=1 直接残差进 act384（省独立残差 kernel）
                     timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
                     if sub_profile {
@@ -375,19 +412,37 @@ impl CudaModel {
                         eprintln!("[cuda-profile] attention l{li} total {total:.3} ms: {}",
                             sub_times.iter().map(|(n, t)| format!("{n}={t:.3}")).collect::<Vec<_>>().join(" "));
                     }
+                    false
                 }
-                LayerBuf::Ffn { up, gate, down, hidden } => {
+                LayerBuf::Ffn { dual, down, hidden } => {
                     let hidden = *hidden;
                     assert_eq!(hidden, 3 * mid, "FFN 隐层维度不符");
-                    // gate/up 支路：GEMM epilogue 直接 f16 输出（省 2 次转换 launch）
-                    hgemm_f16(rt, normed, gate, act1152, m)?;
-                    hgemm_f16(rt, normed, up, act1152b, m)?;
-                    // silu(gate) * up → 下投影 beta=1 直接残差进 act384
-                    swiglu(rt, act1152b, act1152, m * hidden)?;
-                    hgemm_residual(rt, act1152, down, act384, m)?;
+                    // dual FFN：gate|up 单 GEMM（N=2304，f16 直出）→ dual SwiGLU
+                    hgemm_f16(rt, normed, dual, act2304, m)?;
+                    swiglu_dual(rt, act2304, act1152, m, hidden)?;
+                    // 前瞻：后一层是 GateSilu(384) 时融合（down 残差 GEMM
+                    // epilogue 直接算 silu(affine)，省独立 gate kernel）。
+                    if fuse_down
+                        && let Some(LayerBuf::GateSilu { scale, bias, channels }) =
+                            self.layers.get(li + 1)
+                    {
+                        if *channels == mid {
+                            hgemm_residual_gatesilu_f32(
+                                rt, act1152, down, act384, &scale.data, &bias.data, m,
+                            )?;
+                            true
+                        } else {
+                            hgemm_residual(rt, act1152, down, act384, m)?;
+                            false
+                        }
+                    } else {
+                        hgemm_residual(rt, act1152, down, act384, m)?;
+                        false
+                    }
                 }
                 LayerBuf::GateSilu { scale, bias, channels } => {
-                    // 384 维（块尾）与 768 维（块边界）两种门
+                    // 384 维（块尾）与 768 维（块边界）两种门。
+                    // 通常已被上一层的融合前瞻消费；独立路径保留兜底。
                     if *channels == mid {
                         gate_silu_f32(rt, act384, &scale.data, &bias.data, m * mid, *channels)?;
                     } else if *channels == trunk {
@@ -403,6 +458,7 @@ impl CudaModel {
                     } else {
                         return Err(format!("GateSilu 通道数 {channels} 不支持"));
                     }
+                    false
                 }
                 LayerBuf::TrunkFinal { mean, std, gamma, beta, channels } => {
                     assert_eq!(*channels, trunk, "TrunkFinal 仅支持 768 维");
@@ -410,6 +466,7 @@ impl CudaModel {
                         rt, act768, &mean.data, &std.data, &gamma.data, &beta.data,
                         gated768, m * trunk, *channels,
                     )?;
+                    false
                 }
                 LayerBuf::PolicyHead {
                     conv1p: c1p,
@@ -439,6 +496,7 @@ impl CudaModel {
                     sgemm(rt, p96f, conv2p, gemm_out, m)?;
                     // 拼接 [B,6,362]；penalty=0（19 路无非法落点，结构保留）
                     policy_concat(rt, gemm_out, pass_logits, out_policy, batch, s, 6, 0.0)?;
+                    false
                 }
                 LayerBuf::ValueHead {
                     conv1,
@@ -472,8 +530,9 @@ impl CudaModel {
                     f32_bias_add(rt, out_moremisc, &moremisc_b.data, batch * 8, 8)?;
                     // ownership 1x1（×mask 恒 1，省略；v_act 为 f16 激活流）
                     hgemm(rt, p192, own_w, out_ownership, m)?;
+                    false
                 }
-            }
+            };
             if profiling {
                 let _ = ev_end.as_ref().unwrap().record(&stream);
                 let ms = ev_start
@@ -483,6 +542,7 @@ impl CudaModel {
                     .unwrap_or(-1.0);
                 layer_times.push((li as i64, layer_tag, ms));
             }
+            li += 1 + skip_next as usize;
             // --- 临时调试钩子：KATAGO_CUDA_DEBUG_LAYER=<i> 时 dump 两路流 ---
             // capture 模式下跳过（host 回拷不可重放）。
             if !capturing() {
@@ -539,7 +599,8 @@ impl CudaModel {
                     for (name, d) in [
                         ("normed", &*normed),
                         ("act1152", &*act1152),
-                        ("act1152b", &*act1152b),
+                        ("act2304", &*act2304),
+                        ("gated768", &*gated768),
                     ] {
                         let mut host = vec![0u16; d.len()];
                         stream
@@ -648,12 +709,14 @@ fn upload_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
             s: l.seq_len,
         },
         Layer::Ffn(l) => LayerBuf::Ffn {
-            up: upload_weight(stream, &l.up_weight, l.hidden, l.up_weight.numel() / l.hidden)?,
-            gate: upload_weight(
+            // dual FFN：gate/up 合并为 [2H, K] 单 GEMM（前 H 行 gate、后 H 行 up），
+            // N=2304 的 grid 更大，SM 占用更好（fork G1 dual_ffn 认证路径）。
+            dual: upload_weight_concat2(
                 stream,
                 &l.gate_weight,
+                &l.up_weight,
                 l.hidden,
-                l.gate_weight.numel() / l.hidden,
+                l.up_weight.numel() / l.hidden,
             )?,
             down: upload_weight(
                 stream,
@@ -729,6 +792,35 @@ fn upload_weight(stream: &StreamRef, t: &Tensor, n: usize, k: usize) -> Result<W
     Ok(WeightBuf { data: dev, n, k, kp })
 }
 
+/// 两个权重行拼接上传：`[t1; t2]` → `[2*n_each, k]` f16（dual FFN 用）。
+fn upload_weight_concat2(
+    stream: &StreamRef,
+    t1: &Tensor,
+    t2: &Tensor,
+    n_each: usize,
+    k: usize,
+) -> Result<WeightBuf, String> {
+    let (d1, d2) = match (&t1.data, &t2.data) {
+        (TensorData::F32(a), TensorData::F32(b)) => (a, b),
+        _ => panic!("层图权重必须是 F32"),
+    };
+    assert_eq!(d1.len(), n_each * k, "t1 形状与 IR 声明不符");
+    assert_eq!(d2.len(), n_each * k, "t2 形状与 IR 声明不符");
+    let kp = k.div_ceil(16) * 16;
+    let mut host = vec![0u16; 2 * n_each * kp];
+    for i in 0..n_each {
+        for j in 0..k {
+            host[i * kp + j] = f32_to_f16_bits(d1[i * k + j]);
+            host[(n_each + i) * kp + j] = f32_to_f16_bits(d2[i * k + j]);
+        }
+    }
+    let mut dev: CudaSlice<u16> = unsafe { stream.alloc(2 * n_each * kp) }.map_err(|e| e.to_string())?;
+    stream
+        .memcpy_htod(host.as_slice(), &mut dev)
+        .map_err(|e| e.to_string())?;
+    Ok(WeightBuf { data: dev, n: 2 * n_each, k, kp })
+}
+
 fn upload_param(stream: &StreamRef, t: &Tensor, len: usize) -> Result<ParamBuf, String> {
     let data = match &t.data {
         TensorData::F32(d) => d,
@@ -767,7 +859,8 @@ fn zeros32(stream: &StreamRef, n: usize) -> Result<CudaSlice<f32>, String> {
 // ---------------------------------------------------------------------------
 
 /// `C[M,N] = A[M,K] @ B[N,K]^T`（f16 张量核；A 的列 stride 必须为 `b.kp`）。
-/// v2：tile 128×128×32、smem 双缓冲 + cp.async 流水（gemm_v2.cu）。
+/// M 较小时用 tile 64×64（grid 是 128-tile 的 4 倍，缓解小 batch 的
+/// grid-starved SM 空闲）；M 大时用 128×128×32 双缓冲流水。
 fn hgemm(
     rt: &CudaRuntime,
     a: &CudaSlice<u16>,
@@ -775,9 +868,14 @@ fn hgemm(
     c: &mut CudaSlice<f32>,
     m: usize,
 ) -> Result<(), String> {
-    let f = rt.get_func("hgemm_v2_kernel")?;
+    let f = if m < 1024 {
+        rt.get_func("hgemm_t64_kernel")?
+    } else {
+        rt.get_func("hgemm_v2_kernel")?
+    };
     let stream = active_stream(rt);
-    let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
+    let (tile, kname) = if m < 1024 { (64usize, "hgemm_t64") } else { (128usize, "hgemm_v2") };
+    let grid = (m.div_ceil(tile) as u32, b.n.div_ceil(tile) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
         block_dim: (256, 1, 1),
@@ -797,7 +895,7 @@ fn hgemm(
             .arg(&beta)
             .launch(cfg)
     }
-    .map_err(|e| format!("hgemm launch failed: {e}"))?;
+    .map_err(|e| format!("{kname} launch failed: {e}"))?;
     Ok(())
 }
 
@@ -810,9 +908,14 @@ fn hgemm_f16(
     c: &mut CudaSlice<u16>,
     m: usize,
 ) -> Result<(), String> {
-    let f = rt.get_func("hgemm_v2_f16out_kernel")?;
+    let f = if m < 1024 {
+        rt.get_func("hgemm_t64_f16out_kernel")?
+    } else {
+        rt.get_func("hgemm_v2_f16out_kernel")?
+    };
     let stream = active_stream(rt);
-    let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
+    let (tile, kname) = if m < 1024 { (64usize, "hgemm_t64_f16out") } else { (128usize, "hgemm_v2_f16out") };
+    let grid = (m.div_ceil(tile) as u32, b.n.div_ceil(tile) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
         block_dim: (256, 1, 1),
@@ -832,7 +935,7 @@ fn hgemm_f16(
             .arg(&beta)
             .launch(cfg)
     }
-    .map_err(|e| format!("hgemm_f16 launch failed: {e}"))?;
+    .map_err(|e| format!("{kname} launch failed: {e}"))?;
     Ok(())
 }
 
@@ -845,9 +948,14 @@ fn hgemm_residual(
     c: &mut CudaSlice<f32>,
     m: usize,
 ) -> Result<(), String> {
-    let f = rt.get_func("hgemm_v2_kernel")?;
+    let f = if m < 1024 {
+        rt.get_func("hgemm_t64_kernel")?
+    } else {
+        rt.get_func("hgemm_v2_kernel")?
+    };
     let stream = active_stream(rt);
-    let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
+    let (tile, kname) = if m < 1024 { (64usize, "hgemm_t64") } else { (128usize, "hgemm_v2") };
+    let grid = (m.div_ceil(tile) as u32, b.n.div_ceil(tile) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
         block_dim: (256, 1, 1),
@@ -867,7 +975,90 @@ fn hgemm_residual(
             .arg(&beta)
             .launch(cfg)
     }
-    .map_err(|e| format!("hgemm_residual launch failed: {e}"))?;
+    .map_err(|e| format!("{kname} residual launch failed: {e}"))?;
+    Ok(())
+}
+
+/// down 门融合（G3）：`C = silu((A@B^T + beta*C) * scale + bias)`，f32 原位。
+/// 融合 Ffn down 残差 GEMM 与块尾 GateSilu(384)，省 1 kernel/块。
+#[allow(clippy::too_many_arguments)]
+fn hgemm_residual_gatesilu_f32(
+    rt: &CudaRuntime,
+    a: &CudaSlice<u16>,
+    b: &WeightBuf,
+    c: &mut CudaSlice<f32>,
+    scale: &CudaSlice<f32>,
+    bias: &CudaSlice<f32>,
+    m: usize,
+) -> Result<(), String> {
+    let f = rt.get_func("hgemm_v2_gatesilu_f32_kernel")?;
+    let stream = active_stream(rt);
+    let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let (alpha, beta) = (1.0f32, 1.0f32);
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&b.data)
+            .arg(c)
+            .arg(scale)
+            .arg(bias)
+            .arg(&(m as i32))
+            .arg(&(b.n as i32))
+            .arg(&(b.kp as i32))
+            .arg(&alpha)
+            .arg(&beta)
+            .launch(cfg)
+    }
+    .map_err(|e| format!("hgemm gatesilu f32 launch failed: {e}"))?;
+    Ok(())
+}
+
+/// up 门融合（G3）：C 保留 f32 残差（silu 前，供下一块残差累积），
+/// `out = silu((A@B^T + beta*C) * scale + bias)` 写 f16 gated 流。
+/// 融合 Linear up 残差 GEMM 与块边界 GateSilu(768)，省 1 kernel/块。
+#[allow(clippy::too_many_arguments)]
+fn hgemm_residual_gatesilu_f16(
+    rt: &CudaRuntime,
+    a: &CudaSlice<u16>,
+    b: &WeightBuf,
+    c: &mut CudaSlice<f32>,
+    out: &mut CudaSlice<u16>,
+    scale: &CudaSlice<f32>,
+    bias: &CudaSlice<f32>,
+    m: usize,
+) -> Result<(), String> {
+    let f = rt.get_func("hgemm_v2_gatesilu_f16_kernel")?;
+    let stream = active_stream(rt);
+    let grid = (m.div_ceil(128) as u32, b.n.div_ceil(128) as u32, 1u32);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let (alpha, beta) = (1.0f32, 1.0f32);
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&b.data)
+            .arg(c)
+            .arg(out)
+            .arg(scale)
+            .arg(bias)
+            .arg(&(m as i32))
+            .arg(&(b.n as i32))
+            .arg(&(b.kp as i32))
+            .arg(&alpha)
+            .arg(&beta)
+            .launch(cfg)
+    }
+    .map_err(|e| format!("hgemm gatesilu f16 launch failed: {e}"))?;
     Ok(())
 }
 
@@ -1202,23 +1393,27 @@ fn gate_silu_f32(
     Ok(())
 }
 
-fn swiglu(
+/// dual FFN SwiGLU：x [M, 2H]（行内 [gate H | up H]）→ out [M, H] = up * silu(gate)。
+fn swiglu_dual(
     rt: &CudaRuntime,
-    up: &CudaSlice<u16>,
-    gate_out: &mut CudaSlice<u16>,
-    n: usize,
+    x: &CudaSlice<u16>,
+    out: &mut CudaSlice<u16>,
+    m: usize,
+    hidden: usize,
 ) -> Result<(), String> {
-    let f = rt.get_func("swiglu_f16_kernel")?;
+    let f = rt.get_func("swiglu_dual_kernel")?;
     let stream = active_stream(rt);
+    let n = m * hidden;
     unsafe {
         stream
             .launch_builder(&f)
-            .arg(up)
-            .arg(&mut *gate_out)
-            .arg(&(n as i32))
+            .arg(x)
+            .arg(out)
+            .arg(&(m as i32))
+            .arg(&(hidden as i32))
             .launch(LaunchConfig::for_num_elems(n as u32))
     }
-    .map_err(|e| format!("swiglu launch failed: {e}"))?;
+    .map_err(|e| format!("swiglu_dual launch failed: {e}"))?;
     Ok(())
 }
 
@@ -1273,6 +1468,7 @@ fn attention_row(
     d: usize,
     bh: usize,
     scale: f32,
+    heads: usize,
 ) -> Result<(), String> {
     assert!(s <= 512, "attention_row 要求 S <= 512");
     assert_eq!(d, 32, "attention_row v3 要求 D=32（smem/打包布局按 D=32 编译期定）");
@@ -1280,6 +1476,7 @@ fn attention_row(
     // v1 每行一块、512 线程两遍 18 次 syncthreads 树归约且 p·V 仅 32 线程串行；
     // v2 整段 K/V 46KB smem 只 4 块/SM、串行依赖链长（ABBA 40 < 47 被证伪）。
     // v1/v2 保留在 attention.cu 作参考。数值：FP32 全程 + RNE 舍回 half。
+    // 输出直接写 merge 后布局 [B*S, H*D]（省 attn_merge 独立 kernel）。
     let f = rt.get_func("attention_row_v3_kernel")?;
     let stream = active_stream(rt);
     let cfg = LaunchConfig {
@@ -1297,36 +1494,10 @@ fn attention_row(
             .arg(&(s as i32))
             .arg(&(d as i32))
             .arg(&scale)
+            .arg(&(heads as i32))
             .launch(cfg)
     }
     .map_err(|e| format!("attention_row launch failed: {e}"))?;
-    Ok(())
-}
-
-fn attn_merge(
-    rt: &CudaRuntime,
-    attn: &CudaSlice<u16>,
-    out: &mut CudaSlice<u16>,
-    batch: usize,
-    h: usize,
-    s: usize,
-    d: usize,
-) -> Result<(), String> {
-    let f = rt.get_func("attn_merge_kernel")?;
-    let stream = active_stream(rt);
-    let n = batch * s * h * d;
-    unsafe {
-        stream
-            .launch_builder(&f)
-            .arg(attn)
-            .arg(out)
-            .arg(&(batch as i32))
-            .arg(&(h as i32))
-            .arg(&(s as i32))
-            .arg(&(d as i32))
-            .launch(LaunchConfig::for_num_elems(n as u32))
-    }
-    .map_err(|e| format!("attn_merge launch failed: {e}"))?;
     Ok(())
 }
 
@@ -1491,7 +1662,8 @@ pub struct CudaWorkspace {
     pub act384f16: CudaSlice<u16>,
     pub normed: CudaSlice<u16>,
     pub act1152: CudaSlice<u16>,
-    pub act1152b: CudaSlice<u16>,
+    /// dual FFN 的 gate|up 拼接输出 [M, 2H]（行内 [gate H | up H]）。
+    pub act2304: CudaSlice<u16>,
     pub gemm_out: CudaSlice<f32>,
     pub qbuf: CudaSlice<u16>,
     pub kbuf: CudaSlice<u16>,
@@ -1535,7 +1707,7 @@ impl CudaWorkspace {
             act384f16: zeros16(stream, m * mid)?,
             normed: zeros16(stream, m * mid)?,
             act1152: zeros16(stream, m * (3 * mid))?,
-            act1152b: zeros16(stream, m * (3 * mid))?,
+            act2304: zeros16(stream, m * (6 * mid))?,
             gemm_out: zeros32(stream, m * (3 * mid))?,
             qbuf: zeros16(stream, qkv_elts)?,
             kbuf: zeros16(stream, qkv_elts)?,

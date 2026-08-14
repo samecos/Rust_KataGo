@@ -198,6 +198,8 @@ struct SharedState {
     nn_cache_table: Option<Arc<NnCacheTable>>,
     is_killed: AtomicBool,
     current_batch_size: AtomicI32,
+    /// 任一 serve 线程正在 GPU 推理中（fork 的 `serverThreadHasActiveBatch`）。
+    gpu_busy: AtomicBool,
     waiting_for_finish: Condvar,
     num_rows_processed: AtomicU64,
     num_batches_processed: AtomicU64,
@@ -228,22 +230,34 @@ impl SharedState {
                 break;
             }
 
-            // 批量聚合（对应 C++ nnBatchAwareDispatch 的凑批语义）：
-            // 拿到第一个请求后，只在队列里已有更多请求时才等短窗口凑批；
-            // try_pop 失败立即处理（单线程/串行请求不增加任何延迟，
-            // 并发请求到达时合批摊薄 kernel launch 开销）。
+            // 批量聚合（fork `nnBatchAwareDispatch` 语义）：
+            // - 设备空闲：队列空立即处理（单线程/串行请求零额外延迟）。
+            // - 设备忙：等待长窗口凑批（反正 GPU 不空闲，等待没有延迟成本），
+            //   队列临时为空也短暂重试，等并发搜索线程的新请求到达。
             let mut batch = vec![request];
             let target_batch_size = self.current_batch_size.load(Ordering::Relaxed).max(1) as usize;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_micros(1000);
+            let window_us = if self.gpu_busy.load(Ordering::Relaxed) {
+                4000
+            } else {
+                200
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_micros(window_us);
             while batch.len() < target_batch_size && std::time::Instant::now() < deadline {
                 let mut extra = dummy_request();
                 if !self.query_queue.try_pop(&mut extra) {
+                    if self.gpu_busy.load(Ordering::Relaxed) {
+                        // 设备忙：短暂让出后重试（有新请求即可凑批）。
+                        std::thread::sleep(std::time::Duration::from_micros(100));
+                        continue;
+                    }
                     break;
                 }
                 batch.push(extra);
             }
 
+            self.gpu_busy.store(true, Ordering::Relaxed);
             self.process_batch(&batch, handle);
+            self.gpu_busy.store(false, Ordering::Relaxed);
             self.num_batches_processed.fetch_add(1, Ordering::Relaxed);
             self.num_rows_processed
                 .fetch_add(batch.len() as u64, Ordering::Relaxed);
@@ -256,6 +270,8 @@ impl SharedState {
         // 锁只用于取出 Arc 克隆，get_output 在锁外执行：
         // backend / input_buffers 是全局共享，持锁贯穿推理会把多个
         // server 线程完全串行化（batch 化收益被锁吃掉）。
+        let serve_prof = std::env::var("KATAGO_CUDA_HOST_PROFILE").is_ok();
+        let p0 = std::time::Instant::now();
         let backend = self.backend.lock().unwrap().clone();
         let input_buffers = self.input_buffers.lock().unwrap().clone();
         let handle_guard = handle.lock().unwrap();
@@ -292,6 +308,7 @@ impl SharedState {
                         eprintln!("WARNING: Backend get_output failed: {e}");
                     });
             }
+            let p1 = std::time::Instant::now();
 
             for (i, mut output) in outputs.into_iter().enumerate() {
                 // Turn raw backend logits into probabilities / points,
@@ -312,6 +329,26 @@ impl SharedState {
                 buf.has_result = true;
                 drop(buf);
                 batch[i].result_ready.notify_one();
+            }
+            let p2 = std::time::Instant::now();
+            if serve_prof {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static CNT: AtomicU64 = AtomicU64::new(0);
+                static ACC_GET: AtomicU64 = AtomicU64::new(0);
+                static ACC_POST: AtomicU64 = AtomicU64::new(0);
+                let c = CNT.fetch_add(1, Ordering::Relaxed) + 1;
+                let get_us = (p1 - p0).as_micros() as u64;
+                let post_us = (p2 - p1).as_micros() as u64;
+                let a_get = ACC_GET.fetch_add(get_us, Ordering::Relaxed) + get_us;
+                let a_post = ACC_POST.fetch_add(post_us, Ordering::Relaxed) + post_us;
+                if c % 100 == 0 {
+                    eprintln!(
+                        "[serve-prof] batches={c} avg get_output={:.1}us postprocess={:.1}us batch={}",
+                        a_get as f64 / c as f64,
+                        a_post as f64 / c as f64,
+                        batch.len()
+                    );
+                }
             }
         } else {
             // No backend — fall back to dummy uniform policy.
@@ -617,6 +654,7 @@ impl NnEvaluator {
             nn_cache_table,
             is_killed: AtomicBool::new(false),
             current_batch_size: AtomicI32::new(max_batch_size),
+            gpu_busy: AtomicBool::new(false),
             waiting_for_finish: Condvar::new(),
             num_rows_processed: AtomicU64::new(0),
             num_batches_processed: AtomicU64::new(0),
@@ -1019,6 +1057,7 @@ impl NnEvaluator {
     ) {
         // Fill input feature buffers before queueing so the server thread
         // only needs to read them (matching C++ semantics).
+        let fa0 = std::time::Instant::now();
         let mut filled_buf = NNResultBuf::new();
         Self::fill_nn_input(
             board,
@@ -1051,6 +1090,7 @@ impl NnEvaluator {
             req_buf.board_y_size_for_server = board.y_size;
         }
 
+        let fa1 = std::time::Instant::now();
         self.shared.query_queue.wait_push(request.clone());
 
         let mut req_buf = request.buf.lock();
@@ -1062,6 +1102,25 @@ impl NnEvaluator {
         // alone could let the client leave early with `result == None`.
         while req_buf.result.is_none() && !self.shared.is_killed.load(Ordering::Relaxed) {
             condvar.wait(&mut req_buf);
+        }
+        let fa2 = std::time::Instant::now();
+        if std::env::var("KATAGO_CUDA_HOST_PROFILE").is_ok() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static CNT: AtomicU64 = AtomicU64::new(0);
+            static ACC_FILL: AtomicU64 = AtomicU64::new(0);
+            static ACC_WAIT: AtomicU64 = AtomicU64::new(0);
+            let c = CNT.fetch_add(1, Ordering::Relaxed) + 1;
+            let fill_us = (fa1 - fa0).as_micros() as u64;
+            let wait_us = (fa2 - fa1).as_micros() as u64;
+            let a_fill = ACC_FILL.fetch_add(fill_us, Ordering::Relaxed) + fill_us;
+            let a_wait = ACC_WAIT.fetch_add(wait_us, Ordering::Relaxed) + wait_us;
+            if c % 100 == 0 {
+                eprintln!(
+                    "[client-prof] n={c} avg fill_features={:.1}us wait_roundtrip={:.1}us",
+                    a_fill as f64 / c as f64,
+                    a_wait as f64 / c as f64
+                );
+            }
         }
 
         if req_buf.result.is_some() {

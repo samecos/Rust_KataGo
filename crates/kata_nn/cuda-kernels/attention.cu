@@ -279,7 +279,8 @@ extern "C" __global__ void __launch_bounds__(ATT3_ROWS * 32, 4)
 attention_row_v3_kernel(const __half* __restrict__ q,
                         const __half* __restrict__ k,
                         const __half* __restrict__ v,
-                        __half* __restrict__ out, int s, int d, float scale) {
+                        __half* __restrict__ out, int s, int d, float scale,
+                        int heads) {
     __shared__ __half s_k[2][ATT3_CHUNK * 32];  // K tile 双缓冲（各 4KB）
     __shared__ __half s_v[2][ATT3_CHUNK * 32];  // V tile 双缓冲（各 4KB）
     __shared__ float s_score[ATT3_ROWS][512];  // 原始/exp 得分（warp 私有行）
@@ -291,6 +292,11 @@ attention_row_v3_kernel(const __half* __restrict__ q,
     const int i = blockIdx.x * ATT3_ROWS + warp;  // 本 warp 的 query 行
     const int ntiles = (s + ATT3_CHUNK - 1) / ATT3_CHUNK;
     const size_t bh_off = (size_t)bh * s * 32;  // D=32
+    // 输出直接写 merge 后的 [B*S, H*D] 布局（省 attn_merge 独立 kernel）：
+    //   attn 布局 [b, h, s, d] → 目标 [b, s, h, d]。
+    const int h_l = bh % heads;
+    const int b = bh / heads;
+    __half* orow = out + (((size_t)b * s + i) * heads + h_l) * 32;
 
     // --- K tile 0 预取 ---
     {
@@ -488,9 +494,8 @@ attention_row_v3_kernel(const __half* __restrict__ q,
         for (int m = 0; m < 32; ++m)
             acc[m] += __shfl_xor_sync(0xffffffffu, acc[m], off);
 
-    // 写回（D=32，RNE）
+    // 写回（D=32，RNE；直接写 merge 后布局 [B*S, H*D]）
     if (i < s) {
-        __half* orow = out + bh_off + (size_t)i * 32;
 #pragma unroll
         for (int m = 0; m < 32; ++m) orow[m] = __float2half_rn(acc[m]);
     }

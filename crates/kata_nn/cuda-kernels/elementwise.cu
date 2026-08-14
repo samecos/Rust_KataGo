@@ -85,6 +85,20 @@ extern "C" __global__ void swiglu_f16_kernel(const __half* __restrict__ up,
     gate[i] = __float2half(__half2float(up[i]) * g);
 }
 
+// dual FFN SwiGLU：x [M, 2H]（行内 [gate H | up H] 拼接）→ out [M, H] = up * silu(gate)。
+// 数值与原独立 kernel 一致（half 入、FP32 计算、half 出）。
+extern "C" __global__ void swiglu_dual_kernel(const __half* __restrict__ x,
+                                              __half* __restrict__ out,
+                                              int m, int hidden) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= m * hidden) return;
+    int row = i / hidden;
+    int j = i % hidden;
+    float g = __half2float(x[(size_t)row * 2 * hidden + j]);
+    g = g / (1.0f + expf(-g));
+    out[i] = __float2half(__half2float(x[(size_t)row * 2 * hidden + hidden + j]) * g);
+}
+
 // f16 -> f32（head 输出用）。
 extern "C" __global__ void half_to_f32_region_kernel(const __half* __restrict__ in,
                                                      float* __restrict__ out, int n) {
