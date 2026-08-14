@@ -289,8 +289,8 @@ impl CudaModel {
                         hgemm(rt, &gated768, w, &mut act384, m)?;
                     } else if w.k == mid && w.n == trunk {
                         f32_to_f16(rt, &act384, &mut act384f16, m * mid)?;
-                        hgemm(rt, &act384f16, w, &mut gemm_out, m)?;
-                        f32_add_inplace(rt, &mut act768, &gemm_out, m * trunk)?;
+                        // 上投影 GEMM beta=1 直接残差进 act768（省独立残差 kernel）
+                        hgemm_residual(rt, &act384f16, w, &mut act768, m)?;
                     } else {
                         return Err(format!("Linear 形状不支持: k={} n={}", w.k, w.n));
                     }
@@ -332,8 +332,8 @@ impl CudaModel {
                     let scale = qk_scale * qk_scale; // 导出图 q、k 各乘 1/∜d
                     timed!("attn", attention_row(rt, &qbuf, &kbuf, &vbuf, &mut attn, ls, ld, batch * lh, scale));
                     timed!("merge", attn_merge(rt, &attn, &mut normed, batch, lh, ls, ld));
-                    timed!("outproj", hgemm(rt, &normed, out, &mut gemm_out, m));
-                    timed!("resid", f32_add_inplace(rt, &mut act384, &gemm_out, m * mid));
+                    // 输出投影 beta=1 直接残差进 act384（省独立残差 kernel）
+                    timed!("outproj", hgemm_residual(rt, &normed, out, &mut act384, m));
                     if sub_profile {
                         let total: f32 = sub_times.iter().map(|t| t.1.max(0.0)).sum();
                         eprintln!("[cuda-profile] attention l{li} total {total:.3} ms: {}",
@@ -343,16 +343,12 @@ impl CudaModel {
                 LayerBuf::Ffn { up, gate, down, hidden } => {
                     let hidden = *hidden;
                     assert_eq!(hidden, 3 * mid, "FFN 隐层维度不符");
-                    // gate 支路：x @ gateᵀ → f16（swiglu 里再做 silu）
-                    hgemm(rt, &normed, gate, &mut gemm_out, m)?;
-                    f32_to_f16(rt, &gemm_out, &mut act1152, m * hidden)?;
-                    // up 支路：x @ upᵀ → f16
-                    hgemm(rt, &normed, up, &mut gemm_out, m)?;
-                    f32_to_f16(rt, &gemm_out, &mut act1152b, m * hidden)?;
-                    // silu(gate) * up → 下投影 → 残差
+                    // gate/up 支路：GEMM epilogue 直接 f16 输出（省 2 次转换 launch）
+                    hgemm_f16(rt, &normed, gate, &mut act1152, m)?;
+                    hgemm_f16(rt, &normed, up, &mut act1152b, m)?;
+                    // silu(gate) * up → 下投影 beta=1 直接残差进 act384
                     swiglu(rt, &act1152b, &mut act1152, m * hidden)?;
-                    hgemm(rt, &act1152, down, &mut gemm_out, m)?;
-                    f32_add_inplace(rt, &mut act384, &gemm_out, m * mid)?;
+                    hgemm_residual(rt, &act1152, down, &mut act384, m)?;
                 }
                 LayerBuf::GateSilu { scale, bias, channels } => {
                     // 384 维（块尾）与 768 维（块边界）两种门
