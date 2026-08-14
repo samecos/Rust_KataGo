@@ -19,8 +19,9 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   value 2.5e-2、misc 1e-2、ownership 5e-3、policy top-1 100%)
 - 性能基准(release):`./target/release/katago-rs.exe benchmark --config
   configs/gtp_smoke.cfg --model D:/code/b11fix.onnx --override-config
-  nnBackend=cudabackend --override-config numSearchThreads=1 -v 20 -n 1`
-  (已知 bug:默认 8 线程配置后卡死,用 -t 指定少数配置绕过)
+  nnBackend=cudabackend --override-config numSearchThreads=1 -v 20 -n 1 -t 1,4`
+  (注意:不带 -t 时走 auto-tune,每个线程配置都重新加载模型 ~25s,很慢;
+  务必用 -t 指定 1-2 个配置)
 - per-layer 剖析:`KATAGO_CUDA_PROFILE=1` + GTP `kata-raw-nn 0`(逐层/attention
   子段耗时);输入 dump:`KATAGO_CUDA_DUMP_INPUT=<dir>`;逐层 dump:
   `KATAGO_CUDA_DEBUG_LAYER=<i>`

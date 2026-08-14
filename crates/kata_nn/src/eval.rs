@@ -228,10 +228,14 @@ impl SharedState {
                 break;
             }
 
-            // Collect a small batch without blocking.
+            // 批量聚合（对应 C++ nnBatchAwareDispatch 的凑批语义）：
+            // 拿到第一个请求后，只在队列里已有更多请求时才等短窗口凑批；
+            // try_pop 失败立即处理（单线程/串行请求不增加任何延迟，
+            // 并发请求到达时合批摊薄 kernel launch 开销）。
             let mut batch = vec![request];
-            let target_batch_size = self.current_batch_size.load(Ordering::Relaxed) as usize;
-            while batch.len() < target_batch_size.max(1) {
+            let target_batch_size = self.current_batch_size.load(Ordering::Relaxed).max(1) as usize;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_micros(500);
+            while batch.len() < target_batch_size && std::time::Instant::now() < deadline {
                 let mut extra = dummy_request();
                 if !self.query_queue.try_pop(&mut extra) {
                     break;
