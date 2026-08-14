@@ -334,7 +334,8 @@ impl CudaModel {
                                 self.layers.get(li + 1)
                         {
                             if *channels == trunk {
-                                f32_to_f16(rt, act384, act384f16, m * mid)?;
+                                // act384f16 已由块尾 Ffn down 的 gatesilu
+                                // epilogue 写好（f16 双写），直接读
                                 hgemm_residual_gatesilu_f16(
                                     rt,
                                     act384f16,
@@ -353,8 +354,7 @@ impl CudaModel {
                                 false
                             }
                         } else {
-                            f32_to_f16(rt, act384, act384f16, m * mid)?;
-                            // 上投影 GEMM beta=1 直接残差进 act768（省独立残差 kernel）
+                            // act384f16 已由块尾 down 的 gatesilu epilogue 写好
                             hgemm_residual(rt, act384f16, w, act768, m)?;
                             false
                         }
@@ -430,8 +430,11 @@ impl CudaModel {
                             self.layers.get(li + 1)
                     {
                         if *channels == mid {
+                            // down 残差 + GateSilu384 融合，epilogue 同时写
+                            // act384f16（供 up GEMM 直接读，省 f32_to_f16）
                             hgemm_residual_gatesilu_f32(
-                                rt, act1152, down, act384, &scale.data, &bias.data, m,
+                                rt, act1152, down, act384, act384f16,
+                                &scale.data, &bias.data, m,
                             )?;
                             true
                         } else {
@@ -515,12 +518,10 @@ impl CudaModel {
                     add_bias_silu_f16(rt, gemm_out, &bias1.data, p192, m * 192, 192)?;
                     // 池化：[mean, mean*scale, mean*quad]（f32）
                     pool_mean3(rt, p192, pooled, batch, s, 192, *mask_scale, *mask_quad)?;
-                    // linear2+silu+输出合并（G4）：pooled@l2+silu → @vall_w
-                    // （-3 kernel：sgemm+bias_silu+sgemm 合一）
-                    value_fc_fused(rt, pooled, l2, &l2_bias.data, vall_w, vall, batch)?;
-                    f32_bias_add_split(
-                        rt, vall, &vall_b.data, out_value, out_misc, out_moremisc,
-                        3, 10, 8, batch,
+                    // linear2+silu+输出合并+bias 拆分（G4 单 kernel 写 3 目标）
+                    value_fc_fused(
+                        rt, pooled, l2, &l2_bias.data, vall_w, &vall_b.data,
+                        out_value, out_misc, out_moremisc, batch,
                     )?;
                     // ownership 1x1（×mask 恒 1，省略；v_act 为 f16 激活流）
                     hgemm(rt, p192, own_w, out_ownership, m)?;
@@ -1051,6 +1052,7 @@ fn hgemm_residual_gatesilu_f32(
     a: &CudaSlice<u16>,
     b: &WeightBuf,
     c: &mut CudaSlice<f32>,
+    out16: &mut CudaSlice<u16>,
     scale: &CudaSlice<f32>,
     bias: &CudaSlice<f32>,
     m: usize,
@@ -1070,6 +1072,7 @@ fn hgemm_residual_gatesilu_f32(
             .arg(a)
             .arg(&b.data)
             .arg(c)
+            .arg(out16)
             .arg(scale)
             .arg(bias)
             .arg(&(m as i32))
@@ -1338,7 +1341,10 @@ fn value_fc_fused(
     l2: &WeightBuf,
     l2_bias: &CudaSlice<f32>,
     vall_w: &WeightBuf,
-    out: &mut CudaSlice<f32>,
+    vall_b: &CudaSlice<f32>,
+    out0: &mut CudaSlice<f32>,
+    out1: &mut CudaSlice<f32>,
+    out2: &mut CudaSlice<f32>,
     batch: usize,
 ) -> Result<(), String> {
     let f = rt.get_func("value_fc_fused_kernel")?;
@@ -1355,7 +1361,10 @@ fn value_fc_fused(
             .arg(&l2.data)
             .arg(l2_bias)
             .arg(&vall_w.data)
-            .arg(out)
+            .arg(vall_b)
+            .arg(out0)
+            .arg(out1)
+            .arg(out2)
             .arg(&(batch as i32))
             .launch(cfg)
     }

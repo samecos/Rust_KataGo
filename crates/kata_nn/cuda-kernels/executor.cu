@@ -522,13 +522,15 @@ extern "C" __global__ void policy_pass_fused_kernel(
     }
 }
 
-// ValueHead FC 融合（G4）：vec = silu(pooled@l2 + l2_b)；out = vec@vall_w。
+// ValueHead FC 融合（G4）：vec = silu(pooled@l2 + l2_b)；out = vec@vall_w + bias，
+// 拆分写 3 目标（value [B,3] / misc [B,10] / moremisc [B,8]）。
 // pooled [B,576] f32、l2 [192,576] f16、l2_b [192] f32、vall_w [21,192] f16、
-// out [B,21] f32。每 block 1 个 batch 行。
+// vall_b [21] f32。每 block 1 个 batch 行；数值与独立 kernel 完全一致。
 extern "C" __global__ void value_fc_fused_kernel(
     const float* __restrict__ pooled, const __half* __restrict__ l2,
     const float* __restrict__ l2_b, const __half* __restrict__ vall_w,
-    float* __restrict__ out, int B) {
+    const float* __restrict__ vall_b, float* __restrict__ out0,
+    float* __restrict__ out1, float* __restrict__ out2, int B) {
     __shared__ float s_vec[192];
     const int b = blockIdx.x;
     if (b >= B) return;
@@ -542,9 +544,13 @@ extern "C" __global__ void value_fc_fused_kernel(
     }
     __syncthreads();
     if (threadIdx.x < 21) {
+        const int j = threadIdx.x;
         float acc = 0.0f;
-        const __half* w = vall_w + (size_t)threadIdx.x * 192;
+        const __half* w = vall_w + (size_t)j * 192;
         for (int k = 0; k < 192; ++k) acc += s_vec[k] * __half2float(w[k]);
-        out[b * 21 + threadIdx.x] = acc;
+        acc += vall_b[j];
+        if (j < 3) out0[b * 3 + j] = acc;
+        else if (j < 13) out1[b * 10 + (j - 3)] = acc;
+        else out2[b * 8 + (j - 13)] = acc;
     }
 }
