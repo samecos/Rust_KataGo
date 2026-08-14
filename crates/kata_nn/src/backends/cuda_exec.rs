@@ -306,17 +306,12 @@ impl CudaModel {
             let fuse_down = fusion_mode == "all" || fusion_mode == "down";
             let skip_next = match lb {
                 LayerBuf::InitialConv { w, gw, g, gate_scale, gate_bias } => {
-                    // raw 768 流（块残差加的是 gate 前的值）→ 异位门控 SiLU
+                    // raw 768 流（块残差加的是 gate 前的值）+ 异位门控 SiLU
+                    // 融合：conv_bias_gate epilogue 同时写 f32 残差与 f16 gated。
                     hgemm(rt, cols, w, gemm_out, m)?;
-                    conv_bias_gate(rt, gemm_out, global, gw, act768, batch, s, trunk, *g)?;
-                    gate_silu_out(
-                        rt,
-                        act768,
-                        &gate_scale.data,
-                        &gate_bias.data,
-                        gated768,
-                        m * trunk,
-                        trunk,
+                    conv_bias_gate(
+                        rt, gemm_out, global, gw, act768, gated768,
+                        &gate_scale.data, &gate_bias.data, batch, s, trunk, *g,
                     )?;
                     false
                 }
@@ -1129,12 +1124,16 @@ fn conv_bias_gate(
     global: &CudaSlice<f32>,
     gw: &CudaSlice<f32>,
     out: &mut CudaSlice<f32>,
+    gated: &mut CudaSlice<u16>,
+    scale: &CudaSlice<f32>,
+    bias: &CudaSlice<f32>,
     batch: usize,
     s: usize,
     c: usize,
     g: usize,
 ) -> Result<(), String> {
-    let f = rt.get_func("conv_bias_gate_kernel")?;
+    // 融合版：conv+global 加和 → out f32（残差保留）+ gated f16（silu）。
+    let f = rt.get_func("conv_bias_gate_silu_kernel")?;
     let stream = active_stream(rt);
     let n = batch * s * c;
     unsafe {
@@ -1144,6 +1143,9 @@ fn conv_bias_gate(
             .arg(global)
             .arg(gw)
             .arg(out)
+            .arg(gated)
+            .arg(scale)
+            .arg(bias)
             .arg(&(batch as i32))
             .arg(&(s as i32))
             .arg(&(c as i32))
@@ -1339,7 +1341,8 @@ fn f32_add_f16(
     Ok(())
 }
 
-/// RMSNorm（f32 入 → f16 出，供张量核 GEMM）。
+/// RMSNorm（f32 入 → f16 出，供张量核 GEMM）。warp4-vec8：4 行/块、
+/// 零 smem 纯 shfl（fork G3 认证路径），与旧单行版同公式。
 fn rms_norm_f32(
     rt: &CudaRuntime,
     x: &CudaSlice<f32>,
@@ -1349,10 +1352,10 @@ fn rms_norm_f32(
     ncols: usize,
     rows: usize,
 ) -> Result<(), String> {
-    let f = rt.get_func("rms_norm_f32_kernel")?;
+    let f = rt.get_func("rms_norm_f32_w4_kernel")?;
     let stream = active_stream(rt);
     let cfg = LaunchConfig {
-        grid_dim: (rows as u32, 1, 1),
+        grid_dim: (rows.div_ceil(4) as u32, 1, 1),
         block_dim: (128, 1, 1),
         shared_mem_bytes: 0,
     };
@@ -1364,6 +1367,7 @@ fn rms_norm_f32(
             .arg(out)
             .arg(&eps)
             .arg(&(ncols as i32))
+            .arg(&(rows as i32))
             .launch(cfg)
     }
     .map_err(|e| format!("rms_norm_f32 launch failed: {e}"))?;

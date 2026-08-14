@@ -68,6 +68,28 @@ extern "C" __global__ void conv_bias_gate_kernel(const float* __restrict__ conv,
     out[i] = v;
 }
 
+// 融合版（G3）：conv+global→out f32（残差保留）+ gated f16（silu(affine)）。
+// 数值与独立 gate_silu_out_f16_kernel 完全一致（同公式同舍入）。
+extern "C" __global__ void conv_bias_gate_silu_kernel(
+    const float* __restrict__ conv, const float* __restrict__ glob,
+    const float* __restrict__ gw, float* __restrict__ out,
+    __half* __restrict__ gated, const float* __restrict__ scale,
+    const float* __restrict__ bias, int B, int S, int C, int G) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= B * S * C) return;
+    int c = i % C;
+    int s = (i / C) % S;
+    int b = i / (S * C);
+    float v = conv[i];
+    const float* g = glob + (size_t)b * G;
+    const float* w = gw + (size_t)c * G;
+    for (int k = 0; k < G; ++k) v += g[k] * w[k];
+    out[i] = v;
+    float a = v * scale[c] + bias[c];
+    a = a / (1.0f + expf(-a));
+    gated[i] = __float2half(a);
+}
+
 // ---------------------------------------------------------------------------
 // 通用逐元素 / 布局辅助
 // ---------------------------------------------------------------------------
@@ -394,4 +416,32 @@ extern "C" __global__ void sgemm_f16b_kernel(const float* __restrict__ A,
         acc += a[k] * __half2float(b[k]);
     }
     C[i] = acc;
+}
+
+// RMSNorm C384 warp4-vec8（fork G3 复刻）：每块 4 行、每 warp 1 行，
+// 每 lane 载 12 f32（3×float4 语义，循环展开），纯 shfl 归约零 smem。
+// 数值与 rms_norm_f32_kernel 同公式（sum/n + eps → rsqrtf → ×scale）。
+extern "C" __global__ void rms_norm_f32_w4_kernel(
+    const float* __restrict__ x, const float* __restrict__ scale,
+    __half* __restrict__ y, float eps, int ncols, int rows) {
+    const int row = blockIdx.x * 4 + (threadIdx.x >> 5);
+    if (row >= rows) return;
+    const int lane = threadIdx.x & 31;
+    x += (size_t)row * ncols;
+    y += (size_t)row * ncols;
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 12; ++i) {
+        const float v = x[lane + i * 32];
+        sum += v * v;
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        sum += __shfl_xor_sync(0xffffffffu, sum, off);
+    const float rstd = rsqrtf(sum / (float)ncols + eps);
+#pragma unroll
+    for (int i = 0; i < 12; ++i) {
+        const int c = lane + i * 32;
+        y[c] = __float2half(x[c] * rstd * scale[c]);
+    }
 }
