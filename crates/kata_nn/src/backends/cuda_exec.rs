@@ -389,17 +389,25 @@ impl CudaModel {
                             }
                         };
                     }
-                    timed!("qkv", hgemm(rt, normed, qkv, gemm_out, m));
-                    timed!(
-                        "rope",
-                        qkv_rope(
-                            rt, gemm_out, cos, sin, qbuf, kbuf, vbuf, batch, lh, ls,
-                            ld,
-                        )
-                    );
                     let scale = qk_scale * qk_scale; // 导出图 q、k 各乘 1/∜d
-                    // attn 直接写 merge 后布局 normed（省 attn_merge kernel）
-                    timed!("attn", attention_row(rt, qbuf, kbuf, vbuf, normed, ls, ld, batch * lh, scale, lh));
+                    // FA2：qkv GEMM f16 packed([M,1152] 复用 act1152)→
+                    // attention 内部加载时做 RoPE（省独立 rope kernel）。
+                    // v3 回退：f32 GEMM + 独立 rope 拆分 qbuf/kbuf/vbuf。
+                    let use_v3 = std::env::var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3");
+                    if use_v3 {
+                        timed!("qkv", hgemm(rt, normed, qkv, gemm_out, m));
+                        timed!(
+                            "rope",
+                            qkv_rope(
+                                rt, gemm_out, cos, sin, qbuf, kbuf, vbuf, batch, lh, ls,
+                                ld,
+                            )
+                        );
+                        timed!("attn", attention_row(rt, qbuf, kbuf, vbuf, normed, ls, ld, batch * lh, scale, lh));
+                    } else {
+                        timed!("qkv", hgemm_f16(rt, normed, qkv, act1152, m));
+                        timed!("attn", attention_fa2(rt, act1152, cos, sin, normed, ls, ld, batch * lh, scale, lh));
+                    }
                     // 输出投影 beta=1 直接残差进 act384（省独立残差 kernel）
                     timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
                     if sub_profile {
@@ -1516,6 +1524,47 @@ fn attention_row(
             .launch(cfg)
     }
     .map_err(|e| format!("attention launch failed: {e}"))?;
+    Ok(())
+}
+
+/// FA2 attention：输入 packed qkv [M,1152] f16 + RoPE 表，内部加载时
+/// 旋转 Q/K（省独立 rope kernel 与 qbuf/kbuf/vbuf 缓冲）。
+#[allow(clippy::too_many_arguments)]
+fn attention_fa2(
+    rt: &CudaRuntime,
+    qkv: &CudaSlice<u16>,
+    rope_cos: &CudaSlice<f32>,
+    rope_sin: &CudaSlice<f32>,
+    out: &mut CudaSlice<u16>,
+    s: usize,
+    d: usize,
+    bh: usize,
+    scale: f32,
+    heads: usize,
+) -> Result<(), String> {
+    assert!(s <= 512, "attention_fa2 要求 S <= 512");
+    assert_eq!(d, 32, "attention_fa2 要求 D=32");
+    let f = rt.get_func("attention_fa2_kernel")?;
+    let stream = active_stream(rt);
+    let cfg = LaunchConfig {
+        grid_dim: (s.div_ceil(128) as u32, bh as u32, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(qkv)
+            .arg(rope_cos)
+            .arg(rope_sin)
+            .arg(out)
+            .arg(&(s as i32))
+            .arg(&(d as i32))
+            .arg(&scale)
+            .arg(&(heads as i32))
+            .launch(cfg)
+    }
+    .map_err(|e| format!("attention_fa2 launch failed: {e}"))?;
     Ok(())
 }
 

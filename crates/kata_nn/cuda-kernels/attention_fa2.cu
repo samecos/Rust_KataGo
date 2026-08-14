@@ -88,10 +88,14 @@ __device__ __forceinline__ void fa2_ldmatrix_x4_trans(unsigned& r0,
 
 // ---- 主 kernel ------------------------------------------------------------
 
+// RoPE 旋转辅助：q/k 的 32 维 = 16 个 (偶,奇) 对。
+// qkv 行内三段：[q 384 | k 384 | v 768 偏移]，seg 列基址 = seg*384 + h*32。
+// cos/sin [S, H*16] f32：cos[s*192 + h*16 + pair]。
+
 extern "C" __global__ void __launch_bounds__(FA2_THREADS, 2)
-attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
-                     const __half* __restrict__ k,  // [B*H, S, 32]
-                     const __half* __restrict__ v,  // [B*H, S, 32]
+attention_fa2_kernel(const __half* __restrict__ qkv,  // [M, 1152] packed
+                     const float* __restrict__ rope_cos,  // [S, H*16]
+                     const float* __restrict__ rope_sin,
                      __half* __restrict__ out,      // [B*S, H*32]
                      int s, int d, float scale, int heads) {
     // d 仅作参数占位（打包布局按 D=32 编译期定），调用方保证 d==32。
@@ -106,7 +110,6 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
     const int lane = tid & 31;
     const int bh = blockIdx.y;               // 0..B*H-1
     const int row0 = blockIdx.x * FA2_ROWS;  // 本块 query 起始行（S 内）
-    const size_t bh_off = (size_t)bh * s * 32;
     const int ntiles = (s + FA2_KTILE - 1) / FA2_KTILE;
     int ntiles_eff = ntiles;
 
@@ -114,8 +117,11 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
     const int h_l = bh % heads;
     const int b = bh / heads;
     const int warpM = warp * 16;  // 块内行组 0..127
+    // packed qkv 行基址：本 bh 对应的全局行起点 = (b*S + row0)*1152
+    const __half* qkv_base = qkv + ((size_t)b * s + row0) * 1152;
 
-    // ---- Q 加载（128 行 × 32 列 = 512 chunk，每线程 2 个） ----
+    // ---- Q 加载 + RoPE（128 行 × 32 列 = 512 chunk，每线程 2 个） ----
+    // 读 packed qkv 的 q 段（h_l*32 + c16*8 偏移），旋转后写打包 smem。
     {
         const unsigned sbase = (unsigned)__cvta_generic_to_shared(s_q);
 #pragma unroll
@@ -123,23 +129,52 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
             const int cid = tid + m * FA2_THREADS;  // 0..511
             const int r = cid >> 2;
             const int c16 = cid & 3;
-            if (row0 + r < s) {
-                const __half* g = q + bh_off + (size_t)(row0 + r) * 32;
-                fa2_cp_async16(sbase + fa2_smem_off(r, c16 * 8), g + c16 * 8);
+            const int row = row0 + r;
+            if (row < s) {
+                const __half* g =
+                    qkv + ((size_t)b * s + row) * 1152 + h_l * 32 + c16 * 8;
+                __half2 rot[4];
+#pragma unroll
+                for (int pp = 0; pp < 4; ++pp) {
+                    const float a = __half2float(g[pp * 2]);
+                    const float bb = __half2float(g[pp * 2 + 1]);
+                    const int pair = c16 * 4 + pp;
+                    const float co = rope_cos[row * 192 + h_l * 16 + pair];
+                    const float sn = rope_sin[row * 192 + h_l * 16 + pair];
+                    rot[pp] = __floats2half2_rn(a * co - bb * sn,
+                                                a * sn + bb * co);
+                }
+                *reinterpret_cast<uint4*>(
+                    reinterpret_cast<char*>(s_q) + fa2_smem_off(r, c16 * 8)) =
+                    *reinterpret_cast<uint4*>(rot);
             }
         }
     }
-    // K/V tile 0 预取（每 tile 256 chunk，每线程 1 个 K + 1 个 V）
+    // K tile 0 预取（带 RoPE）+ V（无旋转，cp.async），每线程 1 个 16B chunk
     {
         const unsigned kbase = (unsigned)__cvta_generic_to_shared(s_k[0]);
         const unsigned vbase = (unsigned)__cvta_generic_to_shared(s_v[0]);
         const int r = tid >> 2;
         const int c16 = tid & 3;
         if (r < s) {
-            const __half* gk = k + bh_off + (size_t)r * 32;
-            const __half* gv = v + bh_off + (size_t)r * 32;
-            fa2_cp_async16(kbase + fa2_smem_off(r, c16 * 8), gk + c16 * 8);
-            fa2_cp_async16(vbase + fa2_smem_off(r, c16 * 8), gv + c16 * 8);
+            const __half* gk = qkv + ((size_t)b * s + r) * 1152 + 384 +
+                               h_l * 32 + c16 * 8;
+            __half2 rot[4];
+#pragma unroll
+            for (int pp = 0; pp < 4; ++pp) {
+                const float a = __half2float(gk[pp * 2]);
+                const float bb = __half2float(gk[pp * 2 + 1]);
+                const int pair = c16 * 4 + pp;
+                const float co = rope_cos[r * 192 + h_l * 16 + pair];
+                const float sn = rope_sin[r * 192 + h_l * 16 + pair];
+                rot[pp] = __floats2half2_rn(a * co - bb * sn, a * sn + bb * co);
+            }
+            *reinterpret_cast<uint4*>(
+                reinterpret_cast<char*>(s_k[0]) + fa2_smem_off(r, c16 * 8)) =
+                *reinterpret_cast<uint4*>(rot);
+            const __half* gv = qkv + ((size_t)b * s + r) * 1152 + 768 +
+                               h_l * 32 + c16 * 8;
+            fa2_cp_async16(vbase + fa2_smem_off(r, c16 * 8), gv);
         }
     }
     fa2_cp_commit();
@@ -160,7 +195,7 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
 
     for (int t = 0; t < ntiles_eff; ++t) {
         const int stage = t & 1;
-        // 预取下一 K/V tile
+        // 预取下一 K/V tile（K 带 RoPE 普通写；V 无旋转 cp.async）
         if (t + 1 < ntiles) {
             const unsigned kbase =
                 (unsigned)__cvta_generic_to_shared(s_k[(t + 1) & 1]);
@@ -170,10 +205,25 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
             const int c16 = tid & 3;
             const int kr = (t + 1) * FA2_KTILE + r;
             if (kr < s) {
-                const __half* gk = k + bh_off + (size_t)kr * 32;
-                const __half* gv = v + bh_off + (size_t)kr * 32;
-                fa2_cp_async16(kbase + fa2_smem_off(r, c16 * 8), gk + c16 * 8);
-                fa2_cp_async16(vbase + fa2_smem_off(r, c16 * 8), gv + c16 * 8);
+                const __half* gk = qkv + ((size_t)b * s + kr) * 1152 + 384 +
+                                   h_l * 32 + c16 * 8;
+                __half2 rot[4];
+#pragma unroll
+                for (int pp = 0; pp < 4; ++pp) {
+                    const float a = __half2float(gk[pp * 2]);
+                    const float bb = __half2float(gk[pp * 2 + 1]);
+                    const int pair = c16 * 4 + pp;
+                    const float co = rope_cos[kr * 192 + h_l * 16 + pair];
+                    const float sn = rope_sin[kr * 192 + h_l * 16 + pair];
+                    rot[pp] =
+                        __floats2half2_rn(a * co - bb * sn, a * sn + bb * co);
+                }
+                *reinterpret_cast<uint4*>(
+                    reinterpret_cast<char*>(s_k[(t + 1) & 1]) +
+                    fa2_smem_off(r, c16 * 8)) = *reinterpret_cast<uint4*>(rot);
+                const __half* gv = qkv + ((size_t)b * s + kr) * 1152 + 768 +
+                                   h_l * 32 + c16 * 8;
+                fa2_cp_async16(vbase + fa2_smem_off(r, c16 * 8), gv);
             }
             fa2_cp_commit();
             fa2_cp_wait<1>();
