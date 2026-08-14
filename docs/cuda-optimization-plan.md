@@ -16,10 +16,17 @@
 | 271be9b | GEMM v2(smem 双缓冲+cp.async+ldmatrix,tile 128×128×32) | 58.5 | +24% |
 | 8f24fb0 | kernel 融合(FFN 6→4、attn 6→5、Linear 3→2 launch) | 61.5 | +5% |
 | 05c44a8 | attention v3(warp-per-row+cp.async 64 键分块+128B 打包 smem) | **114** | attn 0.27→0.056ms/层(4.8×);v2 方案此前被证伪(40<47) |
-| (进行中) | dual FFN(gate+up 单 GEMM) | 待测 | agent-16 |
+| (证伪) | dual FFN(gate+up 单 GEMM) | 回退 | agent-16 ABBA 慢于基线 |
+| cdfbb4b | **CUDA Graph + 多流 + 工作区预分配**(WDDM 提交瓶颈三连击) | 131 | 单前向 kernel 执行 8.5ms→**0.15ms**(graph 一次提交);launch+sync 仅 8.5µs |
+| 8536506 | pinned host 内存 + WC 可见性修复 | 131 | 同口径持平;WC 读需流级 synchronize |
 
-单 batch 下 M=361 的 GEMM grid 仅 3×N/128 块,SM 利用率低是根本限制;
-fork 的 2836 nnEval/s 依赖 B16 批 + 双流(batch 聚合是后续最大杠杆)。
+**2026-08-14 第二轮优化后同口径数据(release,benchmark v=1000 n=10 t=1)**：
+- CUDA = 131 nnEvals/s(7.3ms/前向),TRT = 234(3.8ms/前向),差距 1.8×。
+- 后端已非瓶颈:graph 执行 0.15ms、launch+sync 8.5µs、htod/dtoh pinned 异步;
+  剩余 3.5ms 差距在 host 链路(特征生成、serve 线程往返、树操作)——共享
+  代码,需 host 侧 profile(下一步)。
+- 多线程不涨(4/8 线程仍 ~130):搜索侧请求未并发到达(树锁/请求串行),
+  是搜索层问题,非后端。
 
 ## 决策组（严格有序，后组不得改写前组配置键）
 
