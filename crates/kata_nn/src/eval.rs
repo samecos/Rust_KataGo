@@ -206,7 +206,7 @@ struct SharedState {
     policy_size: i32,
     backend: Mutex<Option<Arc<dyn Backend>>>,
     compute_handles: Mutex<Vec<Box<dyn ComputeHandle>>>,
-    input_buffers: Mutex<Option<Box<dyn InputBuffers>>>,
+    input_buffers: Mutex<Option<Arc<Box<dyn InputBuffers>>>>,
     /// Model version and post-processing parameters, set by `load_model`
     /// before any server thread is spawned (then read-only).
     postprocess_cfg: Mutex<(i32, ModelPostProcessParams)>,
@@ -234,7 +234,7 @@ impl SharedState {
             // 并发请求到达时合批摊薄 kernel launch 开销）。
             let mut batch = vec![request];
             let target_batch_size = self.current_batch_size.load(Ordering::Relaxed).max(1) as usize;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_micros(500);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_micros(1000);
             while batch.len() < target_batch_size && std::time::Instant::now() < deadline {
                 let mut extra = dummy_request();
                 if !self.query_queue.try_pop(&mut extra) {
@@ -253,10 +253,14 @@ impl SharedState {
 
     /// Compute and store results for a batch of requests.
     fn process_batch(&self, batch: &[Arc<EvalRequest>], handle: &Mutex<Box<dyn ComputeHandle>>) {
-        let backend_guard = self.backend.lock().unwrap();
+        // 锁只用于取出 Arc 克隆，get_output 在锁外执行：
+        // backend / input_buffers 是全局共享，持锁贯穿推理会把多个
+        // server 线程完全串行化（batch 化收益被锁吃掉）。
+        let backend = self.backend.lock().unwrap().clone();
+        let input_buffers = self.input_buffers.lock().unwrap().clone();
         let handle_guard = handle.lock().unwrap();
 
-        if let Some(backend) = backend_guard.as_deref() {
+        if let Some(backend) = backend.as_deref() {
             // Real backend path
             let n = batch.len();
             let mut outputs: Vec<NNOutput> = (0..n).map(|_| NNOutput::default()).collect();
@@ -268,10 +272,9 @@ impl SharedState {
                     bufs.iter_mut().map(|g| &mut **g).collect();
                 let mut output_refs: Vec<&mut NNOutput> = outputs.iter_mut().collect();
 
-                let buffers_guard = self.input_buffers.lock().unwrap();
                 let dummy_buffers;
-                let input_buffers: &dyn InputBuffers = match buffers_guard.as_deref() {
-                    Some(b) => b,
+                let input_buffers: &dyn InputBuffers = match input_buffers.as_deref() {
+                    Some(b) => b.as_ref(),
                     None => {
                         dummy_buffers = DummyInputBuffers;
                         &dummy_buffers
@@ -1222,7 +1225,7 @@ impl NnEvaluator {
         self.compute_handle = Some(compute_handle);
         // Store the input buffers in SharedState so server threads can use
         // them when processing batches.
-        *self.shared.input_buffers.lock().unwrap() = Some(input_buffers);
+        *self.shared.input_buffers.lock().unwrap() = Some(Arc::new(input_buffers));
         self.loaded_model = Some(model);
 
         // Also store a clone of the backend and one compute handle per

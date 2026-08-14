@@ -104,7 +104,7 @@ pub trait ComputeHandle: Send {
 /// Input buffers used to pass data into the neural network for computation.
 ///
 /// Mirrors C++ `InputBuffers`.
-pub trait InputBuffers: Send {
+pub trait InputBuffers: Send + Sync {
     /// Enable downcasting to the concrete implementor.
     fn as_any(&self) -> &dyn Any;
 }

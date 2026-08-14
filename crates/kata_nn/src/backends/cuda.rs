@@ -497,7 +497,8 @@ mod backend_impl {
     /// 输入/输出走 pinned host 内存（htod/dtoh 真正异步，避免非 pinned
     /// 的退化同步往返；每次前向仅一次 event 同步）。
     struct CudaGraphState {
-        graph: cudarc::driver::CudaGraph,
+        /// 已捕获图；None = capture 失败降级直连（每前向逐 kernel 提交）。
+        graph: Option<cudarc::driver::CudaGraph>,
         ws: CudaWorkspace,
         in_spatial: cudarc::driver::CudaSlice<f32>,
         in_global: cudarc::driver::CudaSlice<f32>,
@@ -736,6 +737,12 @@ mod backend_impl {
             }
 
             // --- 上传 + 前向（CUDA Graph：首次捕获，后续 1 次提交） ----------
+            // WDDM/CUDA13 下 capture 与同 context 其他流的并发活动会互相
+            // 干扰（实测 STREAM_CAPTURE_INVALIDATED，100% 复现），故 get_output
+            // 全程全局互斥：批量已在 serve 层凑好，batch 内并行不受影响，
+            // 串行开销（后端 ~0.15ms/批）远小于稳定性损失。
+            static CUDA_EXEC_LOCK: Mutex<()> = Mutex::new(());
+            let _exec_guard = CUDA_EXEC_LOCK.lock().unwrap();
             let host = {
                 let mut g = h.graph_state.lock().unwrap();
                 let need_capture = match g.as_ref() {
@@ -743,6 +750,12 @@ mod backend_impl {
                     None => true,
                 };
                 if need_capture {
+                    // 清场：等待设备全部工作完成，避免与其他流的未完成
+                    // 工作产生 capture 依赖（STREAM_CAPTURE_INVALIDATED）。
+                    h.rt
+                        .device
+                        .synchronize()
+                        .map_err(|e| NeuralNetError(format!("pre-capture sync: {e}")))?;
                     // 固定地址输入缓冲 + 工作区 + pinned host 缓冲，
                     // 捕获整图（htod/dtoh 在图外）。
                     let mut in_spatial: cudarc::driver::CudaSlice<f32> =
@@ -783,10 +796,24 @@ mod backend_impl {
                             .ok_or_else(|| NeuralNetError("capture produced no graph".to_string()))
                     })();
                     set_capturing(false);
-                    let graph = cap_result?;
-                    graph
-                        .upload()
-                        .map_err(|e| NeuralNetError(format!("graph upload: {e}")))?;
+                    let graph = match cap_result {
+                        Ok(g) => Some(g),
+                        Err(e) => {
+                            // capture 失败：清理流的 capture 状态（丢弃残余图），
+                            // 降级为直连路径（每前向逐 kernel 提交，慢但正确）。
+                            let flags: cudarc::driver::sys::CUgraphInstantiate_flags =
+                                unsafe { std::mem::transmute(0u32) };
+                            let _ = stream.end_capture(flags);
+                            eprintln!(
+                                "WARNING: CUDA graph capture failed ({e}); falling back to direct launch path"
+                            );
+                            None
+                        }
+                    };
+                    if let Some(g) = graph.as_ref() {
+                        g.upload()
+                            .map_err(|e| NeuralNetError(format!("graph upload: {e}")))?;
+                    }
                     *g = Some(CudaGraphState {
                         graph,
                         ws,
@@ -822,9 +849,16 @@ mod backend_impl {
                 stream
                     .memcpy_htod(&st.in_gl_pin, &mut st.in_global)
                     .map_err(|e| NeuralNetError(format!("upload global: {e}")))?;
-                st.graph
-                    .launch()
-                    .map_err(|e| NeuralNetError(format!("graph launch: {e}")))?;
+                match st.graph.as_ref() {
+                    Some(graph) => graph
+                        .launch()
+                        .map_err(|e| NeuralNetError(format!("graph launch: {e}")))?,
+                    // 降级直连：逐 kernel 提交（慢但正确）。
+                    None => h
+                        .model
+                        .apply(&h.rt, stream, &mut st.ws, &st.in_spatial, &st.in_global)
+                        .map_err(|e| NeuralNetError(format!("CUDA forward failed: {e}")))?,
+                }
                 stream
                     .memcpy_dtoh(&st.ws.out_policy, &mut st.out_policy_pin)
                     .map_err(|e| NeuralNetError(format!("dtoh policy: {e}")))?;

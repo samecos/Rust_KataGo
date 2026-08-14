@@ -3,8 +3,14 @@
 //! 需要 `cuda` feature 与可用的 CUDA GPU，否则跳过。
 #![cfg(feature = "cuda")]
 
+/// 所有 CUDA 测试共享同一 primary context；capture 与并发 CUDA 活动
+/// 互斥（WDDM/CUDA13 限制），故测试全局串行。
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+
 #[test]
 fn cuda_pipeline_smoke_f32_add() {
+    let _guard = TEST_LOCK.lock().unwrap();
     let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else {
         eprintln!("skipped: CUDA runtime unavailable");
         return;
@@ -29,6 +35,7 @@ fn cuda_pipeline_smoke_f32_add() {
 
 #[test]
 fn cuda_attention_row_vs_cpu_reference() {
+    let _guard = TEST_LOCK.lock().unwrap();
     let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else {
         eprintln!("skipped: CUDA runtime unavailable");
         return;
@@ -115,6 +122,7 @@ fn cuda_attention_row_vs_cpu_reference() {
 
 #[test]
 fn cuda_hgemm_m16n8k16_vs_cpu_reference() {
+    let _guard = TEST_LOCK.lock().unwrap();
     let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else {
         eprintln!("skipped: CUDA runtime unavailable");
         return;
@@ -187,6 +195,10 @@ fn cuda_hgemm_m16n8k16_vs_cpu_reference() {
 
 #[test]
 fn cuda_graph_minimal_capture() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    // capture 与同 context 的并发 CUDA 活动互斥（WDDM/CUDA13 限制，
+    // 与生产后端 get_output 的全局锁同理）。
+
     let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else {
         eprintln!("skipped: CUDA runtime unavailable");
         return;
@@ -237,6 +249,10 @@ fn cuda_graph_minimal_capture() {
 
 #[test]
 fn cuda_graph_launch_sync_latency() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    // capture 与同 context 的并发 CUDA 活动互斥（WDDM/CUDA13 限制，
+    // 与生产后端 get_output 的全局锁同理）。
+
     let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else {
         eprintln!("skipped: CUDA runtime unavailable");
         return;
