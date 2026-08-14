@@ -206,6 +206,18 @@ __device__ __forceinline__ void v2_epilogue_gatesilu(
                     cp2[0] = a2;
                     cp2[1] = a3;
                 }
+                // down 门同时写 f16 输出（act384f16，供 up GEMM 直接读取，
+                // 省 f32_to_f16 转换 kernel）
+                if (Ch != nullptr) {
+                    __half* hp = Ch + (size_t)row * N + col;
+                    __half* hp2 = hp + 8 * N;
+                    hp[0] = __float2half_rn(a0);
+                    hp[1] = __float2half_rn(a1);
+                    if (has_hi) {
+                        hp2[0] = __float2half_rn(a2);
+                        hp2[1] = __float2half_rn(a3);
+                    }
+                }
             }
         }
     }
@@ -386,10 +398,11 @@ extern "C" __global__ void __launch_bounds__(V2_THREADS)
 hgemm_v2_gatesilu_f32_kernel(const __half* __restrict__ A,
                              const __half* __restrict__ B,
                              float* __restrict__ C,
+                             __half* __restrict__ out16,
                              const float* __restrict__ scale,
                              const float* __restrict__ bias, int M, int N,
                              int K, float alpha, float beta) {
-    v2_hgemm_impl<false, true>(A, B, C, nullptr, M, N, K, alpha, beta, scale,
+    v2_hgemm_impl<false, true>(A, B, C, out16, M, N, K, alpha, beta, scale,
                                bias);
 }
 
@@ -422,6 +435,39 @@ __device__ __forceinline__ unsigned t64_smem_off64(int r, int c) {
            ((unsigned)(r & 7) << 4) | ((unsigned)(c & 7) << 1);
 }
 
+// A 加载带 swiglu：A_dual [M, 2K]（gate|up 拼接），A[row,k] =
+// silu(A_dual[row,k]) * A_dual[row,k+K]。普通读+计算（替代 cp.async），
+// 供 down GEMM 融合 swiglu（-12 kernel）。
+__device__ __forceinline__ void t64_load_chunk_swiglu_a(
+    __half* sA, const __half* __restrict__ A_dual, int stage, int cid,
+    int kk, int M, int K, int blockM) {
+    const int row = cid >> 3;
+    const int c16 = cid & 7;
+    const int k_start = kk + c16 * 8;
+    const unsigned saddr =
+        (unsigned)__cvta_generic_to_shared(sA) +
+        stage * (T64_BM * T64_BK * 2) + t64_smem_off64(row, c16 * 8);
+    if (k_start >= K) {
+        v2_smem_zero16(saddr);
+        return;
+    }
+    if (blockM + row < M) {
+        const __half* g =
+            A_dual + (size_t)(blockM + row) * 2 * K + k_start;
+        const __half* u = g + K;  // up 段偏移
+        __half outv[8];
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            float gg = __half2float(g[j]);
+            gg = gg / (1.0f + expf(-gg));
+            outv[j] = __float2half(gg * __half2float(u[j]));
+        }
+        *reinterpret_cast<uint4*>(
+            reinterpret_cast<char*>(sA) + stage * (T64_BM * T64_BK * 2) +
+            t64_smem_off64(row, c16 * 8)) = *reinterpret_cast<uint4*>(outv);
+    }
+}
+
 // 每 k-tile：A/B 各 64×64 f16 = 8KB = 512 个 16B chunk（每线程 2 个）。
 template <bool IS_B>
 __device__ __forceinline__ void t64_load_chunk(
@@ -451,7 +497,7 @@ __device__ __forceinline__ void t64_load_chunk(
     }
 }
 
-template <bool F16_OUT>
+template <bool F16_OUT, bool SWIGLU_A = false>
 __device__ __forceinline__ void t64_hgemm_impl(
     const __half* __restrict__ A, const __half* __restrict__ B,
     float* __restrict__ Cf, __half* __restrict__ Ch, int M, int N, int K,
@@ -475,11 +521,18 @@ __device__ __forceinline__ void t64_hgemm_impl(
         for (int r = 0; r < 4; ++r) c[j][r] = 0.0f;
 
     auto issue_stage = [&](int stage, int kk) {
-        // 每级 512 chunk，每线程 2 个 A + 2 个 B
-        t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M,
-                              N, K, blockM, blockN);
-        t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid + 256,
-                              kk, M, N, K, blockM, blockN);
+        // 每级 512 chunk，每线程 2 个 A + 2 个 B。
+        // SWIGLU_A：A 从 dual 缓冲读 gate/up 算 swiglu（普通写，非 cp.async）。
+        if (SWIGLU_A) {
+            t64_load_chunk_swiglu_a(&sA[0][0], A, stage, tid, kk, M, K, blockM);
+            t64_load_chunk_swiglu_a(&sA[0][0], A, stage, tid + 256, kk, M, K,
+                                    blockM);
+        } else {
+            t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk,
+                                  M, N, K, blockM, blockN);
+            t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid + 256,
+                                  kk, M, N, K, blockM, blockN);
+        }
         t64_load_chunk<true>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M, N,
                              K, blockM, blockN);
         t64_load_chunk<true>(&sA[0][0], &sB[0][0], A, B, stage, tid + 256, kk,
@@ -592,4 +645,14 @@ hgemm_t64_f16out_kernel(const __half* __restrict__ A,
                         const __half* __restrict__ B, __half* __restrict__ C,
                         int M, int N, int K, float alpha, float beta) {
     t64_hgemm_impl<true>(A, B, nullptr, C, M, N, K, alpha, beta);
+}
+
+// down GEMM 融合 swiglu：A = act2304 [M,2K]（gate|up），A[row,k] =
+// silu(gate)·up；C 为 f32 残差（beta=1）。K=1152。
+extern "C" __global__ void __launch_bounds__(V2_THREADS)
+hgemm_t64_swiglu_residual_kernel(const __half* __restrict__ A_dual,
+                                 const __half* __restrict__ B,
+                                 float* __restrict__ C, int M, int N, int K,
+                                 float alpha, float beta) {
+    t64_hgemm_impl<false, true>(A_dual, B, C, nullptr, M, N, K, alpha, beta);
 }
