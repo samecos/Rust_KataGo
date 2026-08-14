@@ -17,7 +17,7 @@
 //!   pad 16 对齐）+ `hgemm`；全局输入 `[B,19] @ W[768,19]^T` 逐 token 广播
 //!   加在 conv 输出上，再一起过门控 SiLU（严格按 IR 的 Add→gate 顺序）。
 //! - Attention：qkv GEMM → RoPE（半维 (16,2) 偶/奇下标对，cos/sin 表
-//!   `[S, H*D/2]` f32）→ `[B*H,S,D]` → `attention_row_kernel`（score 缩放
+//!   `[S, H*D/2]` f32）→ `[B*H,S,D]` → `attention_row_v3_kernel`（score 缩放
 //!   传 `qk_scale*qk_scale`，等价于导出图 q/k 各乘 1/∜d）→ 拼回 → 输出投影
 //!   → 残差。掩码恒零（19 路 on-board 恒 1，解析器已校验），不传掩码。
 //! - 策略/价值头按 IR 注释逐步执行；×on_board 掩码乘法恒 1 省略，落点屏蔽
@@ -1241,14 +1241,16 @@ fn attention_row(
     scale: f32,
 ) -> Result<(), String> {
     assert!(s <= 512, "attention_row 要求 S <= 512");
-    // v1（每行一块，512 线程）：ABBA 实测 v2（warp-per-row + 46KB smem/块）
-    // 在 S=361/D=32/BH=12 上更慢（40 vs 47 nnEvals/s：smem 限制并行度、
-    // 串行依赖链主导）。v2 保留在 attention.cu，G1 FA4 tile 版再换。
-    let f = rt.get_func("attention_row_kernel")?;
+    assert_eq!(d, 32, "attention_row v3 要求 D=32（smem/打包布局按 D=32 编译期定）");
+    // v3（warp-per-row + K/V 64 键分块 cp.async 双缓冲 + 128B 打包 smem）：
+    // v1 每行一块、512 线程两遍 18 次 syncthreads 树归约且 p·V 仅 32 线程串行；
+    // v2 整段 K/V 46KB smem 只 4 块/SM、串行依赖链长（ABBA 40 < 47 被证伪）。
+    // v1/v2 保留在 attention.cu 作参考。数值：FP32 全程 + RNE 舍回 half。
+    let f = rt.get_func("attention_row_v3_kernel")?;
     let stream = rt.device.default_stream();
     let cfg = LaunchConfig {
-        grid_dim: (s as u32, bh as u32, 1),
-        block_dim: (512, 1, 1),
+        grid_dim: (((s + 7) / 8) as u32, bh as u32, 1),
+        block_dim: (256, 1, 1),
         shared_mem_bytes: 0,
     };
     unsafe {

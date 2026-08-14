@@ -362,8 +362,8 @@ mod imp {
         Ok(out.iter().map(|&b| f16_to_f32_bits(b)).collect())
     }
 
-    /// 注意力 v1（正确优先）：`out = softmax(Q·K^T/sqrt(D))·V`，non-causal 无掩码。
-    /// q/k/v：[B*H, S, D] 行主序 f32（主机侧转 half）。
+    /// 注意力 v3（warp-per-row + cp.async 分块）：`out = softmax(Q·K^T/sqrt(D))·V`，non-causal 无掩码。
+    /// q/k/v：[B*H, S, D] 行主序 f32（主机侧转 half）。要求 S ≤ 512、D == 32。
     pub fn attention_row(
         &self,
         q: &[f32],
@@ -380,7 +380,9 @@ mod imp {
         let qh: Vec<u16> = q.iter().map(|&x| f32_to_f16_bits(x)).collect();
         let kh: Vec<u16> = k.iter().map(|&x| f32_to_f16_bits(x)).collect();
         let vh: Vec<u16> = v.iter().map(|&x| f32_to_f16_bits(x)).collect();
-        let f = self.get_func("attention_row_kernel")?;
+        assert!(s <= 512, "attention_row v3 requires S <= 512");
+        assert_eq!(d, 32, "attention_row v3 requires D=32");
+        let f = self.get_func("attention_row_v3_kernel")?;
         let stream = self.device.default_stream();
         let mut d_q: CudaSlice<u16> =
             unsafe { stream.alloc(n) }.map_err(|e| e.to_string())?;
@@ -393,10 +395,9 @@ mod imp {
         stream.memcpy_htod(qh.as_slice(), &mut d_q).map_err(|e| e.to_string())?;
         stream.memcpy_htod(kh.as_slice(), &mut d_k).map_err(|e| e.to_string())?;
         stream.memcpy_htod(vh.as_slice(), &mut d_v).map_err(|e| e.to_string())?;
-        assert!(s <= 512, "attention_row v1 requires S <= 512");
-        let block = 512u32;
+        let block = 256u32;
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (s as u32, bh as u32, 1),
+            grid_dim: (((s + 7) / 8) as u32, bh as u32, 1),
             block_dim: (block, 1, 1),
             shared_mem_bytes: 0,
         };
