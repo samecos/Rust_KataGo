@@ -494,3 +494,57 @@ extern "C" __global__ void f32_bias_add_split_kernel(
     else if (c < n0 + n1) out1[b * n1 + (c - n0)] = v;
     else out2[b * n2 + (c - n0 - n1)] = v;
 }
+
+// PolicyHead pass 分支融合（G4）：vec = silu(pooled@W1 + b1)；out = vec@W2。
+// pooled [B,288] f32、w1 [96,288] f16、b1 [96] f32、w2 [6,96] f16、out [B,6]。
+// 每 block 1 个 batch 行，128 线程；数值与独立 sgemm+bias_silu 完全一致。
+extern "C" __global__ void policy_pass_fused_kernel(
+    const float* __restrict__ pooled, const __half* __restrict__ w1,
+    const float* __restrict__ b1, const __half* __restrict__ w2,
+    float* __restrict__ out, int B) {
+    __shared__ float s_vec[96];
+    const int b = blockIdx.x;
+    if (b >= B) return;
+    const float* a = pooled + (size_t)b * 288;
+    for (int j = threadIdx.x; j < 96; j += blockDim.x) {
+        float acc = 0.0f;
+        const __half* w = w1 + (size_t)j * 288;
+        for (int k = 0; k < 288; ++k) acc += a[k] * __half2float(w[k]);
+        float v = acc + b1[j];
+        s_vec[j] = v / (1.0f + expf(-v));
+    }
+    __syncthreads();
+    if (threadIdx.x < 6) {
+        float acc = 0.0f;
+        const __half* w = w2 + (size_t)threadIdx.x * 96;
+        for (int k = 0; k < 96; ++k) acc += s_vec[k] * __half2float(w[k]);
+        out[b * 6 + threadIdx.x] = acc;
+    }
+}
+
+// ValueHead FC 融合（G4）：vec = silu(pooled@l2 + l2_b)；out = vec@vall_w。
+// pooled [B,576] f32、l2 [192,576] f16、l2_b [192] f32、vall_w [21,192] f16、
+// out [B,21] f32。每 block 1 个 batch 行。
+extern "C" __global__ void value_fc_fused_kernel(
+    const float* __restrict__ pooled, const __half* __restrict__ l2,
+    const float* __restrict__ l2_b, const __half* __restrict__ vall_w,
+    float* __restrict__ out, int B) {
+    __shared__ float s_vec[192];
+    const int b = blockIdx.x;
+    if (b >= B) return;
+    const float* a = pooled + (size_t)b * 576;
+    for (int j = threadIdx.x; j < 192; j += blockDim.x) {
+        float acc = 0.0f;
+        const __half* w = l2 + (size_t)j * 576;
+        for (int k = 0; k < 576; ++k) acc += a[k] * __half2float(w[k]);
+        float v = acc + l2_b[j];
+        s_vec[j] = v / (1.0f + expf(-v));
+    }
+    __syncthreads();
+    if (threadIdx.x < 21) {
+        float acc = 0.0f;
+        const __half* w = vall_w + (size_t)threadIdx.x * 192;
+        for (int k = 0; k < 192; ++k) acc += s_vec[k] * __half2float(w[k]);
+        out[b * 21 + threadIdx.x] = acc;
+    }
+}

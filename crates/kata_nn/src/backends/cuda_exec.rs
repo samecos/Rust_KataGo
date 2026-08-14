@@ -488,10 +488,8 @@ impl CudaModel {
                     add_bias_silu_f16_ld(rt, conv1pg, 96, 192, &g_bias.data, p192, m * 96, 96)?;
                     // 池化：[mean, mean*scale, max]（f32；小头链路保持 f32 精度）
                     pool_mean_max(rt, p192, pooled, batch, s, 96, *mask_scale)?;
-                    // pass 分支：Gemm+bias → SiLU → Gemm（f32×f16 混合小 GEMM）
-                    sgemm(rt, pooled, pass1, vec_a, batch)?;
-                    bias_silu_f32(rt, vec_a, &pass_b1.data, batch * 96, 96)?;
-                    sgemm(rt, vec_a, pass2, pass_logits, batch)?;
+                    // pass 分支融合（G4）：pooled@pass1+silu → @pass2（-2 kernel）
+                    policy_pass_fused(rt, pooled, pass1, &pass_b1.data, pass2, pass_logits, batch)?;
                     // g 分支：Gemm → +conv1p → +bias2 → SiLU → conv2p
                     sgemm(rt, pooled, g_matmul, vec_b, batch)?;
                     // conv1p 部分（前 96 列）
@@ -517,12 +515,9 @@ impl CudaModel {
                     add_bias_silu_f16(rt, gemm_out, &bias1.data, p192, m * 192, 192)?;
                     // 池化：[mean, mean*scale, mean*quad]（f32）
                     pool_mean3(rt, p192, pooled, batch, s, 192, *mask_scale, *mask_quad)?;
-                    // linear2 + bias + SiLU（f32×f16 混合小 GEMM）
-                    sgemm(rt, pooled, l2, vec_a, batch)?;
-                    bias_silu_f32(rt, vec_a, &l2_bias.data, batch * 192, 192)?;
-                    // 合并输出 Gemm（G4：value/misc/moremisc 合一 [B,21]）+
-                    // bias_add 拆分写（-4 kernel）
-                    sgemm(rt, vec_a, vall_w, vall, batch)?;
+                    // linear2+silu+输出合并（G4）：pooled@l2+silu → @vall_w
+                    // （-3 kernel：sgemm+bias_silu+sgemm 合一）
+                    value_fc_fused(rt, pooled, l2, &l2_bias.data, vall_w, vall, batch)?;
                     f32_bias_add_split(
                         rt, vall, &vall_b.data, out_value, out_misc, out_moremisc,
                         3, 10, 8, batch,
@@ -1301,6 +1296,70 @@ fn add_bias_silu_f16(
             .launch(LaunchConfig::for_num_elems(n as u32))
     }
     .map_err(|e| format!("add_bias_silu_f16 launch failed: {e}"))?;
+    Ok(())
+}
+
+/// PolicyHead pass 分支融合：pooled@pass1+silu → @pass2 → pass_logits。
+fn policy_pass_fused(
+    rt: &CudaRuntime,
+    pooled: &CudaSlice<f32>,
+    pass1: &WeightBuf,
+    pass_b1: &CudaSlice<f32>,
+    pass2: &WeightBuf,
+    out: &mut CudaSlice<f32>,
+    batch: usize,
+) -> Result<(), String> {
+    let f = rt.get_func("policy_pass_fused_kernel")?;
+    let stream = active_stream(rt);
+    let cfg = LaunchConfig {
+        grid_dim: (batch as u32, 1, 1),
+        block_dim: (128, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(pooled)
+            .arg(&pass1.data)
+            .arg(pass_b1)
+            .arg(&pass2.data)
+            .arg(out)
+            .arg(&(batch as i32))
+            .launch(cfg)
+    }
+    .map_err(|e| format!("policy_pass_fused launch failed: {e}"))?;
+    Ok(())
+}
+
+/// ValueHead FC 融合：pooled@l2+silu → @vall_w → vall [B,21]。
+fn value_fc_fused(
+    rt: &CudaRuntime,
+    pooled: &CudaSlice<f32>,
+    l2: &WeightBuf,
+    l2_bias: &CudaSlice<f32>,
+    vall_w: &WeightBuf,
+    out: &mut CudaSlice<f32>,
+    batch: usize,
+) -> Result<(), String> {
+    let f = rt.get_func("value_fc_fused_kernel")?;
+    let stream = active_stream(rt);
+    let cfg = LaunchConfig {
+        grid_dim: (batch as u32, 1, 1),
+        block_dim: (128, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(pooled)
+            .arg(&l2.data)
+            .arg(l2_bias)
+            .arg(&vall_w.data)
+            .arg(out)
+            .arg(&(batch as i32))
+            .launch(cfg)
+    }
+    .map_err(|e| format!("value_fc_fused launch failed: {e}"))?;
     Ok(())
 }
 
