@@ -436,6 +436,23 @@ fn cuda_attention_fa2_repro() {
         }
     }
     eprintln!("fa2 worst: row={} col={} err={:.3e}", worst.0, worst.1, worst.2);
+    // worst 行的 softmax 分布诊断
+    {
+        let row = worst.0; let hh = worst.1 / 32;
+        let mut scores = vec![0.0f32; s];
+        let mut m = f32::NEG_INFINITY;
+        for jj in 0..s {
+            let mut dot = 0.0f32;
+            for dd in 0..d { dot += f16b(q[(hh * s + row) * d + dd]) * f16b(k[(hh * s + jj) * d + dd]); }
+            let sc = dot * scale; scores[jj] = sc; m = m.max(sc);
+        }
+        let mut sorted: Vec<f32> = scores.clone();
+        sorted.sort_by(|a, b| b.total_cmp(a));
+        eprintln!("  worst row {} h{}: score max={:.3} top5={:?}", row, hh, m, &sorted[..5]);
+        let sum: f32 = scores.iter().map(|&x| (x - m).exp()).sum();
+        let top_sum: f32 = (sorted[0] - m).exp();
+        eprintln!("  cpu sum={:.3e}, 次优/max e 比={:.3e}", sum, (sorted[1] - m).exp());
+    }
     // row 360 head 5 详情
     {
         let row = 360usize; let hh = 5usize;
