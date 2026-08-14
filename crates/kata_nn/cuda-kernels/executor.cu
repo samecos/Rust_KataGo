@@ -445,3 +445,20 @@ extern "C" __global__ void rms_norm_f32_w4_kernel(
         y[c] = __float2half(x[c] * rstd * scale[c]);
     }
 }
+
+// ValueHead 输出合并（G4）：in [B, 21] f32 + bias[21] → 拆分写 3 个输出
+// [B,3] / [B,10] / [B,8]（value/misc/moremisc）。数值 = 独立 bias_add。
+extern "C" __global__ void f32_bias_add_split_kernel(
+    const float* __restrict__ in, const float* __restrict__ bias,
+    float* __restrict__ out0, float* __restrict__ out1, float* __restrict__ out2,
+    int n0, int n1, int n2, int B) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int n = n0 + n1 + n2;
+    if (i >= B * n) return;
+    int b = i / n;
+    int c = i % n;
+    float v = in[i] + bias[c];
+    if (c < n0) out0[b * n0 + c] = v;
+    else if (c < n0 + n1) out1[b * n1 + (c - n0)] = v;
+    else out2[b * n2 + (c - n0 - n1)] = v;
+}

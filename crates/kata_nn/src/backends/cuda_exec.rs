@@ -155,12 +155,10 @@ enum LayerBuf {
         bias1: ParamBuf,
         l2: WeightBuf,
         l2_bias: ParamBuf,
-        value_w: WeightBuf,
-        value_b: ParamBuf,
-        misc_w: WeightBuf,
-        misc_b: ParamBuf,
-        moremisc_w: WeightBuf,
-        moremisc_b: ParamBuf,
+        /// 合并的 value/misc/moremisc 输出权重 [21, 192]（G4 头融合）。
+        vall_w: WeightBuf,
+        /// 合并的 bias [21]。
+        vall_b: ParamBuf,
         own_w: WeightBuf,
         mask_scale: f32,
         mask_quad: f32,
@@ -247,6 +245,7 @@ impl CudaModel {
         let pooled = &mut ws.pooled;
         let vec_a = &mut ws.vec_a;
         let vec_b = &mut ws.vec_b;
+        let vall = &mut ws.vall;
         let pass_logits = &mut ws.pass_logits;
         let out_policy = &mut ws.out_policy;
         let out_value = &mut ws.out_value;
@@ -506,12 +505,8 @@ impl CudaModel {
                     bias1,
                     l2,
                     l2_bias,
-                    value_w,
-                    value_b,
-                    misc_w,
-                    misc_b,
-                    moremisc_w,
-                    moremisc_b,
+                    vall_w,
+                    vall_b,
                     own_w,
                     mask_scale,
                     mask_quad,
@@ -524,13 +519,13 @@ impl CudaModel {
                     // linear2 + bias + SiLU（f32×f16 混合小 GEMM）
                     sgemm(rt, pooled, l2, vec_a, batch)?;
                     bias_silu_f32(rt, vec_a, &l2_bias.data, batch * 192, 192)?;
-                    // 三个输出 Gemm（+bias）
-                    sgemm(rt, vec_a, value_w, out_value, batch)?;
-                    f32_bias_add(rt, out_value, &value_b.data, batch * 3, 3)?;
-                    sgemm(rt, vec_a, misc_w, out_misc, batch)?;
-                    f32_bias_add(rt, out_misc, &misc_b.data, batch * 10, 10)?;
-                    sgemm(rt, vec_a, moremisc_w, out_moremisc, batch)?;
-                    f32_bias_add(rt, out_moremisc, &moremisc_b.data, batch * 8, 8)?;
+                    // 合并输出 Gemm（G4：value/misc/moremisc 合一 [B,21]）+
+                    // bias_add 拆分写（-4 kernel）
+                    sgemm(rt, vec_a, vall_w, vall, batch)?;
+                    f32_bias_add_split(
+                        rt, vall, &vall_b.data, out_value, out_misc, out_moremisc,
+                        3, 10, 8, batch,
+                    )?;
                     // ownership 1x1（×mask 恒 1，省略；v_act 为 f16 激活流）
                     hgemm(rt, p192, own_w, out_ownership, m)?;
                     false
@@ -760,12 +755,21 @@ fn upload_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
             bias1: upload_param(stream, &l.bias1, 192)?,
             l2: upload_weight(stream, &l.linear2_weight, 192, 576)?,
             l2_bias: upload_param(stream, &l.linear2_bias, 192)?,
-            value_w: upload_weight(stream, &l.value_matmul, 3, 192)?,
-            value_b: upload_param(stream, &l.value_bias, 3)?,
-            misc_w: upload_weight(stream, &l.misc_matmul, 10, 192)?,
-            misc_b: upload_param(stream, &l.misc_bias, 10)?,
-            moremisc_w: upload_weight(stream, &l.moremisc_matmul, 8, 192)?,
-            moremisc_b: upload_param(stream, &l.moremisc_bias, 8)?,
+            // value/misc/moremisc 三输出合并 [21, 192] + bias [21]
+            vall_w: upload_weight_concat3(
+                stream,
+                &l.value_matmul,
+                &l.misc_matmul,
+                &l.moremisc_matmul,
+                &[3, 10, 8],
+                192,
+            )?,
+            vall_b: upload_param_concat3(
+                stream,
+                &l.value_bias,
+                &l.misc_bias,
+                &l.moremisc_bias,
+            )?,
             own_w: upload_weight(stream, &l.ownership_conv, 1, 192)?,
             mask_scale: l.mask_scale,
             mask_quad: l.mask_quad,
@@ -824,6 +828,60 @@ fn upload_weight_concat2(
         .memcpy_htod(host.as_slice(), &mut dev)
         .map_err(|e| e.to_string())?;
     Ok(WeightBuf { data: dev, n: 2 * n_each, k, kp })
+}
+
+/// 三个权重行拼接上传（G4 ValueHead 输出合并）：[t1; t2; t3] → [Σn, k]。
+fn upload_weight_concat3(
+    stream: &StreamRef,
+    t1: &Tensor,
+    t2: &Tensor,
+    t3: &Tensor,
+    ns: &[usize; 3],
+    k: usize,
+) -> Result<WeightBuf, String> {
+    let (d1, d2, d3) = match (&t1.data, &t2.data, &t3.data) {
+        (TensorData::F32(a), TensorData::F32(b), TensorData::F32(c)) => (a, b, c),
+        _ => panic!("层图权重必须是 F32"),
+    };
+    assert_eq!(d1.len(), ns[0] * k);
+    assert_eq!(d2.len(), ns[1] * k);
+    assert_eq!(d3.len(), ns[2] * k);
+    let kp = k.div_ceil(16) * 16;
+    let total_n = ns[0] + ns[1] + ns[2];
+    let mut host = vec![0u16; total_n * kp];
+    for (ti, (d, n0)) in [(d1, ns[0]), (d2, ns[1]), (d3, ns[2])].iter().enumerate() {
+        let base: usize = ns[..ti].iter().sum();
+        for i in 0..*n0 {
+            for j in 0..k {
+                host[(base + i) * kp + j] = f32_to_f16_bits(d[i * k + j]);
+            }
+        }
+    }
+    let mut dev: CudaSlice<u16> = unsafe { stream.alloc(total_n * kp) }.map_err(|e| e.to_string())?;
+    stream
+        .memcpy_htod(host.as_slice(), &mut dev)
+        .map_err(|e| e.to_string())?;
+    Ok(WeightBuf { data: dev, n: total_n, k, kp })
+}
+
+/// 三个 f32 参数向量拼接上传。
+fn upload_param_concat3(
+    stream: &StreamRef,
+    t1: &Tensor,
+    t2: &Tensor,
+    t3: &Tensor,
+) -> Result<ParamBuf, String> {
+    let (d1, d2, d3) = match (&t1.data, &t2.data, &t3.data) {
+        (TensorData::F32(a), TensorData::F32(b), TensorData::F32(c)) => (a, b, c),
+        _ => panic!("层图参数必须是 F32"),
+    };
+    let mut host = Vec::with_capacity(d1.len() + d2.len() + d3.len());
+    host.extend_from_slice(d1);
+    host.extend_from_slice(d2);
+    host.extend_from_slice(d3);
+    let mut dev: CudaSlice<f32> = unsafe { stream.alloc(host.len()) }.map_err(|e| e.to_string())?;
+    stream.memcpy_htod(host.as_slice(), &mut dev).map_err(|e| e.to_string())?;
+    Ok(ParamBuf { data: dev, len: host.len() })
 }
 
 fn upload_param(stream: &StreamRef, t: &Tensor, len: usize) -> Result<ParamBuf, String> {
@@ -1286,6 +1344,42 @@ fn f32_bias_add(
     Ok(())
 }
 
+/// 合并 bias_add + 拆分写（G4 ValueHead）：in [B,21] + bias[21] →
+/// out0 [B,3] / out1 [B,10] / out2 [B,8]。
+#[allow(clippy::too_many_arguments)]
+fn f32_bias_add_split(
+    rt: &CudaRuntime,
+    x: &CudaSlice<f32>,
+    bias: &CudaSlice<f32>,
+    out0: &mut CudaSlice<f32>,
+    out1: &mut CudaSlice<f32>,
+    out2: &mut CudaSlice<f32>,
+    n0: usize,
+    n1: usize,
+    n2: usize,
+    batch: usize,
+) -> Result<(), String> {
+    let f = rt.get_func("f32_bias_add_split_kernel")?;
+    let stream = active_stream(rt);
+    let n = batch * (n0 + n1 + n2);
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(x)
+            .arg(bias)
+            .arg(out0)
+            .arg(out1)
+            .arg(out2)
+            .arg(&(n0 as i32))
+            .arg(&(n1 as i32))
+            .arg(&(n2 as i32))
+            .arg(&(batch as i32))
+            .launch(LaunchConfig::for_num_elems(n as u32))
+    }
+    .map_err(|e| format!("f32_bias_add_split launch failed: {e}"))?;
+    Ok(())
+}
+
 
 fn f32_to_f16(
     rt: &CudaRuntime,
@@ -1742,6 +1836,8 @@ pub struct CudaWorkspace {
     pub pooled: CudaSlice<f32>,
     pub vec_a: CudaSlice<f32>,
     pub vec_b: CudaSlice<f32>,
+    /// ValueHead 合并输出 [B,21]（value|misc|moremisc，G4 头融合）。
+    pub vall: CudaSlice<f32>,
     pub pass_logits: CudaSlice<f32>,
     /// `[B, 6, 362]` 策略 logits（通道 0 基策略、通道 5 乐观策略，pass 位 361）。
     pub out_policy: CudaSlice<f32>,
@@ -1786,6 +1882,7 @@ impl CudaWorkspace {
             pooled: zeros32(stream, batch * 576)?,
             vec_a: zeros32(stream, batch * 192)?,
             vec_b: zeros32(stream, batch * 96)?,
+            vall: zeros32(stream, batch * 21)?,
             pass_logits: zeros32(stream, batch * 6)?,
             out_policy: zeros32(stream, batch * 6 * (s + 1))?,
             out_value: zeros32(stream, batch * 3)?,
