@@ -1478,9 +1478,9 @@ fn attention_row(
 ) -> Result<(), String> {
     assert!(s <= 512, "attention_row 要求 S <= 512");
     assert_eq!(d, 32, "attention 要求 D=32（smem/打包布局按 D=32 编译期定）");
-    // FA2（tensor core）仍有值域相关数值偏差未收敛（repro 单 tile V=1 下
-    // sum 偏差 ~9%），默认走 v3；KATAGO_CUDA_ATTN=fa2 显式启用 FA2 供调试。
-    let use_v3 = std::env::var("KATAGO_CUDA_ATTN").as_deref() != Ok("fa2");
+    // 默认 FA2（tensor core QK + 标量 PV，对拍已验证）；
+    // KATAGO_CUDA_ATTN=v3 回退旧 kernel（数值对照兜底）。
+    let use_v3 = std::env::var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3");
     // v3（warp-per-row 标量点积，数值已验证）；
     // 输出直接写 merge 后布局 [B*S, H*D]（省 attn_merge 独立 kernel）。
     let f = if use_v3 {

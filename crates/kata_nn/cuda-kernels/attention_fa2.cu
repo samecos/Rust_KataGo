@@ -119,10 +119,10 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
     }
     fa2_cp_commit();
 
-    // ---- PV 累加器（1 M 步 × 4 N 步 × 4 f32）与 online softmax 状态 ----
-    float acc[4][4];
+    // ---- PV 累加器（诊断标量版：每 warp 16 行 × 32 列，每 lane 2 列对） ----
+    float acc[8][4];  // [j 窗口][(lane%4)*2/+1 两列 × low/high 行]
 #pragma unroll
-    for (int j = 0; j < 4; ++j)
+    for (int j = 0; j < 8; ++j)
 #pragma unroll
         for (int r = 0; r < 4; ++r) acc[j][r] = 0.0f;
     // 每 lane 2 行：low = warpM + lane/4，high = low + 8。
@@ -270,7 +270,7 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
             m_hi = n_hi;
             // 旧 acc rescale
 #pragma unroll
-            for (int j = 0; j < 4; ++j) {
+            for (int j = 0; j < 8; ++j) {
                 acc[j][0] *= a_lo;
                 acc[j][1] *= a_lo;
                 acc[j][2] *= a_hi;
@@ -295,50 +295,42 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
         }
         __syncthreads();
 
-        // ---- PV：O[128,32] += P[128,64] @ V[64,32] ----
-        // mma B 是 [k16, n8]（k = keys 方向，n = d 方向）：
-        // 每 ks 步（16 keys）的 B 片段 = 2 个 8-key 行组 × 8 d 列。
-        // V smem [64 keys, 32 d] 打包：ldmatrix m0=(k0..7,d0..7),
-        // m1=(k0..7,d8..15), m2=(k8..15,d0..7), m3=(k8..15,d8..15)。
-        // B(k0..15, d0..7) = (m0, m2)；B(k0..15, d8..15) = (m1, m3)。
-        const unsigned vbase = (unsigned)__cvta_generic_to_shared(s_v[stage]);
-        const unsigned pbase = (unsigned)__cvta_generic_to_shared(s_p);
-        unsigned v_frag[4][2][4];  // [ks][d 半窗口(0..15 / 16..31)][m0..m3]
+        // ---- PV 诊断标量版：acc[row,d] += Σ_key P[row,key]·V[key,d] ----
+        // 用寄存器 sc（e 值）直接乘 V smem，排除 mma 路径（二分定位）。
+        {
 #pragma unroll
-        for (int ks = 0; ks < 4; ++ks) {
+            for (int dd = 0; dd < 32; ++dd) {
+                float a_lo = 0.0f;
+                float a_hi = 0.0f;
 #pragma unroll
-            for (int dh = 0; dh < 2; ++dh) {
-                const unsigned b_base =
-                    vbase + ((ks * 16) >> 3) * 512 + dh * 256;
-                fa2_ldmatrix_x4(v_frag[ks][dh][0], v_frag[ks][dh][1],
-                                v_frag[ks][dh][2], v_frag[ks][dh][3],
-                                b_base, 512, lane);
-            }
-        }
+                for (int j = 0; j < 8; ++j) {
+                    const int k0 = (lane % 4) * 2 + j * 8;
+                    const int k1 = k0 + 1;
+                    const float v0 = __half2float(*reinterpret_cast<const __half*>(
+                        reinterpret_cast<const char*>(s_v[stage]) +
+                        fa2_smem_off(k0, dd)));
+                    const float v1 = __half2float(*reinterpret_cast<const __half*>(
+                        reinterpret_cast<const char*>(s_v[stage]) +
+                        fa2_smem_off(k1, dd)));
+                    a_lo += sc[j][0] * v0 + sc[j][1] * v1;
+                    a_hi += sc[j][2] * v0 + sc[j][3] * v1;
+                }
+                // 4-lane 归约（每行 64 keys 由 4 lane 覆盖）
 #pragma unroll
-        for (int ks = 0; ks < 4; ++ks) {
-            unsigned p_frag[4];
-            const unsigned a_base =
-                pbase + (((warpM) >> 3) << 9) + ks * 256;
-            fa2_ldmatrix_x4(p_frag[0], p_frag[1], p_frag[2], p_frag[3],
-                            a_base, 512, lane);
-            const unsigned a0 = p_frag[0];
-            const unsigned a1 = p_frag[2];
-            const unsigned a2 = p_frag[1];
-            const unsigned a3 = p_frag[3];
-#pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                const int dh = j >> 1;
-                const unsigned b0 = (j & 1) ? v_frag[ks][dh][1]
-                                            : v_frag[ks][dh][0];
-                const unsigned b1 = (j & 1) ? v_frag[ks][dh][3]
-                                            : v_frag[ks][dh][2];
-                asm volatile(
-                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-                    : "+f"(acc[j][0]), "+f"(acc[j][1]), "+f"(acc[j][2]),
-                      "+f"(acc[j][3])
-                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+                for (int off = 1; off < 4; off <<= 1) {
+                    a_lo += __shfl_xor_sync(0xffffffffu, a_lo, off);
+                    a_hi += __shfl_xor_sync(0xffffffffu, a_hi, off);
+                }
+                // 累加进 acc：列 dd 对应槽位 ((lane%4)*2/+1 两列 × low/high 行)
+                const int t = dd >> 3;
+                const int in8 = dd & 7;
+                if ((lane % 4) * 2 == in8) {
+                    acc[t][0] += a_lo;
+                    acc[t][2] += a_hi;
+                } else if ((lane % 4) * 2 + 1 == in8) {
+                    acc[t][1] += a_lo;
+                    acc[t][3] += a_hi;
+                }
             }
         }
         __syncthreads();
@@ -355,6 +347,7 @@ attention_fa2_kernel(const __half* __restrict__ q,  // [B*H, S, 32]
         __half* orow_hi = orow_lo + 8 * heads * 32;
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
+            // 写回的 j 是 d 窗口(4 个 8 列 = 32 列):acc[t] 的槽位对
             const int pcol = (lane % 4) * 2 + j * 8;
             if (row0 + prow_lo < s) {
                 orow_lo[pcol] = __float2half_rn(acc[j][0] * inv_lo);
