@@ -248,6 +248,17 @@ impl Drop for SearchThread {
     }
 }
 
+// SAFETY: A `SearchThread` is owned by exactly one playout worker for the
+// duration of a search. Its otherwise-`!Send` fields are thread-private
+// scratch state that never outlives the owning worker:
+// - `graph_path` holds raw pointers to tree nodes that stay alive for the
+//   whole search (owned by `Search::root_node` / the node table) and is only
+//   read by the owning thread;
+// - `old_nn_outputs_to_clean_up` owns `Box<Arc<NNOutput>>` allocations that
+//   are transferred to the shared cleanup buffer (or dropped by `Drop`) before
+//   the thread terminates, never concurrently.
+unsafe impl Send for SearchThread {}
+
 impl crate::node::SearchThread for SearchThread {
     fn old_nn_outputs_to_clean_up(&mut self) -> &mut Vec<*mut Arc<NNOutput>> {
         &mut self.old_nn_outputs_to_clean_up
@@ -329,6 +340,85 @@ pub struct Search<'a> {
     pub old_nn_outputs_to_clean_up_mutex: Mutex<()>,
     pub old_nn_outputs_to_clean_up: Vec<*mut Arc<NNOutput>>,
 }
+
+/// Shared access to a `Search` from the parallel playout worker threads.
+///
+/// The playout path (`run_single_playout` and its helpers) only reads the
+/// `Search` configuration and tables; every piece of tree state it mutates is
+/// reached through interior mutability: node fields are atomics, stats are
+/// updated under the per-node spinlock, the child-array growth is serialized
+/// by the node state machine (CAS on `state`), and the node table / mutex pool
+/// shards are `parking_lot` mutexes. Fields that genuinely need `&mut Search`
+/// (root node, node table, `non_search_rand`, `old_nn_outputs_to_clean_up`, …)
+/// are not touched by the workers; the main thread only writes the shared
+/// stop/limit atomics during the parallel phase and resumes exclusive `&mut`
+/// access after all workers have joined via `std::thread::scope`.
+///
+/// # Safety
+///
+/// - `Send`: workers only call `&self` methods through this reference, and all
+///   writes performed on their behalf target interior-mutable state, so moving
+///   the reference into a worker thread introduces no aliasing `&mut`.
+/// - `Sync`: multiple workers may hold copies of the same `&Search`; the same
+///   interior-mutability argument applies for concurrent access.
+struct SearchPlayoutRef<'b, 'a>(&'b Search<'a>);
+
+unsafe impl<'b, 'a> Send for SearchPlayoutRef<'b, 'a> {}
+unsafe impl<'b, 'a> Sync for SearchPlayoutRef<'b, 'a> {}
+
+impl<'b, 'a> Clone for SearchPlayoutRef<'b, 'a> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<'b, 'a> Copy for SearchPlayoutRef<'b, 'a> {}
+
+impl<'b, 'a> SearchPlayoutRef<'b, 'a> {
+    /// Run one playout against the shared tree.
+    ///
+    /// Method (rather than direct field access) so that closures capture the
+    /// whole `SearchPlayoutRef` — which carries the `unsafe impl Send/Sync` —
+    /// instead of precisely capturing the inner `&Search` reference.
+    fn run_single_playout(
+        &self,
+        thread: &mut SearchThread,
+        upper_bound_visits_left: f64,
+        root_ptr: RootNodePtr,
+    ) -> bool {
+        self.0
+            .run_single_playout(thread, upper_bound_visits_left, root_ptr.0)
+    }
+}
+
+/// Raw pointer to the search root node, shared with playout worker threads.
+///
+/// # Safety
+///
+/// The root `Box<SearchNode>` is owned by `Search::root_node`, which is never
+/// replaced or dropped during a search, so the pointer stays valid for the
+/// whole parallel phase. Workers only access the node through interior
+/// mutability (atomics, the node state-machine CAS, the stats spinlock), which
+/// is what makes concurrent playouts through the same tree sound — the same
+/// argument as in the C++ original.
+#[derive(Clone, Copy)]
+struct RootNodePtr(*mut SearchNode);
+
+unsafe impl Send for RootNodePtr {}
+unsafe impl Sync for RootNodePtr {}
+
+/// Buffer for old NN outputs collected by parallel playout workers.
+///
+/// # Safety
+///
+/// The raw pointers are `Box<Arc<NNOutput>>` allocations owned by exactly one
+/// `Vec` at a time: each worker drains its thread-local
+/// `SearchThread::old_nn_outputs_to_clean_up` into this shared buffer, and the
+/// main thread drains it into `Search::old_nn_outputs_to_clean_up` only after
+/// all workers have joined. Ownership never overlaps, so moving the pointers
+/// between threads cannot create aliasing or double frees.
+struct OldNNOutputBuffer(Vec<*mut Arc<NNOutput>>);
+
+unsafe impl Send for OldNNOutputBuffer {}
 
 impl<'a> Search<'a> {
     const POLICY_ILLEGAL_SELECTION_VALUE: f64 = -1e50;
@@ -779,8 +869,10 @@ impl<'a> Search<'a> {
         use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 
         let timer = ClockTimer::new();
-        let num_playouts_shared = AtomicI64::new(0);
-        let should_stop_now = AtomicBool::new(false);
+        // Shared stop/limit state: `Arc` so the parallel playout workers and the
+        // controller thread can each hold their own copy.
+        let num_playouts_shared = std::sync::Arc::new(AtomicI64::new(0));
+        let should_stop_now = std::sync::Arc::new(AtomicBool::new(false));
 
         self.begin_search(pondering);
         if let Some(cb) = search_begun {
@@ -825,10 +917,10 @@ impl<'a> Search<'a> {
         let cap_threads = 0x3fff_ffff_i32;
         let _ = cap_threads;
 
-        let upper_bound_visits_left_due_to_time = AtomicI64::new(0);
+        let upper_bound_visits_left_due_to_time = std::sync::Arc::new(AtomicI64::new(0));
         let has_max_time = max_time < 1.0e12;
         let has_tc = !pondering && !tc.is_effectively_unlimited_time();
-        let tc_max_time_value = AtomicI64::new(0);
+        let tc_max_time_value = std::sync::Arc::new(AtomicI64::new(0));
 
         if !pondering && (has_tc || has_max_time) {
             let num_playouts = num_playouts_shared.load(AtomicOrdering::Relaxed);
@@ -850,83 +942,232 @@ impl<'a> Search<'a> {
         }
 
         let actual_search_start_time = timer.get_seconds();
-        let mut last_time_used_recomputing_tc_limit = 0.0;
-        let mut num_playouts = 0_i64;
+        // The root node is guaranteed to exist after `begin_search`; the
+        // pointer stays valid for the whole search (the root Box is never
+        // replaced mid-search), so workers can share it without re-deriving it
+        // from `&self`.
+        let root_ptr = RootNodePtr(self.root_node.as_deref_mut().unwrap() as *mut SearchNode);
 
-        loop {
-            let time_used = if has_tc || has_max_time {
-                timer.get_seconds()
-            } else {
-                0.0
-            };
+        let num_threads = self.search_params.num_threads.max(1);
+        if num_threads <= 1 {
+            // Single-threaded fallback: identical to the original serial loop
+            // so that `num_threads = 1` keeps bit-for-bit the same behaviour
+            // and performance as before parallelization.
+            let mut last_time_used_recomputing_tc_limit = 0.0;
+            let mut num_playouts = 0_i64;
 
-            let tc_max_time_limit = if has_tc {
-                f64::from_bits(tc_max_time_value.load(AtomicOrdering::Acquire) as u64)
-            } else {
-                0.0
-            };
+            loop {
+                let time_used = if has_tc || has_max_time {
+                    timer.get_seconds()
+                } else {
+                    0.0
+                };
 
-            let mut should_stop =
-                num_playouts >= max_playouts || num_playouts + num_non_playout_visits >= max_visits;
+                let tc_max_time_limit = if has_tc {
+                    f64::from_bits(tc_max_time_value.load(AtomicOrdering::Acquire) as u64)
+                } else {
+                    0.0
+                };
 
-            if has_max_time && num_playouts >= 2 && time_used >= max_time {
-                should_stop = true;
-            }
-            if has_tc && num_playouts >= 2 && time_used >= tc_max_time_limit {
-                should_stop = true;
-            }
-            if let Some(stop) = should_stop_early {
-                if stop() {
+                let mut should_stop = num_playouts >= max_playouts
+                    || num_playouts + num_non_playout_visits >= max_visits;
+
+                if has_max_time && num_playouts >= 2 && time_used >= max_time {
                     should_stop = true;
                 }
-            }
-
-            if should_stop || should_stop_now.load(AtomicOrdering::Relaxed) {
-                should_stop_now.store(true, AtomicOrdering::Relaxed);
-                break;
-            }
-
-            if !pondering
-                && (has_tc || has_max_time)
-                && time_used >= last_time_used_recomputing_tc_limit + 0.1
-            {
-                let root_visits = num_playouts + num_non_playout_visits;
-                let mut tc_limit = 1e30;
-                if has_tc {
-                    tc_limit =
-                        self.recompute_search_time_limit(tc, time_used, search_factor, root_visits);
-                    tc_max_time_value.store(tc_limit.to_bits() as i64, AtomicOrdering::Release);
+                if has_tc && num_playouts >= 2 && time_used >= tc_max_time_limit {
+                    should_stop = true;
                 }
-                let upper_bound = self.compute_upper_bound_visits_left_due_to_time(
-                    root_visits,
-                    time_used,
-                    tc_limit.min(max_time),
-                );
-                upper_bound_visits_left_due_to_time
-                    .store(upper_bound.to_bits() as i64, AtomicOrdering::Release);
-                last_time_used_recomputing_tc_limit = time_used;
-            }
+                if let Some(stop) = should_stop_early {
+                    if stop() {
+                        should_stop = true;
+                    }
+                }
 
-            let mut upper_bound_visits_left = 1e30;
-            if has_tc {
-                upper_bound_visits_left = f64::from_bits(
-                    upper_bound_visits_left_due_to_time.load(AtomicOrdering::Acquire) as u64,
-                );
-            }
-            upper_bound_visits_left =
-                upper_bound_visits_left.min(max_playouts as f64 - num_playouts as f64);
-            upper_bound_visits_left = upper_bound_visits_left
-                .min(max_visits as f64 - num_playouts as f64 - num_non_playout_visits as f64);
+                if should_stop || should_stop_now.load(AtomicOrdering::Relaxed) {
+                    should_stop_now.store(true, AtomicOrdering::Relaxed);
+                    break;
+                }
 
-            let mut thread = SearchThread::new(0, &*self);
-            let finished = self.run_single_playout(&mut thread, upper_bound_visits_left);
-            if finished {
-                num_playouts += 1;
-                num_playouts_shared.fetch_add(1, AtomicOrdering::Relaxed);
-            } else {
-                std::thread::yield_now();
+                if !pondering
+                    && (has_tc || has_max_time)
+                    && time_used >= last_time_used_recomputing_tc_limit + 0.1
+                {
+                    let root_visits = num_playouts + num_non_playout_visits;
+                    let mut tc_limit = 1e30;
+                    if has_tc {
+                        tc_limit = self
+                            .recompute_search_time_limit(tc, time_used, search_factor, root_visits);
+                        tc_max_time_value.store(tc_limit.to_bits() as i64, AtomicOrdering::Release);
+                    }
+                    let upper_bound = self.compute_upper_bound_visits_left_due_to_time(
+                        root_visits,
+                        time_used,
+                        tc_limit.min(max_time),
+                    );
+                    upper_bound_visits_left_due_to_time
+                        .store(upper_bound.to_bits() as i64, AtomicOrdering::Release);
+                    last_time_used_recomputing_tc_limit = time_used;
+                }
+
+                let mut upper_bound_visits_left = 1e30;
+                if has_tc {
+                    upper_bound_visits_left = f64::from_bits(
+                        upper_bound_visits_left_due_to_time.load(AtomicOrdering::Acquire) as u64,
+                    );
+                }
+                upper_bound_visits_left =
+                    upper_bound_visits_left.min(max_playouts as f64 - num_playouts as f64);
+                upper_bound_visits_left = upper_bound_visits_left
+                    .min(max_visits as f64 - num_playouts as f64 - num_non_playout_visits as f64);
+
+                let mut thread = SearchThread::new(0, &*self);
+                let finished =
+                    self.run_single_playout(&mut thread, upper_bound_visits_left, root_ptr.0);
+                if finished {
+                    num_playouts += 1;
+                    num_playouts_shared.fetch_add(1, AtomicOrdering::Relaxed);
+                } else {
+                    std::thread::yield_now();
+                }
+                self.transfer_old_nn_outputs(&mut thread);
             }
-            self.transfer_old_nn_outputs(&mut thread);
+        } else {
+            // Parallel playout: `num_threads` workers each run playouts against
+            // the shared tree (node access is already thread-safe via the CAS
+            // state machine, per-node stats spinlock and sharded node table, as
+            // in the C++ original), so NN requests now arrive at the backend
+            // concurrently and can be batched. The main thread acts as a
+            // controller: it enforces the stop conditions
+            // (max_visits/max_playouts/max_time/should_stop_early) and
+            // periodically recomputes the time-control limit, exactly as the
+            // serial loop did per-iteration.
+            let search_shared = SearchPlayoutRef(&*self);
+            let old_outputs =
+                std::sync::Arc::new(std::sync::Mutex::new(OldNNOutputBuffer(Vec::new())));
+            let mut last_time_used_recomputing_tc_limit = 0.0;
+
+            std::thread::scope(|s| {
+                for worker_idx in 0..num_threads {
+                    let thread = SearchThread::new(worker_idx, &*self);
+                    let search_shared = search_shared;
+                    let old_outputs = std::sync::Arc::clone(&old_outputs);
+                    let should_stop_now = std::sync::Arc::clone(&should_stop_now);
+                    let num_playouts_shared = std::sync::Arc::clone(&num_playouts_shared);
+                    let upper_bound_visits_left_due_to_time =
+                        std::sync::Arc::clone(&upper_bound_visits_left_due_to_time);
+                    s.spawn(move || {
+                        let mut thread = thread;
+                        loop {
+                            if should_stop_now.load(AtomicOrdering::Relaxed) {
+                                break;
+                            }
+                            let num_playouts =
+                                num_playouts_shared.load(AtomicOrdering::Relaxed);
+                            let mut upper_bound_visits_left = if has_tc {
+                                f64::from_bits(
+                                    upper_bound_visits_left_due_to_time
+                                        .load(AtomicOrdering::Acquire) as u64,
+                                )
+                            } else {
+                                1e30
+                            };
+                            upper_bound_visits_left = upper_bound_visits_left
+                                .min(max_playouts as f64 - num_playouts as f64);
+                            upper_bound_visits_left = upper_bound_visits_left.min(
+                                max_visits as f64 - num_playouts as f64
+                                    - num_non_playout_visits as f64,
+                            );
+
+                            let finished = search_shared.run_single_playout(
+                                &mut thread,
+                                upper_bound_visits_left,
+                                root_ptr,
+                            );
+                            if finished {
+                                num_playouts_shared.fetch_add(1, AtomicOrdering::Relaxed);
+                            } else {
+                                std::thread::yield_now();
+                            }
+                        }
+                        // Hand the worker's lazily-collected old NN outputs to
+                        // the shared buffer for cleanup by the main thread.
+                        old_outputs
+                            .lock()
+                            .unwrap()
+                            .0
+                            .append(&mut thread.old_nn_outputs_to_clean_up);
+                    });
+                }
+
+                // Controller: same stop logic as the serial loop, driven by the
+                // shared playout counter.
+                loop {
+                    if should_stop_now.load(AtomicOrdering::Relaxed) {
+                        break;
+                    }
+                    let time_used = if has_tc || has_max_time {
+                        timer.get_seconds()
+                    } else {
+                        0.0
+                    };
+                    let tc_max_time_limit = if has_tc {
+                        f64::from_bits(tc_max_time_value.load(AtomicOrdering::Acquire) as u64)
+                    } else {
+                        0.0
+                    };
+
+                    let num_playouts = num_playouts_shared.load(AtomicOrdering::Relaxed);
+                    let mut should_stop = num_playouts >= max_playouts
+                        || num_playouts + num_non_playout_visits >= max_visits;
+                    if has_max_time && num_playouts >= 2 && time_used >= max_time {
+                        should_stop = true;
+                    }
+                    if has_tc && num_playouts >= 2 && time_used >= tc_max_time_limit {
+                        should_stop = true;
+                    }
+                    if let Some(stop) = should_stop_early {
+                        if stop() {
+                            should_stop = true;
+                        }
+                    }
+                    if should_stop {
+                        should_stop_now.store(true, AtomicOrdering::Relaxed);
+                        break;
+                    }
+
+                    if !pondering
+                        && (has_tc || has_max_time)
+                        && time_used >= last_time_used_recomputing_tc_limit + 0.1
+                    {
+                        let root_visits = num_playouts + num_non_playout_visits;
+                        let mut tc_limit = 1e30;
+                        if has_tc {
+                            tc_limit = self.recompute_search_time_limit(
+                                tc,
+                                time_used,
+                                search_factor,
+                                root_visits,
+                            );
+                            tc_max_time_value
+                                .store(tc_limit.to_bits() as i64, AtomicOrdering::Release);
+                        }
+                        let upper_bound = self.compute_upper_bound_visits_left_due_to_time(
+                            root_visits,
+                            time_used,
+                            tc_limit.min(max_time),
+                        );
+                        upper_bound_visits_left_due_to_time
+                            .store(upper_bound.to_bits() as i64, AtomicOrdering::Release);
+                        last_time_used_recomputing_tc_limit = time_used;
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+            });
+
+            self.old_nn_outputs_to_clean_up
+                .append(&mut old_outputs.lock().unwrap().0);
         }
 
         if self.root_node.is_some() {
@@ -1234,15 +1475,24 @@ impl<'a> Search<'a> {
         self.search_node_age = self.search_node_age.wrapping_add(1);
     }
 
+    /// Run a single playout from the root, returning whether it counted toward
+    /// the playout total.
+    ///
+    /// `root_ptr` must point at the root node owned by `self.root_node`, which
+    /// is stable for the duration of a search. It is passed in (rather than
+    /// derived from `&self`) so that the playout path can be called through a
+    /// shared `&Search` reference from multiple worker threads; the tree nodes
+    /// are accessed exclusively through interior mutability (atomics, spinlock
+    /// stats, CAS state machine) as in the C++ original.
     pub fn run_single_playout(
-        &mut self,
+        &self,
         thread: &mut SearchThread,
         upper_bound_visits_left: f64,
+        root_ptr: *mut SearchNode,
     ) -> bool {
         thread.upper_bound_visits_left = upper_bound_visits_left;
         thread.should_count_playout = true;
 
-        let root_ptr = self.root_node.as_deref_mut().unwrap() as *mut SearchNode;
         let _finished = unsafe { self.playout_descend(thread, &mut *root_ptr, true) };
 
         thread.pla = self.root_pla;
@@ -5291,7 +5541,7 @@ impl<'a> Search<'a> {
     }
 
     fn init_node_nn_output(
-        &mut self,
+        &self,
         thread: &mut SearchThread,
         node: &mut SearchNode,
         is_root: bool,
@@ -5510,7 +5760,7 @@ impl<'a> Search<'a> {
     }
 
     fn maybe_recompute_existing_nn_output(
-        &mut self,
+        &self,
         thread: &mut SearchThread,
         node: &mut SearchNode,
         is_root: bool,
@@ -6607,7 +6857,7 @@ impl<'a> Search<'a> {
 impl<'a> Search<'a> {
     #[allow(clippy::too_many_arguments)]
     fn add_leaf_value(
-        &mut self,
+        &self,
         node: &mut SearchNode,
         win_loss_value: f64,
         no_result_value: f64,
@@ -6719,7 +6969,7 @@ impl<'a> Search<'a> {
     }
 
     fn add_current_nn_output_as_leaf_value(
-        &mut self,
+        &self,
         node: &mut SearchNode,
         assume_no_existing_weight: bool,
     ) {
@@ -6813,7 +7063,7 @@ impl<'a> Search<'a> {
     }
 
     fn update_stats_after_playout(
-        &mut self,
+        &self,
         node: &mut SearchNode,
         thread: &mut SearchThread,
         is_root: bool,
@@ -6839,7 +7089,7 @@ impl<'a> Search<'a> {
     }
 
     fn recompute_node_stats(
-        &mut self,
+        &self,
         node: &mut SearchNode,
         thread: &mut SearchThread,
         num_visits_to_add: i32,
@@ -7286,7 +7536,7 @@ impl<'a> Search<'a> {
     }
 
     fn allocate_or_find_node(
-        &mut self,
+        &self,
         thread: &mut SearchThread,
         next_pla: Player,
         best_child_move_loc: Loc,
@@ -7606,7 +7856,7 @@ impl<'a> Search<'a> {
     }
 
     fn playout_descend(
-        &mut self,
+        &self,
         thread: &mut SearchThread,
         node: &mut SearchNode,
         is_root: bool,
@@ -7934,7 +8184,7 @@ impl<'a> Search<'a> {
     }
 
     fn maybe_catch_up_edge_visits(
-        &mut self,
+        &self,
         thread: &mut SearchThread,
         node: &mut SearchNode,
         child: Option<&SearchNode>,

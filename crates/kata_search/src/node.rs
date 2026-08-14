@@ -310,9 +310,20 @@ impl SearchChildPointer {
     }
 
     pub fn compare_exchange_weak_edge_visits(&self, expected: &mut i64, desired: i64) -> bool {
-        self.edge_visits
+        // On a failed CAS the atomic reports the actual value in `Err`; write
+        // it back into `expected` so that callers looping on this (e.g.
+        // `maybe_catch_up_edge_visits`) see the real counter and cannot spin
+        // forever when another thread moves it concurrently.
+        match self
+            .edge_visits
             .compare_exchange_weak(*expected, desired, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        {
+            Ok(_) => true,
+            Err(actual) => {
+                *expected = actual;
+                false
+            }
+        }
     }
 
     pub fn get_move_loc(&self) -> Loc {
