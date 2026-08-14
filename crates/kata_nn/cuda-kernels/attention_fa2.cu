@@ -179,12 +179,10 @@ attention_fa2_kernel(const __half* __restrict__ qkv,  // [M, 1152] packed
     }
     fa2_cp_commit();
 
-    // ---- PV 累加器（标量版：每 warp 16 行 × 32 列，每 lane 2 列对） ----
-    // mma PV 的 V 片段 ldmatrix 布局在值域大时仍错位（repro range≥3 误差 10+），
-    // 标量版对拍 16/16 PASS（误差 3e-5），先交付；mma PV 后续再修。
-    float acc[8][4];  // [j 窗口][(lane%4)*2/+1 两列 × low/high 行]
+    // ---- PV 累加器（mma：1 M 步 × 4 N 步 × 4 f32） ----
+    float acc[4][4];
 #pragma unroll
-    for (int j = 0; j < 8; ++j)
+    for (int j = 0; j < 4; ++j)
 #pragma unroll
         for (int r = 0; r < 4; ++r) acc[j][r] = 0.0f;
     // 每 lane 2 行：low = warpM + lane/4，high = low + 8。
@@ -347,7 +345,7 @@ attention_fa2_kernel(const __half* __restrict__ qkv,  // [M, 1152] packed
             m_hi = n_hi;
             // 旧 acc rescale
 #pragma unroll
-            for (int j = 0; j < 8; ++j) {
+            for (int j = 0; j < 4; ++j) {
                 acc[j][0] *= a_lo;
                 acc[j][1] *= a_lo;
                 acc[j][2] *= a_hi;
@@ -372,39 +370,47 @@ attention_fa2_kernel(const __half* __restrict__ qkv,  // [M, 1152] packed
         }
         __syncthreads();
 
-        // ---- PV 标量版：acc[row,d] += Σ_key P[row,key]·V[key,d] ----
-        {
+        // ---- PV：O[128,32] += P[128,64] @ V[64,32] ----
+        // V 片段 ldmatrix.trans（[keys,d] 行主序 → [k,n] col 主序）；
+        // P 的 A 片段 64 列布局行组 1024B → delta2=1024。
+        const unsigned vbase = (unsigned)__cvta_generic_to_shared(s_v[stage]);
+        const unsigned pbase = (unsigned)__cvta_generic_to_shared(s_p);
+        unsigned v_frag[4][2][4];  // [ks][d 半窗口][m0..m3]
 #pragma unroll
-            for (int dd = 0; dd < 32; ++dd) {
-                float a_lo = 0.0f;
-                float a_hi = 0.0f;
+        for (int ks = 0; ks < 4; ++ks) {
 #pragma unroll
-                for (int j = 0; j < 8; ++j) {
-                    const int k0 = (lane % 4) * 2 + j * 8;
-                    const int k1 = k0 + 1;
-                    const float v0 = __half2float(*reinterpret_cast<const __half*>(
-                        reinterpret_cast<const char*>(s_v[stage]) +
-                        fa2_smem_off(k0, dd)));
-                    const float v1 = __half2float(*reinterpret_cast<const __half*>(
-                        reinterpret_cast<const char*>(s_v[stage]) +
-                        fa2_smem_off(k1, dd)));
-                    a_lo += sc[j][0] * v0 + sc[j][1] * v1;
-                    a_hi += sc[j][2] * v0 + sc[j][3] * v1;
-                }
+            for (int dh = 0; dh < 2; ++dh) {
+                const unsigned b_base =
+                    vbase + ((ks * 16) >> 3) * 512 + dh * 256;
+                fa2_ldmatrix_x4_trans(v_frag[ks][dh][0], v_frag[ks][dh][1],
+                                      v_frag[ks][dh][2], v_frag[ks][dh][3],
+                                      b_base, 512, lane);
+            }
+        }
 #pragma unroll
-                for (int off = 1; off < 4; off <<= 1) {
-                    a_lo += __shfl_xor_sync(0xffffffffu, a_lo, off);
-                    a_hi += __shfl_xor_sync(0xffffffffu, a_hi, off);
-                }
-                const int t = dd >> 3;
-                const int in8 = dd & 7;
-                if ((lane % 4) * 2 == in8) {
-                    acc[t][0] += a_lo;
-                    acc[t][2] += a_hi;
-                } else if ((lane % 4) * 2 + 1 == in8) {
-                    acc[t][1] += a_lo;
-                    acc[t][3] += a_hi;
-                }
+        for (int ks = 0; ks < 4; ++ks) {
+            unsigned p_frag[4];
+            const unsigned a_base =
+                pbase + (((warpM) >> 3) << 10) + ks * 256;
+            fa2_ldmatrix_x4(p_frag[0], p_frag[1], p_frag[2], p_frag[3],
+                            a_base, 1024, lane);
+            const unsigned a0 = p_frag[0];
+            const unsigned a1 = p_frag[2];
+            const unsigned a2 = p_frag[1];
+            const unsigned a3 = p_frag[3];
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int dh = j >> 1;
+                const unsigned b0 = (j & 1) ? v_frag[ks][dh][1]
+                                            : v_frag[ks][dh][0];
+                const unsigned b1 = (j & 1) ? v_frag[ks][dh][3]
+                                            : v_frag[ks][dh][2];
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                    : "+f"(acc[j][0]), "+f"(acc[j][1]), "+f"(acc[j][2]),
+                      "+f"(acc[j][3])
+                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
             }
         }
         __syncthreads();

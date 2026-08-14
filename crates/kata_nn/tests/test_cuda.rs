@@ -331,17 +331,35 @@ fn cuda_attention_fa2_repro() {
     let k: Vec<u16> = (0..n).map(|_| f32_to_f16_bits(rand_f(&mut rng) * range)).collect();
     let v: Vec<u16> = if std::env::var("KATAGO_FA2_VONE").is_ok() {
         (0..n).map(|_| f32_to_f16_bits(1.0f32)).collect()
+    } else if std::env::var("KATAGO_FA2_VIDX").is_ok() {
+        // V[key,d] = key(全局行索引):输出 = Σp·key = 加权 key 均值(诊断 PV 映射)
+        (0..n).map(|i| f32_to_f16_bits(((i / d) % s) as f32)).collect()
     } else {
         (0..n).map(|_| f32_to_f16_bits(rand_f(&mut rng) * range)).collect()
     };
     let stream = rt.device.default_stream();
-    let mut d_q: CudaSlice<u16> = unsafe { stream.alloc(n) }.unwrap();
-    let mut d_k: CudaSlice<u16> = unsafe { stream.alloc(n) }.unwrap();
-    let mut d_v: CudaSlice<u16> = unsafe { stream.alloc(n) }.unwrap();
+    // packed qkv [M,1152]:q/k/v 三缓冲 [BH,S,32] → 行 = b*S+s,列 = seg*384 + h*32 + dd
+    let mut qkv_host = vec![0u16; s * 1152];
+    for hh in 0..h {
+        for ss in 0..s {
+            for dd in 0..d {
+                let src = (hh * s + ss) * d + dd;
+                qkv_host[ss * 1152 + hh * 32 + dd] = q[src];
+                qkv_host[ss * 1152 + 384 + hh * 32 + dd] = k[src];
+                qkv_host[ss * 1152 + 768 + hh * 32 + dd] = v[src];
+            }
+        }
+    }
+    // RoPE 表恒等旋转(cos=1, sin=0)
+    let rope_cos_host = vec![1.0f32; s * 192];
+    let rope_sin_host = vec![0.0f32; s * 192];
+    let mut d_qkv: CudaSlice<u16> = unsafe { stream.alloc(qkv_host.len()) }.unwrap();
+    let mut d_cos: CudaSlice<f32> = unsafe { stream.alloc(s * 192) }.unwrap();
+    let mut d_sin: CudaSlice<f32> = unsafe { stream.alloc(s * 192) }.unwrap();
     let mut d_o: CudaSlice<u16> = stream.alloc_zeros(n).unwrap();
-    stream.memcpy_htod(q.as_slice(), &mut d_q).unwrap();
-    stream.memcpy_htod(k.as_slice(), &mut d_k).unwrap();
-    stream.memcpy_htod(v.as_slice(), &mut d_v).unwrap();
+    stream.memcpy_htod(qkv_host.as_slice(), &mut d_qkv).unwrap();
+    stream.memcpy_htod(rope_cos_host.as_slice(), &mut d_cos).unwrap();
+    stream.memcpy_htod(rope_sin_host.as_slice(), &mut d_sin).unwrap();
     let f = rt.get_func("attention_fa2_kernel").expect("fa2 kernel");
     let scale = 1.0f32 / (d as f32).sqrt();
     let cfg = LaunchConfig {
@@ -352,9 +370,9 @@ fn cuda_attention_fa2_repro() {
     unsafe {
         stream
             .launch_builder(&f)
-            .arg(&d_q)
-            .arg(&d_k)
-            .arg(&d_v)
+            .arg(&d_qkv)
+            .arg(&d_cos)
+            .arg(&d_sin)
             .arg(&mut d_o)
             .arg(&(s as i32))
             .arg(&(d as i32))
