@@ -948,16 +948,19 @@ fn hgemm(
     // tile 选择：N≤512 且 M 小 → t32(grid 是 t64 的 4 倍,解 N=384 的 starved);
     // M<1024 → t64;大 → v2(128)。
     let use_t32 = std::env::var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
+    let use_t64n32 = std::env::var("KATAGO_CUDA_T64N32").is_ok() && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_kernel")?
+    } else if use_t64n32 {
+        rt.get_func("hgemm_t64n32_kernel")?
     } else if m < 1024 {
         rt.get_func("hgemm_t64_kernel")?
     } else {
         rt.get_func("hgemm_v2_kernel")?
     };
     let stream = active_stream(rt);
-    let (tile, kname) = if use_t32 { (32usize, "hgemm_t32") } else if m < 1024 { (64usize, "hgemm_t64") } else { (128usize, "hgemm_v2") };
-    let grid = (m.div_ceil(tile) as u32, b.n.div_ceil(tile) as u32, 1u32);
+    let (tile_m, tile_n, kname) = if use_t32 { (32usize, 32usize, "hgemm_t32") } else if use_t64n32 { (64usize, 32usize, "hgemm_t64n32") } else if m < 1024 { (64usize, 64usize, "hgemm_t64") } else { (128usize, 128usize, "hgemm_v2") };
+    let grid = (m.div_ceil(tile_m) as u32, b.n.div_ceil(tile_n) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
         block_dim: (if use_t32 { 128 } else { 256 }, 1, 1),
@@ -1034,16 +1037,19 @@ fn hgemm_residual(
     m: usize,
 ) -> Result<(), String> {
     let use_t32 = std::env::var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
+    let use_t64n32 = std::env::var("KATAGO_CUDA_T64N32").is_ok() && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_kernel")?
+    } else if use_t64n32 {
+        rt.get_func("hgemm_t64n32_kernel")?
     } else if m < 1024 {
         rt.get_func("hgemm_t64_kernel")?
     } else {
         rt.get_func("hgemm_v2_kernel")?
     };
     let stream = active_stream(rt);
-    let (tile, kname) = if use_t32 { (32usize, "hgemm_t32") } else if m < 1024 { (64usize, "hgemm_t64") } else { (128usize, "hgemm_v2") };
-    let grid = (m.div_ceil(tile) as u32, b.n.div_ceil(tile) as u32, 1u32);
+    let (tile_m, tile_n, kname) = if use_t32 { (32usize, 32usize, "hgemm_t32") } else if use_t64n32 { (64usize, 32usize, "hgemm_t64n32") } else if m < 1024 { (64usize, 64usize, "hgemm_t64") } else { (128usize, 128usize, "hgemm_v2") };
+    let grid = (m.div_ceil(tile_m) as u32, b.n.div_ceil(tile_n) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
         block_dim: (if use_t32 { 128 } else { 256 }, 1, 1),

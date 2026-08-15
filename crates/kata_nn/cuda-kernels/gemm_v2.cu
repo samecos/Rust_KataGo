@@ -468,8 +468,9 @@ __device__ __forceinline__ void t64_load_chunk_swiglu_a(
     }
 }
 
-// 每 k-tile：A/B 各 64×64 f16 = 8KB = 512 个 16B chunk（每线程 2 个）。
-template <bool IS_B>
+// 每 k-tile：A/B 各 ROWS×64 f16。STAGE_ELEMS = 该矩阵每级的元素数
+//（A 用 T64_BM*T64_BK，B 在 t64n32 用 T64N32_BN*T64N32_BK）。
+template <bool IS_B, int STAGE_ELEMS = T64_BM * T64_BK>
 __device__ __forceinline__ void t64_load_chunk(
     __half* sA, __half* sB, const __half* __restrict__ A,
     const __half* __restrict__ B, int stage, int cid, int kk,
@@ -479,7 +480,7 @@ __device__ __forceinline__ void t64_load_chunk(
     const int k_start = kk + c16 * 8;
     const unsigned saddr =
         (unsigned)__cvta_generic_to_shared(IS_B ? sB : sA) +
-        stage * (T64_BM * T64_BK * 2) + t64_smem_off64(row, c16 * 8);
+        stage * (STAGE_ELEMS * 2) + t64_smem_off64(row, c16 * 8);
     if (k_start >= K) {
         v2_smem_zero16(saddr);
         return;
@@ -989,4 +990,148 @@ extern "C" __global__ void splitk_reduce_kernel(float* __restrict__ C,
         acc += Cp[(size_t)s * M * N + i];
     }
     C[i] = acc + beta * C[i];
+}
+
+// ---------------------------------------------------------------------------
+// GEMM tile 64×32×64 变体（N 小场景：N=384 时 grid 6×12=72 blocks，是
+// t64 的 2 倍；256 线程 8 warps，每 warp 16 行 × 16 列）。
+// ---------------------------------------------------------------------------
+
+#define T64N32_BM 64
+#define T64N32_BN 32
+#define T64N32_BK 64
+
+template <bool F16_OUT>
+__device__ __forceinline__ void t64n32_hgemm_impl(
+    const __half* __restrict__ A, const __half* __restrict__ B,
+    float* __restrict__ Cf, __half* __restrict__ Ch, int M, int N, int K,
+    float alpha, float beta) {
+    __shared__ __half sA[T64_STAGES][T64N32_BM * T64N32_BK];
+    __shared__ __half sB[T64_STAGES][T64N32_BN * T64N32_BK];
+
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int blockM = blockIdx.x * T64N32_BM;
+    const int blockN = blockIdx.y * T64N32_BN;
+    const int warpM = blockM + (warp >> 1) * 16;  // 4 行组 × 16 行
+    const int warpN = blockN + (warp & 1) * 16;   // 2 列组 × 16 列
+
+    // 累加器：1 M 步 × 2 N 步 × 4 f32
+    float c[2][4];
+#pragma unroll
+    for (int j = 0; j < 2; ++j)
+#pragma unroll
+        for (int r = 0; r < 4; ++r) c[j][r] = 0.0f;
+
+    auto issue_stage = [&](int stage, int kk) {
+        // A:64 行 × 64 列 = 512 chunk;B:32 行 × 64 列 = 256 chunk。
+        // 每线程 2 个 A + 1 个 B(256 线程)。
+        t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M,
+                              N, K, blockM, blockN);
+        t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid + 256,
+                              kk, M, N, K, blockM, blockN);
+        t64_load_chunk<true, T64N32_BN * T64N32_BK>(
+            &sA[0][0], &sB[0][0], A, B, stage, tid, kk, M, N, K, blockM,
+            blockN);
+    };
+
+    issue_stage(0, 0);
+    v2_cp_commit();
+
+    for (int kk = 0; kk < K; kk += T64N32_BK) {
+        const int stage = (kk / T64N32_BK) & 1;
+        if (kk + T64N32_BK < K) {
+            issue_stage(stage ^ 1, kk + T64N32_BK);
+            v2_cp_commit();
+            v2_cp_wait<1>();
+        } else {
+            v2_cp_wait<0>();
+        }
+        __syncthreads();
+
+        const unsigned sA_base =
+            (unsigned)__cvta_generic_to_shared(&sA[stage][0]);
+        const unsigned sB_base =
+            (unsigned)__cvta_generic_to_shared(&sB[stage][0]);
+        const int wrow = warp >> 1;
+        const int wcol = warp & 1;
+
+        // B：2 个 N 步 × 8 个 k8 窗口（64 列：2 个 ldmatrix_x4 各 32 列）。
+        // B tile [32 行 N, 64 列 K] 打包（行组 1024B）。
+        unsigned b_frag[2][8];
+#pragma unroll
+        for (int t = 0; t < 2; ++t) {
+            const unsigned b_base =
+                sB_base + (((wcol * 16 + t * 8) >> 3) << 10);
+            v2_ldmatrix_x4(b_frag[t][0], b_frag[t][1], b_frag[t][2],
+                           b_frag[t][3], b_base, 256, lane);
+            v2_ldmatrix_x4(b_frag[t][4], b_frag[t][5], b_frag[t][6],
+                           b_frag[t][7], b_base + 512, 256, lane);
+        }
+        // A：1 个 M 步 × 4 个 k16 步（64 列布局行组 1024B → delta2=1024）。
+        unsigned a_frag[4][4];
+#pragma unroll
+        for (int s = 0; s < 4; ++s) {
+            const unsigned a_base =
+                sA_base + (((wrow * 16) >> 3) << 10) + s * 256;
+            v2_ldmatrix_x4(a_frag[s][0], a_frag[s][1], a_frag[s][2],
+                           a_frag[s][3], a_base, 1024, lane);
+        }
+#pragma unroll
+        for (int s = 0; s < 4; ++s) {
+            const unsigned a0 = a_frag[s][0];
+            const unsigned a1 = a_frag[s][2];
+            const unsigned a2 = a_frag[s][1];
+            const unsigned a3 = a_frag[s][3];
+#pragma unroll
+            for (int t = 0; t < 2; ++t) {
+                const unsigned b0 = b_frag[t][s * 2];
+                const unsigned b1 = b_frag[t][s * 2 + 1];
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                    : "+f"(c[t][0]), "+f"(c[t][1]), "+f"(c[t][2]),
+                      "+f"(c[t][3])
+                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+            }
+        }
+        __syncthreads();
+    }
+
+    const int row0 = warpM + lane / 4;
+    const int col0 = warpN + (lane % 4) * 2;
+#pragma unroll
+    for (int t = 0; t < 2; ++t) {
+        const int row = row0;
+        const int col = col0 + t * 8;
+        if (row >= M || col >= N) continue;
+        const float v0 = alpha * c[t][0];
+        const float v1 = alpha * c[t][1];
+        const float v2 = alpha * c[t][2];
+        const float v3 = alpha * c[t][3];
+        if (F16_OUT) {
+            __half* cp = Ch + (size_t)row * N + col;
+            cp[0] = __float2half_rn(v0);
+            if (col + 1 < N) cp[1] = __float2half_rn(v1);
+            if (row + 8 < M) {
+                cp[8 * N] = __float2half_rn(v2);
+                if (col + 1 < N) cp[8 * N + 1] = __float2half_rn(v3);
+            }
+        } else {
+            float* cp = Cf + (size_t)row * N + col;
+            cp[0] = v0 + beta * cp[0];
+            if (col + 1 < N) cp[1] = v1 + beta * cp[1];
+            if (row + 8 < M) {
+                cp[8 * N] = v2 + beta * cp[8 * N];
+                if (col + 1 < N) cp[8 * N + 1] = v3 + beta * cp[8 * N + 1];
+            }
+        }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(V2_THREADS) hgemm_t64n32_kernel(
+    const __half* __restrict__ A, const __half* __restrict__ B,
+    float* __restrict__ C, int M, int N, int K, float alpha, float beta) {
+    t64n32_hgemm_impl<false>(A, B, C, nullptr, M, N, K, alpha, beta);
 }
