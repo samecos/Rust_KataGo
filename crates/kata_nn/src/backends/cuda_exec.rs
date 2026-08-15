@@ -282,6 +282,10 @@ impl CudaModel {
                 .unwrap_or(-1.0);
             layer_times.push((-1, "im2col", ms));
         }
+        // split-K 状态：Some(beta) 表示上一个 GEMM 是 split-K partial，
+        // 待下一个 RmsNorm 融合求和。KATAGO_CUDA_SPLITK=1 启用。
+        let splitk_on = std::env::var("KATAGO_CUDA_SPLITK").is_ok();
+        let mut pending_splitk_beta: Option<f32> = None;
         let mut li = 0usize;
         while li < self.layers.len() {
             let lb = &self.layers[li];
@@ -325,10 +329,11 @@ impl CudaModel {
                         "Linear 的 bias/act/residual 组合本执行器未实现（IR 恒为 None/false/false）"
                     );
                     if w.k == trunk && w.n == mid {
-                        // Linear down（K=768, N=384, beta=0）：starved GEMM，
-                        // split-K=2 拆 K（KATAGO_CUDA_SPLITK=1 启用）。
-                        if std::env::var("KATAGO_CUDA_SPLITK").is_ok() {
-                            hgemm_splitk2(rt, gated768, w, c_partial, act384, m, 0.0)?;
+                        // Linear down（K=768, N=384, beta=0）：split-K partial
+                        //（reduce 由后续 RmsNorm 融合）。KATAGO_CUDA_SPLITK=1。
+                        if splitk_on {
+                            hgemm_splitk2_partial(rt, gated768, w, c_partial, m)?;
+                            pending_splitk_beta = Some(0.0);
                         } else {
                             hgemm(rt, gated768, w, act384, m)?;
                         }
@@ -371,7 +376,15 @@ impl CudaModel {
                 }
                 LayerBuf::RmsNorm { scale, eps, channels } => {
                     assert_eq!(*channels, mid, "RMSNorm 仅出现在 384 维流");
-                    rms_norm_f32(rt, act384, normed, &scale.data, *eps, *channels, m)?;
+                    if let Some(beta) = pending_splitk_beta.take() {
+                        // split-K partial 求和 + 残差 + RMSNorm 融合
+                        rms_norm_splitk(
+                            rt, act384, c_partial, &scale.data, normed, beta,
+                            *eps, *channels, m, 2,
+                        )?;
+                    } else {
+                        rms_norm_f32(rt, act384, normed, &scale.data, *eps, *channels, m)?;
+                    }
                     false
                 }
                 LayerBuf::Attention { qkv, out, cos, sin, qk_scale, h: lh, d: ld, s: ls } => {
@@ -415,10 +428,11 @@ impl CudaModel {
                         timed!("qkv", hgemm_f16(rt, normed, qkv, act1152, m));
                         timed!("attn", attention_fa2(rt, act1152, cos, sin, normed, ls, ld, batch * lh, scale, lh));
                     }
-                    // 输出投影 beta=1 直接残差进 act384（省独立残差 kernel）。
-                    // N=384 grid-starved：KATAGO_CUDA_SPLITK=1 时拆 K=2 两段。
-                    if std::env::var("KATAGO_CUDA_SPLITK").is_ok() {
-                        timed!("outproj", hgemm_splitk2(rt, normed, out, c_partial, act384, m, 1.0));
+                    // 输出投影 beta=1 残差进 act384。split-K partial（reduce
+                    // 由后续 RmsNorm 融合）。KATAGO_CUDA_SPLITK=1 启用。
+                    if splitk_on {
+                        hgemm_splitk2_partial(rt, normed, out, c_partial, m)?;
+                        pending_splitk_beta = Some(1.0);
                     } else {
                         timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
                     }
@@ -1073,20 +1087,16 @@ fn hgemm_residual(
     Ok(())
 }
 
-/// split-K GEMM（确定性两段式，N 小 K 大 grid-starved 场景）：
-/// partial 算 K/2 部分和 → reduce 合并 + beta*C。
-#[allow(clippy::too_many_arguments)]
-fn hgemm_splitk2(
+/// split-K partial（K/2 部分和写 Cp，无 reduce——reduce 由后续
+/// RmsNorm 融合完成）。确定性两段式的前半。
+fn hgemm_splitk2_partial(
     rt: &CudaRuntime,
     a: &CudaSlice<u16>,
     b: &WeightBuf,
     cp: &mut CudaSlice<f32>,
-    c: &mut CudaSlice<f32>,
     m: usize,
-    beta: f32,
 ) -> Result<(), String> {
     let fp = rt.get_func("hgemm_t64_splitk2_partial_kernel")?;
-    let fr = rt.get_func("splitk_reduce_kernel")?;
     let stream = active_stream(rt);
     let grid = (m.div_ceil(64) as u32, b.n.div_ceil(64) as u32, 2u32);
     let cfg = LaunchConfig {
@@ -1100,7 +1110,7 @@ fn hgemm_splitk2(
             .launch_builder(&fp)
             .arg(a)
             .arg(&b.data)
-            .arg(&mut *cp)
+            .arg(cp)
             .arg(&(m as i32))
             .arg(&(b.n as i32))
             .arg(&(b.kp as i32))
@@ -1108,19 +1118,6 @@ fn hgemm_splitk2(
             .launch(cfg)
     }
     .map_err(|e| format!("splitk partial launch failed: {e}"))?;
-    let n = m * b.n;
-    unsafe {
-        stream
-            .launch_builder(&fr)
-            .arg(c)
-            .arg(&mut *cp)
-            .arg(&(m as i32))
-            .arg(&(b.n as i32))
-            .arg(&2i32)
-            .arg(&beta)
-            .launch(LaunchConfig::for_num_elems(n as u32))
-    }
-    .map_err(|e| format!("splitk reduce launch failed: {e}"))?;
     Ok(())
 }
 
@@ -1624,6 +1621,46 @@ fn f32_add_f16(
             .launch(LaunchConfig::for_num_elems(n as u32))
     }
     .map_err(|e| format!("f32_add_f16 launch failed: {e}"))?;
+    Ok(())
+}
+
+/// split-K 求和 + RMSNorm 融合：x = x*beta + ΣCp（split-K partial 合并），
+/// 写回 x（残差流）+ RMSNorm 写 y。省 split-K 的独立 reduce kernel。
+#[allow(clippy::too_many_arguments)]
+fn rms_norm_splitk(
+    rt: &CudaRuntime,
+    x: &mut CudaSlice<f32>,
+    cp: &CudaSlice<f32>,
+    scale: &CudaSlice<f32>,
+    out: &mut CudaSlice<u16>,
+    beta: f32,
+    eps: f32,
+    ncols: usize,
+    rows: usize,
+    splits: usize,
+) -> Result<(), String> {
+    let f = rt.get_func("rms_norm_splitk_kernel")?;
+    let stream = active_stream(rt);
+    let cfg = LaunchConfig {
+        grid_dim: (rows.div_ceil(4) as u32, 1, 1),
+        block_dim: (128, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(x)
+            .arg(cp)
+            .arg(scale)
+            .arg(out)
+            .arg(&beta)
+            .arg(&eps)
+            .arg(&(ncols as i32))
+            .arg(&(rows as i32))
+            .arg(&(splits as i32))
+            .launch(cfg)
+    }
+    .map_err(|e| format!("rms_norm_splitk launch failed: {e}"))?;
     Ok(())
 }
 

@@ -554,3 +554,40 @@ extern "C" __global__ void value_fc_fused_kernel(
         else out2[b * 8 + (j - 13)] = acc;
     }
 }
+
+// split-K 求和 + RMSNorm 融合（确定性）：act384_new = act384_old*beta +
+// Σ_s Cp[s]（split-K partial 合并），normed = rms(act384_new)*scale。
+// 省掉 split-K 的独立 reduce kernel。warp4-vec8 同款（4 行/块，零 smem）。
+extern "C" __global__ void rms_norm_splitk_kernel(
+    float* __restrict__ x, const float* __restrict__ cp,
+    const float* __restrict__ scale, __half* __restrict__ y, float beta,
+    float eps, int ncols, int rows, int splits) {
+    const int row = blockIdx.x * 4 + (threadIdx.x >> 5);
+    if (row >= rows) return;
+    const int lane = threadIdx.x & 31;
+    const size_t rowoff = (size_t)row * ncols;
+    float* xr = x + rowoff;
+    const float* cpr = cp + rowoff;
+    float sum = 0.0f;
+    float acc[12];
+#pragma unroll
+    for (int i = 0; i < 12; ++i) {
+        float v = xr[lane + i * 32] * beta;
+        for (int sp = 0; sp < splits; ++sp) {
+            v += cpr[(size_t)sp * (size_t)rows * ncols + lane + i * 32];
+        }
+        acc[i] = v;
+        sum += v * v;
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        sum += __shfl_xor_sync(0xffffffffu, sum, off);
+    const float rstd = rsqrtf(sum / (float)ncols + eps);
+    __half* yr = y + rowoff;
+#pragma unroll
+    for (int i = 0; i < 12; ++i) {
+        const int c = lane + i * 32;
+        xr[c] = acc[i];  // 写回 act384_new（供下一块残差）
+        yr[c] = __float2half(acc[i] * rstd * scale[c]);
+    }
+}
