@@ -1013,6 +1013,13 @@ fn hgemm_f16(
     c: &mut CudaSlice<u16>,
     m: usize,
 ) -> Result<(), String> {
+    // cuBLASLt f16 输出旁路（KATAGO_CUDA_CUBLASLT=1）。
+    if std::env::var("KATAGO_CUDA_CUBLASLT").is_ok() && b.kp == b.k {
+        let stream0 = active_stream(rt);
+        if rt.cublaslt_gemm_f16out(&stream0, a, &b.data, c, m, b.n, b.k)? {
+            return Ok(());
+        }
+    }
     let use_t32 = std::env::var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_f16out_kernel")?

@@ -168,6 +168,41 @@ mod imp {
             Ok(true)
         }
 
+        /// cuBLASLt GEMM 的 f16 输出变体：`C[m,n] f16 = A @ B^T`（epilogue
+        /// 直接 f16，对应手写 hgemm_f16）。用于 qkv packed / dual FFN。
+        #[allow(clippy::too_many_arguments)]
+        pub fn cublaslt_gemm_f16out(
+            &self,
+            stream: &cudarc::driver::CudaStream,
+            a: &CudaSlice<u16>,
+            b: &CudaSlice<u16>,
+            c: &mut CudaSlice<u16>,
+            m: usize,
+            n: usize,
+            k: usize,
+        ) -> Result<bool, String> {
+            use cudarc::cublaslt::sys;
+            let Some(st) = &self.cublaslt else { return Ok(false) };
+            let key = (m, n, k, true); // f16out 用 beta=true 槽位区分
+            let algo = {
+                let cache = st.algo_cache.lock().unwrap();
+                cache.get(&key).copied()
+            };
+            let algo = match algo {
+                Some(a) => Some(a),
+                None => match self.cublaslt_select_algo_f16(st, m, n, k)? {
+                    Some(a) => {
+                        st.algo_cache.lock().unwrap().insert(key, a);
+                        Some(a)
+                    }
+                    None => None,
+                },
+            };
+            let Some(algo) = algo else { return Ok(false) };
+            self.cublaslt_exec_f16(st, stream, &algo, a, b, c, m, n, k)?;
+            Ok(true)
+        }
+
         /// 选算法(heuristic 查询)。
         fn cublaslt_select_algo(
             &self,
@@ -290,6 +325,132 @@ mod imp {
                 sys::cublasLtMatrixLayoutDestroy(c_lay);
                 if r != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
                     return Err(format!("cublasLtMatmul failed: {r:?}"));
+                }
+            }
+            Ok(())
+        }
+
+        /// f16 输出的算法选择(Cdesc = CUDA_R_16F)。
+        fn cublaslt_select_algo_f16(
+            &self,
+            st: &CublasLtState,
+            m: usize,
+            n: usize,
+            k: usize,
+        ) -> Result<Option<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t>, String> {
+            use cudarc::cublaslt::sys;
+            unsafe {
+                let mut desc: sys::cublasLtMatmulDesc_t = std::ptr::null_mut();
+                sys::cublasLtMatmulDescCreate(
+                    &mut desc,
+                    sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                    sys::cudaDataType_t::CUDA_R_32F,
+                );
+                let transa: u32 = 1;
+                let transb: u32 = 0;
+                sys::cublasLtMatmulDescSetAttribute(
+                    desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSA,
+                    &transa as *const _ as *const _, std::mem::size_of_val(&transa));
+                sys::cublasLtMatmulDescSetAttribute(
+                    desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSB,
+                    &transb as *const _ as *const _, std::mem::size_of_val(&transb));
+                let mut a_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                let mut b_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                let mut c_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                sys::cublasLtMatrixLayoutCreate(&mut a_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, n as u64, k as i64);
+                sys::cublasLtMatrixLayoutCreate(&mut b_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, m as u64, k as i64);
+                sys::cublasLtMatrixLayoutCreate(&mut c_lay, sys::cudaDataType_t::CUDA_R_16F, n as u64, m as u64, n as i64);
+                let mut pref: sys::cublasLtMatmulPreference_t = std::ptr::null_mut();
+                sys::cublasLtMatmulPreferenceCreate(&mut pref);
+                let ws_size = st.workspace.len();
+                sys::cublasLtMatmulPreferenceSetAttribute(
+                    pref,
+                    sys::cublasLtMatmulPreferenceAttributes_t::CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                    &ws_size as *const _ as *const _, std::mem::size_of_val(&ws_size));
+                let mut heur: sys::cublasLtMatmulHeuristicResult_t = std::mem::zeroed();
+                let mut cnt = 0i32;
+                let r = sys::cublasLtMatmulAlgoGetHeuristic(
+                    st.handle, desc, a_lay, b_lay, c_lay, c_lay, pref, 1, &mut heur, &mut cnt,
+                );
+                sys::cublasLtMatmulDescDestroy(desc);
+                sys::cublasLtMatrixLayoutDestroy(a_lay);
+                sys::cublasLtMatrixLayoutDestroy(b_lay);
+                sys::cublasLtMatrixLayoutDestroy(c_lay);
+                sys::cublasLtMatmulPreferenceDestroy(pref);
+                if r != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS || cnt == 0 {
+                    return Ok(None);
+                }
+                Ok(Some(heur.algo))
+            }
+        }
+
+        /// f16 输出的执行(Cdesc = CUDA_R_16F,C 为 f16)。
+        #[allow(clippy::too_many_arguments)]
+        fn cublaslt_exec_f16(
+            &self,
+            st: &CublasLtState,
+            stream: &cudarc::driver::CudaStream,
+            algo: &cudarc::cublaslt::sys::cublasLtMatmulAlgo_t,
+            a: &CudaSlice<u16>,
+            b: &CudaSlice<u16>,
+            c: &mut CudaSlice<u16>,
+            m: usize,
+            n: usize,
+            k: usize,
+        ) -> Result<(), String> {
+            use cudarc::cublaslt::sys;
+            use cudarc::driver::{DevicePtr, DevicePtrMut};
+            unsafe {
+                let mut desc: sys::cublasLtMatmulDesc_t = std::ptr::null_mut();
+                sys::cublasLtMatmulDescCreate(
+                    &mut desc,
+                    sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                    sys::cudaDataType_t::CUDA_R_32F,
+                );
+                let transa: u32 = 1;
+                let transb: u32 = 0;
+                sys::cublasLtMatmulDescSetAttribute(
+                    desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSA,
+                    &transa as *const _ as *const _, std::mem::size_of_val(&transa));
+                sys::cublasLtMatmulDescSetAttribute(
+                    desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSB,
+                    &transb as *const _ as *const _, std::mem::size_of_val(&transb));
+                let mut a_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                let mut b_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                let mut c_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                sys::cublasLtMatrixLayoutCreate(&mut a_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, n as u64, k as i64);
+                sys::cublasLtMatrixLayoutCreate(&mut b_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, m as u64, k as i64);
+                sys::cublasLtMatrixLayoutCreate(&mut c_lay, sys::cudaDataType_t::CUDA_R_16F, n as u64, m as u64, n as i64);
+                let alpha = 1.0f32;
+                let beta = 0.0f32;
+                let (a_ptr, _ga) = a.device_ptr(stream);
+                let (b_ptr, _gb) = b.device_ptr(stream);
+                let (c_ptr, _gc) = c.device_ptr_mut(stream);
+                let (ws_ptr, _gw) = st.workspace.device_ptr(stream);
+                let r = sys::cublasLtMatmul(
+                    st.handle,
+                    desc,
+                    &alpha as *const _ as *const _,
+                    b_ptr as *const _,
+                    a_lay,
+                    a_ptr as *const _,
+                    b_lay,
+                    &beta as *const _ as *const _,
+                    c_ptr as *const _,
+                    c_lay,
+                    c_ptr as *mut _,
+                    c_lay,
+                    algo,
+                    ws_ptr as *mut _,
+                    st.workspace.len(),
+                    stream.cu_stream() as _,
+                );
+                sys::cublasLtMatmulDescDestroy(desc);
+                sys::cublasLtMatrixLayoutDestroy(a_lay);
+                sys::cublasLtMatrixLayoutDestroy(b_lay);
+                sys::cublasLtMatrixLayoutDestroy(c_lay);
+                if r != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                    return Err(format!("cublasLtMatmul f16 failed: {r:?}"));
                 }
             }
             Ok(())
