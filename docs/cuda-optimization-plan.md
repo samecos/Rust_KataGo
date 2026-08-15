@@ -46,6 +46,30 @@
 - 未交付:swiglu 融合(ABBA 评估净负,A 加载普通读破坏 cp.async 流水);
   PV mma 的进一步调优;G6 L2 persisting(当前 batch 工作集已驻留 L2)。
 
+## WSL 对照(2026-08-15,Ubuntu-24.04 + CUDA 13.2 + GPU 透传)
+
+| 线程 | Windows | WSL | 变化 |
+|---|---|---|---|
+| t=1 | 208.6 | 211.2 | +1%(持平) |
+| t=4 | 238.7 | 270.6 | +13% |
+| t=8 | 351.8 | 397.6 | +13% |
+| t=12 | 430.2 | 455.7 | +6% |
+| t=16 | 441.3 | 470.7 | +7%(batch 11.79) |
+
+**关键认知修正(graph node 开销诊断,`cuda_graph_node_overhead` 测试)**:
+- graph 重放的 per-kernel 调度开销实测仅 **~1.1µs**(非此前假设的 ~22µs),
+  且 **WSL 与 Windows 完全相同** → t=1 的 graph sync ~4.4ms 是**真实的
+  GPU kernel 执行时间**,不是调度/WDDM 开销。
+- batch=1 时 GEMM grid 仅 27-108 blocks(96 SM 利用率 <30%),tail effect
+  主导 → t=1 的 208 是 batch=1 的固有小矩阵效率,与 OS/驱动无关。
+- **优化方向因此改变**:不是减 kernel 数(graph node 开销本来就小),
+  而是 batch=1 的 GEMM 效率(split-K / 更小 tile / stream-K)——这是
+  后续 t=1 追平 TRT(253)的唯一路径。WSL 的多线程优势来自更高效的
+  线程调度/凑批(batch 更大),而非绕开 WDDM。
+- WSL 环境:/usr/local/cuda-13.2(nvcc)+ /usr/lib/wsl/lib/libcuda.so 透传,
+  `export PATH=/usr/local/cuda-13.2/bin:$HOME/.cargo/bin:$PATH`,模型经
+  `/mnt/d/code/b11fix.onnx` 读取,对拍 PASS。
+
 ## 决策组（严格有序，后组不得改写前组配置键）
 
 | # | 组 | 战术 | 状态 |
