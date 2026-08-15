@@ -89,6 +89,44 @@
   而非 split-K/t32/stream-K(那些是"增加并行度",不解决 batch=1 的
   kernel 质量问题;cuBLASLt 是"更好的 kernel")。
 
+## 事件门控流水线(2026-08-15,fork `cudaAsyncInferPipeline` 复刻)
+
+**动机**:同步 serve 循环里聚批窗口+后处理期间 GPU 空闲(利用率 ~65%)。
+
+**实现**(三件套,全部对拍 PASS):
+1. **submit/finish 分离**(Backend trait 新增 `supports_async_pipeline`/
+   `submit_output`/`query_output_done`/`finish_output`,默认退化为同步
+   get_output):submit 只做非阻塞入队(填 pinned→htod→graph→dtoh→record
+   `CU_EVENT_BLOCKING_SYNC` 事件);finish 等事件+解码。query 用
+   `cuEventQuery`(cudarc 0.19 未暴露,直调 driver API)。
+2. **fork 式事件循环**(`serve_pipelined`):yield 自旋等"front 完成事件 |
+   队列新请求";front 完成**立即收尾投递**;发射时机=攒批满 target 或
+   GPU 空闲(fork `maybeLaunchFillingBatch` 语义);在途上限 2 批=双槽。
+3. **per-size graph 缓存**:`HashMap<batch,(双槽 graph+ws+pins)>`,
+   尺寸变化零重捕获;token=batch*2+slot。
+
+**ABBA(带预热,visits/s;基准=cuBLASLt 提交后)**:
+
+| 线程 | 旧基线 | 同步(新路径) | 流水线 | 流水线 vs 旧基线 |
+|---|---|---|---|---|
+| t=1 | 296 | 417.7 | **432.9** | **+46%** |
+| t=4 | ~430 | 802.6 | 781.6(465.9 vs 443.6 evals,+5%) | **+82%** |
+| t=8 | 507 | 1032.6 | **1034.3** | **+104%** |
+| t=16 | 612 | 1235.1 | **1274.4** | **+108%** |
+
+**证伪/确诊记录**:
+- ❌ 朴素流水线(先聚下一批再收尾上一批):每批结果多等一整轮迭代,
+  t=8 523 vs 同步 635,**判负**。结论:事件一触发就必须立即投递。
+- ❌ WDDM graph-behind-graph 串行假设:NOGRAPH+pipeline 977 vs
+  GRAPH+pipeline 1034,直连更慢,**graph 无罪**。
+- ✅ **真凶=尺寸抖动重捕获**:攒批使批尺寸在 3/4/5/8 间抖动,每次变化
+  触发 device.synchronize + 双 graph 重捕获(数十 ms)。per-size 缓存后
+  所有模式吞吐翻倍(连同步路径 766→1033,因为同步路径同样有尺寸抖动)。
+- serve 线程 yield 自旋烧 1 核(fork 同款),9950X 16 核下可接受。
+
+**开关**:`KATAGO_CUDA_NOPIPELINE=1` 回退同步循环;`KATAGO_CUDA_NOGRAPH=1`
+直连(调试);完成事件无条件创建(直连模式流水线门控仍可用)。
+
 ## 混合精度评估(2026-08-15 调研,来源见下)
 
 **明确不做**:
@@ -126,9 +164,13 @@
 ## 调度层（fork 复刻清单）
 
 - nnBatchAwareDispatch：固定物理 batch（B16），不足时尾批复制 padding，设备空闲才发射
-- cudaAsyncInferPipeline：upload/compute/download 三流 + 事件握手单槽复用 + pinned staging
+- ✅ cudaAsyncInferPipeline（2026-08-15 完成，见"事件门控流水线"节）：
+  事件循环 + 完成即投递 + 在途双批；**适配差异**：单流双槽 graph
+  （非 fork 的三流），per-size graph 缓存（真凶修复），inflight≤2
 - 双流拓扑：2 个 NN server 各自独占 non-blocking stream
 - 明确不做（fork ABBA 证伪）：CUDA Graph、BF16/FP8/FP4、winograd、DSMEM/cluster、mask 处理
+  - **本地证伪 fork 的 graph 结论**：本机 WDDM+CUDA13 下 graph 稳定更快
+    （NOGRAPH 977 < GRAPH 1034 @t=8），graph 保留为默认路径
 
 ## plan JSON（fail-closed）
 

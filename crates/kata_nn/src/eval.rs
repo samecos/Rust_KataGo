@@ -193,6 +193,15 @@ pub struct NnEvaluator {
 /// Keeping shared state in an `Arc` allows server threads to outlive any
 /// particular `NnEvaluator` borrow and makes the evaluator safe to move after
 /// threads are spawned (the heap-allocated `SharedState` stays put).
+/// 流水线 serve 循环的在途批（已提交未收尾）。
+/// token = 后端批次令牌（CUDA 槽位号）；`usize::MAX` = 提交失败的
+/// 降级标记（outputs 保持默认，finish 不再走后端）。
+struct ServePending {
+    batch: Vec<Arc<EvalRequest>>,
+    outputs: Vec<NNOutput>,
+    token: usize,
+}
+
 struct SharedState {
     query_queue: ThreadSafeQueue<Arc<EvalRequest>>,
     nn_cache_table: Option<Arc<NnCacheTable>>,
@@ -224,6 +233,19 @@ impl SharedState {
         _gpu_idx: i32,
         _thread_idx: i32,
     ) {
+        // 事件门控流水线（fork `cudaAsyncInferPipeline`）：后端支持时走
+        // submit/finish 分离的流水线循环，消除批间 GPU 空闲。
+        let use_pipeline = self
+            .backend
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|b| b.supports_async_pipeline())
+            .unwrap_or(false);
+        if use_pipeline {
+            self.serve_pipelined(handle);
+            return;
+        }
         loop {
             let mut request = dummy_request();
             if !self.query_queue.wait_pop(&mut request) {
@@ -268,6 +290,210 @@ impl SharedState {
                 .fetch_add(batch.len() as u64, Ordering::Relaxed);
             self.waiting_for_finish.notify_all();
         }
+    }
+
+    /// 事件门控流水线 serve 循环（fork `cudaAsyncInferPipeline` 的
+    /// `serveEventPipelineScheduler` 语义复刻）。
+    ///
+    /// 单线程事件循环，yield 自旋等待两个条件之一：
+    ///   1. front（最早提交的在途批）的完成事件触发 → 立即收尾投递
+    ///      （零额外延迟——这是与"先聚下一批再收尾上一批"朴素流水线的
+    ///      关键差异，后者每批结果多等一整轮迭代，实测 t=8 吞吐 -18%）；
+    ///   2. 队列来新请求 → 进攒批。
+    /// 发射时机（fork `maybeLaunchFillingBatch`）：攒批满 target 立即发射；
+    /// 或 GPU 完全空闲（无在途批）时有多少发射多少。任一时刻最多 2 批在途
+    /// （front + next），与 CUDA 后端双槽一一对应：槽位 k%2 的前主（批 k-2）
+    /// 在批 k 发射前必已收尾（inflight 满 2 即停发射），槽位复用安全。
+    fn serve_pipelined(self: &Arc<Self>, handle: &Mutex<Box<dyn ComputeHandle>>) {
+        let mut inflight: std::collections::VecDeque<ServePending> =
+            std::collections::VecDeque::with_capacity(2);
+        let mut filling: Vec<Arc<EvalRequest>> = Vec::new();
+
+        loop {
+            // 1) front 完成 → 立即收尾（同流 FIFO，front 必先于 next 完成）。
+            while let Some(front) = inflight.front() {
+                if !self.pipeline_query_done(handle, front.token) {
+                    break;
+                }
+                let p = inflight.pop_front().unwrap();
+                self.pipeline_finish(p, handle);
+            }
+
+            // 2) 发射攒批：满 target，或 GPU 空闲（无在途）时立即发射。
+            // inflight<2 上限保证任一尺寸的在途批 ≤2，与该尺寸的双槽对应：
+            // 槽位 k%2 的前主（同尺寸批 k-2）在批 k 发射前必已收尾。
+            // 尺寸变化无妨：后端按尺寸缓存 graph/工作区/槽位，异尺寸批
+            // 在途互不干扰（各自独立缓冲，同流串行执行）。
+            let target = self.current_batch_size.load(Ordering::Relaxed).max(1) as usize;
+            if !filling.is_empty()
+                && inflight.len() < 2
+                && (filling.len() >= target || inflight.is_empty())
+            {
+                let p = self.pipeline_submit(std::mem::take(&mut filling), handle);
+                inflight.push_back(p);
+                continue;
+            }
+
+            // 3) 取一个请求进攒批。
+            {
+                let mut extra = dummy_request();
+                if self.query_queue.try_pop(&mut extra) {
+                    filling.push(extra);
+                    continue;
+                }
+            }
+
+            // 4) 队列空：
+            if inflight.is_empty() && filling.is_empty() {
+                // 完全空闲：阻塞等第一个请求；队列关闭则退出。
+                let mut request = dummy_request();
+                if !self.query_queue.wait_pop(&mut request) {
+                    break;
+                }
+                filling.push(request);
+                continue;
+            }
+            // 有在途批或未满攒批：yield 自旋（fork 同款；完成事件/新请求
+            // 任一出现即在下轮循环处理）。队列关闭后随 draining 完成，
+            // 最终会走到上面的 wait_pop 分支退出。
+            std::thread::yield_now();
+        }
+
+        // 退出前：发射剩余攒批并收尾全部在途批，保证无请求丢失。
+        if !filling.is_empty() {
+            let p = self.pipeline_submit(std::mem::take(&mut filling), handle);
+            inflight.push_back(p);
+        }
+        while let Some(p) = inflight.pop_front() {
+            self.pipeline_finish(p, handle);
+        }
+    }
+
+    /// 查询在途批是否已在 GPU 完成（非阻塞）。
+    fn pipeline_query_done(&self, handle: &Mutex<Box<dyn ComputeHandle>>, token: usize) -> bool {
+        if token == usize::MAX {
+            return true;
+        }
+        let backend = self.backend.lock().unwrap().clone();
+        match backend.as_deref() {
+            Some(b) => {
+                let handle_guard = handle.lock().unwrap();
+                b.query_output_done(handle_guard.as_ref(), token)
+            }
+            None => true,
+        }
+    }
+
+    /// 非阻塞提交一批推理，返回在途批（内含默认初始化的 outputs）。
+    /// 提交失败不中断服务：记录降级令牌，outputs 保持默认。
+    fn pipeline_submit(
+        &self,
+        batch: Vec<Arc<EvalRequest>>,
+        handle: &Mutex<Box<dyn ComputeHandle>>,
+    ) -> ServePending {
+        let backend = self.backend.lock().unwrap().clone();
+        let input_buffers = self.input_buffers.lock().unwrap().clone();
+        let n = batch.len();
+        let outputs: Vec<NNOutput> = (0..n).map(|_| NNOutput::default()).collect();
+        let mut token = usize::MAX;
+        if let Some(backend) = backend.as_deref() {
+            let handle_guard = handle.lock().unwrap();
+            let mut bufs: Vec<parking_lot::MutexGuard<'_, NNResultBuf>> =
+                batch.iter().map(|r| r.buf.lock()).collect();
+            let mut input_refs: Vec<&mut NNResultBuf> =
+                bufs.iter_mut().map(|g| &mut **g).collect();
+            let dummy_buffers;
+            let input_buffers: &dyn InputBuffers = match input_buffers.as_deref() {
+                Some(b) => b.as_ref(),
+                None => {
+                    dummy_buffers = DummyInputBuffers;
+                    &dummy_buffers
+                }
+            };
+            match backend.submit_output(
+                handle_guard.as_ref(),
+                input_buffers,
+                n as i32,
+                &mut input_refs,
+            ) {
+                Ok(t) => token = t,
+                Err(e) => eprintln!("WARNING: Backend submit_output failed: {e}"),
+            }
+        }
+        self.gpu_busy.store(true, Ordering::Relaxed);
+        ServePending {
+            batch,
+            outputs,
+            token,
+        }
+    }
+
+    /// 等待在途批完成、解码、后处理并通知各请求方（与 process_batch
+    /// 的收尾段同口径）。
+    fn pipeline_finish(&self, pending: ServePending, handle: &Mutex<Box<dyn ComputeHandle>>) {
+        let ServePending {
+            batch,
+            mut outputs,
+            token,
+        } = pending;
+        let n = batch.len();
+        if token != usize::MAX {
+            let backend = self.backend.lock().unwrap().clone();
+            let input_buffers = self.input_buffers.lock().unwrap().clone();
+            if let Some(backend) = backend.as_deref() {
+                let handle_guard = handle.lock().unwrap();
+                let mut bufs: Vec<parking_lot::MutexGuard<'_, NNResultBuf>> =
+                    batch.iter().map(|r| r.buf.lock()).collect();
+                let mut input_refs: Vec<&mut NNResultBuf> =
+                    bufs.iter_mut().map(|g| &mut **g).collect();
+                let mut output_refs: Vec<&mut NNOutput> = outputs.iter_mut().collect();
+                let dummy_buffers;
+                let input_buffers: &dyn InputBuffers = match input_buffers.as_deref() {
+                    Some(b) => b.as_ref(),
+                    None => {
+                        dummy_buffers = DummyInputBuffers;
+                        &dummy_buffers
+                    }
+                };
+                backend
+                    .finish_output(
+                        handle_guard.as_ref(),
+                        input_buffers,
+                        token,
+                        n as i32,
+                        &mut input_refs,
+                        &mut output_refs,
+                    )
+                    .unwrap_or_else(|e| {
+                        eprintln!("WARNING: Backend finish_output failed: {e}");
+                    });
+            }
+        }
+
+        for (i, mut output) in outputs.into_iter().enumerate() {
+            // Turn raw backend logits into probabilities / points,
+            // mirroring the C++ NNEvaluator postprocessing.
+            self.postprocess_output(
+                &batch[i].board,
+                &batch[i].history,
+                batch[i].next_player,
+                &batch[i].nn_input_params,
+                &mut output,
+            );
+            let output = Arc::new(output);
+            if let Some(cache) = &self.nn_cache_table {
+                cache.set(&output);
+            }
+            let mut buf = batch[i].buf.lock();
+            buf.result = Some(output);
+            buf.has_result = true;
+            drop(buf);
+            batch[i].result_ready.notify_one();
+        }
+        self.gpu_busy.store(false, Ordering::Relaxed);
+        self.num_batches_processed.fetch_add(1, Ordering::Relaxed);
+        self.num_rows_processed.fetch_add(n as u64, Ordering::Relaxed);
+        self.waiting_for_finish.notify_all();
     }
 
     /// Compute and store results for a batch of requests.

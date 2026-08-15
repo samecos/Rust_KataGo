@@ -264,6 +264,54 @@ pub trait Backend: Send + Sync {
         outputs: &mut [&mut NNOutput],
     ) -> Result<(), NeuralNetError>;
 
+    // ASYNC PIPELINE (fork `cudaAsyncInferPipeline`) ----------------------------
+
+    /// 是否支持事件门控异步流水线：submit 非阻塞提交 GPU 工作，finish 等待
+    /// 完成事件并解码。serve 循环借此让"下一批的输入填充/上传提交"与
+    /// "上一批的 GPU 执行"重叠，消除批间 GPU 空闲。
+    /// 默认 false：后端只有同步 get_output。
+    fn supports_async_pipeline(&self) -> bool {
+        false
+    }
+
+    /// 非阻塞提交一批推理（填 pinned 输入 → 异步上传 → 启动前向 → 异步回传
+    /// → record 完成事件），返回批次令牌（供 finish/query 使用）。
+    /// 不会等待 GPU 完成；`input_bufs` 仅在本调用内被读取。
+    ///
+    /// 流水线契约：两次连续 submit 之间必须 finish 上一批，除非两批的
+    /// `num_batch_elts` 相同（CUDA 后端的 graph/工作区/pinned 缓冲绑定固定
+    /// batch 尺寸；同尺寸连交可重叠，异尺寸须先收尾触发重建）。
+    /// 默认实现：什么都不做（配合默认 finish_output 退化为同步）。
+    fn submit_output(
+        &self,
+        _handle: &dyn ComputeHandle,
+        _buffers: &dyn InputBuffers,
+        _num_batch_elts: i32,
+        _input_bufs: &mut [&mut NNResultBuf],
+    ) -> Result<usize, NeuralNetError> {
+        Ok(0)
+    }
+
+    /// 非阻塞查询令牌对应批次是否已在 GPU 完成（完成事件已触发）。
+    /// 默认实现：总是就绪（同步语义）。
+    fn query_output_done(&self, _handle: &dyn ComputeHandle, _token: usize) -> bool {
+        true
+    }
+
+    /// 等待令牌对应批次完成并解码到 `outputs`（阻塞 host 直至完成事件触发）。
+    /// 默认实现：退化为同步 get_output（忽略令牌）。
+    fn finish_output(
+        &self,
+        handle: &dyn ComputeHandle,
+        buffers: &dyn InputBuffers,
+        _token: usize,
+        num_batch_elts: i32,
+        input_bufs: &mut [&mut NNResultBuf],
+        outputs: &mut [&mut NNOutput],
+    ) -> Result<(), NeuralNetError> {
+        self.get_output(handle, buffers, num_batch_elts, input_bufs, outputs)
+    }
+
     // FOR TESTING ----------------------------------------------------------------
 
     /// If implemented, evaluate a convolution layer on the input buffer.
