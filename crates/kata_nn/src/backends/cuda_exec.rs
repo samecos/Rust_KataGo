@@ -974,7 +974,7 @@ fn hgemm(
     };
     let stream = active_stream(rt);
     // cuBLASLt 旁路(KATAGO_CUDA_CUBLASLT=1,仅非 pad 的 f32 输出 GEMM)。
-    if std::env::var("KATAGO_CUDA_CUBLASLT").is_ok() && b.kp == b.k {
+    if std::env::var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         if rt.cublaslt_gemm(&stream, a, &b.data, c, m, b.n, b.k, 0.0)? {
             return Ok(());
         }
@@ -1014,7 +1014,7 @@ fn hgemm_f16(
     m: usize,
 ) -> Result<(), String> {
     // cuBLASLt f16 输出旁路（KATAGO_CUDA_CUBLASLT=1）。
-    if std::env::var("KATAGO_CUDA_CUBLASLT").is_ok() && b.kp == b.k {
+    if std::env::var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         let stream0 = active_stream(rt);
         if rt.cublaslt_gemm_f16out(&stream0, a, &b.data, c, m, b.n, b.k)? {
             return Ok(());
@@ -1076,7 +1076,7 @@ fn hgemm_residual(
     };
     let stream = active_stream(rt);
     // cuBLASLt 旁路(KATAGO_CUDA_CUBLASLT=1,beta=1 残差)。
-    if std::env::var("KATAGO_CUDA_CUBLASLT").is_ok() && b.kp == b.k {
+    if std::env::var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         if rt.cublaslt_gemm(&stream, a, &b.data, c, m, b.n, b.k, 1.0)? {
             return Ok(());
         }
