@@ -844,3 +844,149 @@ hgemm_t32_f16out_kernel(const __half* __restrict__ A,
                         int M, int N, int K, float alpha, float beta) {
     t32_hgemm_impl<true>(A, B, nullptr, C, M, N, K, alpha, beta);
 }
+
+// ---------------------------------------------------------------------------
+// split-K GEMM（确定性两段式）：N 小 K 大的 GEMM grid-starved 时拆 K 到多
+// block，partial 缓冲 + reduce 合并（确定性，无 atomicAdd）。
+// partial：grid=(M/64, N/64, S)，blockIdx.z=split 段，算 K/S 部分和写
+//   C_partial[s][M,N]（f32，无残差）。
+// reduce：C[M,N] = Σ_s C_partial[s] + beta*C（原位）。
+// ---------------------------------------------------------------------------
+
+template <int SPLIT>
+__device__ __forceinline__ void t64_splitk_partial_impl(
+    const __half* __restrict__ A, const __half* __restrict__ B,
+    float* __restrict__ Cp, int M, int N, int K) {
+    // 本 block 的 K 子范围
+    const int k_per = (K + SPLIT - 1) / SPLIT;
+    const int k_lo = blockIdx.z * k_per;
+    const int k_hi = min(K, k_lo + k_per);
+    const int kspan = k_hi - k_lo;
+
+    __shared__ __half sA[T64_STAGES][T64_BM * T64_BK];
+    __shared__ __half sB[T64_STAGES][T64_BN * T64_BK];
+
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int blockM = blockIdx.x * T64_BM;
+    const int blockN = blockIdx.y * T64_BN;
+    const int warpM = blockM + (warp >> 1) * 16;
+    const int warpN = blockN + (warp & 1) * 32;
+
+    float c[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int r = 0; r < 4; ++r) c[j][r] = 0.0f;
+
+    auto issue_stage = [&](int stage, int kk) {
+        t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M,
+                              N, K, blockM, blockN);
+        t64_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid + 256,
+                              kk, M, N, K, blockM, blockN);
+        t64_load_chunk<true>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M, N,
+                             K, blockM, blockN);
+        t64_load_chunk<true>(&sA[0][0], &sB[0][0], A, B, stage, tid + 256, kk,
+                             M, N, K, blockM, blockN);
+    };
+
+    if (kspan > 0) issue_stage(0, k_lo);
+    v2_cp_commit();
+
+    for (int kk = k_lo; kk < k_hi; kk += T64_BK) {
+        const int stage = ((kk - k_lo) / T64_BK) & 1;
+        if (kk + T64_BK < k_hi) {
+            issue_stage(stage ^ 1, kk + T64_BK);
+            v2_cp_commit();
+            v2_cp_wait<1>();
+        } else {
+            v2_cp_wait<0>();
+        }
+        __syncthreads();
+
+        const unsigned sA_base =
+            (unsigned)__cvta_generic_to_shared(&sA[stage][0]);
+        const unsigned sB_base =
+            (unsigned)__cvta_generic_to_shared(&sB[stage][0]);
+        const int wrow = warp >> 1;
+        const int wcol = warp & 1;
+
+        unsigned b_frag[4][8];
+#pragma unroll
+        for (int t = 0; t < 4; ++t) {
+            const unsigned b_base =
+                sB_base + (((wcol * 32 + t * 8) >> 3) << 10);
+            v2_ldmatrix_x4(b_frag[t][0], b_frag[t][1], b_frag[t][2],
+                           b_frag[t][3], b_base, 256, lane);
+            v2_ldmatrix_x4(b_frag[t][4], b_frag[t][5], b_frag[t][6],
+                           b_frag[t][7], b_base + 512, 256, lane);
+        }
+        unsigned a_frag[4][4];
+#pragma unroll
+        for (int s = 0; s < 4; ++s) {
+            const unsigned a_base =
+                sA_base + (((wrow * 16) >> 3) << 10) + s * 256;
+            v2_ldmatrix_x4(a_frag[s][0], a_frag[s][1], a_frag[s][2],
+                           a_frag[s][3], a_base, 1024, lane);
+        }
+#pragma unroll
+        for (int s = 0; s < 4; ++s) {
+            const unsigned a0 = a_frag[s][0];
+            const unsigned a1 = a_frag[s][2];
+            const unsigned a2 = a_frag[s][1];
+            const unsigned a3 = a_frag[s][3];
+#pragma unroll
+            for (int t = 0; t < 4; ++t) {
+                const unsigned b0 = b_frag[t][s * 2];
+                const unsigned b1 = b_frag[t][s * 2 + 1];
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                    : "+f"(c[t][0]), "+f"(c[t][1]), "+f"(c[t][2]),
+                      "+f"(c[t][3])
+                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+            }
+        }
+        __syncthreads();
+    }
+
+    // partial 写出（无残差）：Cp[s][M,N]
+    float* out = Cp + (size_t)blockIdx.z * M * N;
+    const int row0 = warpM + lane / 4;
+    const int col0 = warpN + (lane % 4) * 2;
+#pragma unroll
+    for (int t = 0; t < 4; ++t) {
+        const int row = row0;
+        const int col = col0 + t * 8;
+        if (row >= M || col >= N) continue;
+        float* cp = out + (size_t)row * N + col;
+        cp[0] = c[t][0];
+        if (col + 1 < N) cp[1] = c[t][1];
+        if (row + 8 < M) {
+            cp[8 * N] = c[t][2];
+            if (col + 1 < N) cp[8 * N + 1] = c[t][3];
+        }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(V2_THREADS)
+hgemm_t64_splitk2_partial_kernel(const __half* __restrict__ A,
+                                 const __half* __restrict__ B,
+                                 float* __restrict__ Cp, int M, int N, int K) {
+    t64_splitk_partial_impl<2>(A, B, Cp, M, N, K);
+}
+
+// reduce：C = Σ_s Cp[s] + beta*C（原位）。
+extern "C" __global__ void splitk_reduce_kernel(float* __restrict__ C,
+                                                const float* __restrict__ Cp,
+                                                int M, int N, int splits,
+                                                float beta) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= M * N) return;
+    float acc = 0.0f;
+    for (int s = 0; s < splits; ++s) {
+        acc += Cp[(size_t)s * M * N + i];
+    }
+    C[i] = acc + beta * C[i];
+}

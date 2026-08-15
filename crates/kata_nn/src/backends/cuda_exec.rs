@@ -247,6 +247,7 @@ impl CudaModel {
         let vec_b = &mut ws.vec_b;
         let vall = &mut ws.vall;
         let conv1pg = &mut ws.conv1pg;
+        let c_partial = &mut ws.c_partial;
         let pass_logits = &mut ws.pass_logits;
         let out_policy = &mut ws.out_policy;
         let out_value = &mut ws.out_value;
@@ -324,7 +325,13 @@ impl CudaModel {
                         "Linear 的 bias/act/residual 组合本执行器未实现（IR 恒为 None/false/false）"
                     );
                     if w.k == trunk && w.n == mid {
-                        hgemm(rt, gated768, w, act384, m)?;
+                        // Linear down（K=768, N=384, beta=0）：starved GEMM，
+                        // split-K=2 拆 K（KATAGO_CUDA_SPLITK=1 启用）。
+                        if std::env::var("KATAGO_CUDA_SPLITK").is_ok() {
+                            hgemm_splitk2(rt, gated768, w, c_partial, act384, m, 0.0)?;
+                        } else {
+                            hgemm(rt, gated768, w, act384, m)?;
+                        }
                         false
                     } else if w.k == mid && w.n == trunk {
                         // 前瞻：后一层是 GateSilu(768) 时融合（up 残差 GEMM
@@ -408,8 +415,13 @@ impl CudaModel {
                         timed!("qkv", hgemm_f16(rt, normed, qkv, act1152, m));
                         timed!("attn", attention_fa2(rt, act1152, cos, sin, normed, ls, ld, batch * lh, scale, lh));
                     }
-                    // 输出投影 beta=1 直接残差进 act384（省独立残差 kernel）
-                    timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
+                    // 输出投影 beta=1 直接残差进 act384（省独立残差 kernel）。
+                    // N=384 grid-starved：KATAGO_CUDA_SPLITK=1 时拆 K=2 两段。
+                    if std::env::var("KATAGO_CUDA_SPLITK").is_ok() {
+                        timed!("outproj", hgemm_splitk2(rt, normed, out, c_partial, act384, m, 1.0));
+                    } else {
+                        timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
+                    }
                     if sub_profile {
                         let total: f32 = sub_times.iter().map(|t| t.1.max(0.0)).sum();
                         eprintln!("[cuda-profile] attention l{li} total {total:.3} ms: {}",
@@ -1052,6 +1064,57 @@ fn hgemm_residual(
             .launch(cfg)
     }
     .map_err(|e| format!("{kname} residual launch failed: {e}"))?;
+    Ok(())
+}
+
+/// split-K GEMM（确定性两段式，N 小 K 大 grid-starved 场景）：
+/// partial 算 K/2 部分和 → reduce 合并 + beta*C。
+#[allow(clippy::too_many_arguments)]
+fn hgemm_splitk2(
+    rt: &CudaRuntime,
+    a: &CudaSlice<u16>,
+    b: &WeightBuf,
+    cp: &mut CudaSlice<f32>,
+    c: &mut CudaSlice<f32>,
+    m: usize,
+    beta: f32,
+) -> Result<(), String> {
+    let fp = rt.get_func("hgemm_t64_splitk2_partial_kernel")?;
+    let fr = rt.get_func("splitk_reduce_kernel")?;
+    let stream = active_stream(rt);
+    let grid = (m.div_ceil(64) as u32, b.n.div_ceil(64) as u32, 2u32);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let alpha = 1.0f32;
+    unsafe {
+        stream
+            .launch_builder(&fp)
+            .arg(a)
+            .arg(&b.data)
+            .arg(&mut *cp)
+            .arg(&(m as i32))
+            .arg(&(b.n as i32))
+            .arg(&(b.kp as i32))
+            .arg(&alpha)
+            .launch(cfg)
+    }
+    .map_err(|e| format!("splitk partial launch failed: {e}"))?;
+    let n = m * b.n;
+    unsafe {
+        stream
+            .launch_builder(&fr)
+            .arg(c)
+            .arg(&mut *cp)
+            .arg(&(m as i32))
+            .arg(&(b.n as i32))
+            .arg(&2i32)
+            .arg(&beta)
+            .launch(LaunchConfig::for_num_elems(n as u32))
+    }
+    .map_err(|e| format!("splitk reduce launch failed: {e}"))?;
     Ok(())
 }
 
@@ -2019,6 +2082,8 @@ pub struct CudaWorkspace {
     pub vall: CudaSlice<f32>,
     /// PolicyHead 合并的 conv1p|conv1g 输出 [M,192] f32。
     pub conv1pg: CudaSlice<f32>,
+    /// split-K partial 缓冲 [2, M, 384] f32（N=384 的 starved GEMM 拆 K=2）。
+    pub c_partial: CudaSlice<f32>,
     pub pass_logits: CudaSlice<f32>,
     /// `[B, 6, 362]` 策略 logits（通道 0 基策略、通道 5 乐观策略，pass 位 361）。
     pub out_policy: CudaSlice<f32>,
@@ -2065,6 +2130,7 @@ impl CudaWorkspace {
             vec_b: zeros32(stream, batch * 96)?,
             vall: zeros32(stream, batch * 21)?,
             conv1pg: zeros32(stream, m * 192)?,
+            c_partial: zeros32(stream, 2 * m * 384)?,
             pass_logits: zeros32(stream, batch * 6)?,
             out_policy: zeros32(stream, batch * 6 * (s + 1))?,
             out_value: zeros32(stream, batch * 3)?,
