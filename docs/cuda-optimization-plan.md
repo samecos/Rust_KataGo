@@ -69,6 +69,42 @@
   `export PATH=/usr/local/cuda-13.2/bin:$HOME/.cargo/bin:$PATH`,模型经
   `/mnt/d/code/b11fix.onnx` 读取,对拍 PASS。
 
+## cuBLASLt 集成(2026-08-15,t=1 追平 TRT 的关键)
+
+**微基准(batch=1,[361×384×768])**:cuBLASLt 9.7µs vs 手写 t64 14.4µs(快 33%)。
+
+| 线程 | 手写 kernel | cuBLASLt | 变化 |
+|---|---|---|---|
+| t=1 | 208.6 | **295.5** | **+42%,超 TRT 253** |
+| t=8 | 351.8 | **506.7** | **+44%,TRT 2.1×** |
+
+- 实现:`cublasLtMatmul`(f16 输入、f32 累加、f32/f16 输出),按 (m,n,k,beta)
+  缓存启发式算法;graph capture 兼容(getHeuristic 是纯 host 查询)。
+- 接入:`hgemm`/`hgemm_residual`/`hgemm_f16`(kp==k 时),融合的 GEMM
+  (gatesilu epilogue、swiglu)保留手写。默认启用,`KATAGO_CUDA_CUBLASLT=0` 回退。
+- **证伪记录更新**:t=1 追平 TRT 靠的是 **cuBLASLt 的 GEMM tile heuristic**,
+  而非 split-K/t32/stream-K(那些是"增加并行度",不解决 batch=1 的
+  kernel 质量问题;cuBLASLt 是"更好的 kernel")。
+
+## 混合精度评估(2026-08-15 调研,来源见下)
+
+**明确不做**:
+- **both16**(attention FP16 累加):Hopper 起 FP32 累加与 FP16 累加**同速**,
+  both16 是 FA4 的寄存器优化而非吞吐优化;换 FP16 累加只降精度不提速度。
+  且 FA4 官方默认 FP32 累加。
+- **GEMM FP16 累加**:长 K(384-1152)累加误差超门,且同速。
+- **BF16**:尾数精度低于 FP16(fork 证伪)。
+- **FP8/INT8 直接全量化**:围棋网络 policy/value 对量化敏感。
+
+**FP8/INT8 的可行路径**(若未来要做):
+- **KataGo 官方 2026-08 PTQ 策略**(commit ff27077):只量化 attention/SwiGLU
+  的 **weight projection**,attention 的 QKᵀ/AV、softmax、RMSNorm、**所有
+  policy/value head 保持 FP32**。
+- SM120 支持 FP8 `mma.sync.m16n8k32`(E4M3/E5M2,FP32 累加)+ MX block-scale,
+  社区实测 FP8 ~2× FP16 吞吐。
+- **但工程量大**:量化图需接到自研 kernel/CUTLASS,且精度需逐层验证。
+  **结论:现阶段 FP16 + cuBLASLt 已是最佳性价比;FP8 留作后续大工程。**
+
 ## 决策组（严格有序，后组不得改写前组配置键）
 
 | # | 组 | 战术 | 状态 |
