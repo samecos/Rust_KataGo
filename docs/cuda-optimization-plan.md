@@ -73,15 +73,18 @@
 
 **微基准(batch=1,[361×384×768])**:cuBLASLt 9.7µs vs 手写 t64 14.4µs(快 33%)。
 
-| 线程 | 手写 kernel | cuBLASLt | 变化 |
-|---|---|---|---|
-| t=1 | 208.6 | **295.5** | **+42%,超 TRT 253** |
-| t=8 | 351.8 | **506.7** | **+44%,TRT 2.1×** |
+| 线程 | 手写 kernel | cuBLASLt(Windows) | cuBLASLt(WSL) | 变化 |
+|---|---|---|---|---|
+| t=1 | 208.6 | **295.5** | 289.3 | **+42%,超 TRT 253** |
+| t=8 | 351.8 | **506.7** | 535.0 | **+44%,TRT 2.1×** |
+| t=16 | 441.3 | **611.8** | 625.1 | **+38%** |
 
 - 实现:`cublasLtMatmul`(f16 输入、f32 累加、f32/f16 输出),按 (m,n,k,beta)
   缓存启发式算法;graph capture 兼容(getHeuristic 是纯 host 查询)。
 - 接入:`hgemm`/`hgemm_residual`/`hgemm_f16`(kp==k 时),融合的 GEMM
   (gatesilu epilogue、swiglu)保留手写。默认启用,`KATAGO_CUDA_CUBLASLT=0` 回退。
+- WSL 注意:需 `apt-get install libcublas-13-2` 且
+  `LD_LIBRARY_PATH=/usr/local/cuda-13.2/targets/x86_64-linux/lib`。
 - **证伪记录更新**:t=1 追平 TRT 靠的是 **cuBLASLt 的 GEMM tile heuristic**,
   而非 split-K/t32/stream-K(那些是"增加并行度",不解决 batch=1 的
   kernel 质量问题;cuBLASLt 是"更好的 kernel")。
