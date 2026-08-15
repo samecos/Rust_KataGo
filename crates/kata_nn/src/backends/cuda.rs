@@ -99,6 +99,94 @@ mod imp {
             Err(format!("kernel {name} not found"))
         }
 
+        /// 设置 persisting-L2 访问窗口（fork G6 复刻）：
+        /// `cuCtxSetLimit(PERSISTING_L2_CACHE_SIZE)` + `cuStreamSetAttribute(
+        /// ACCESS_POLICY_WINDOW)`。窗口内地址的访问按 PERSISTING 驻留 L2，
+        /// 窗口外按 STREAMING。返回是否成功（不支持时静默跳过，不影响正确性）。
+        /// G6 实验：当前 batch(≤16)工作集 ~13MB 本已驻留 48MB L2,无收益;
+        /// 保留供大 batch/多模型场景。ABBA 实测 t=1/t=8 均持平。
+        #[cfg(feature = "cuda")]
+        #[allow(dead_code)]
+        pub fn set_persisting_l2_window(
+            &self,
+            stream: &cudarc::driver::CudaStream,
+            base_ptr: u64,
+            num_bytes: usize,
+        ) -> Result<(), String> {
+            use cudarc::driver::sys;
+            // 1. 提升 persisting L2 上限到窗口大小（钳制到设备上限）
+            let max_persisting = self
+                .device
+                .attribute(
+                    sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_PERSISTING_L2_CACHE_SIZE,
+                )
+                .map_err(|e| format!("query max persisting L2: {e}"))? as usize;
+            let window_cap = self
+                .device
+                .attribute(
+                    sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+                )
+                .map_err(|e| format!("query max access window: {e}"))? as usize;
+            let eff_bytes = num_bytes.min(window_cap);
+            let request = max_persisting.min(eff_bytes);
+            self.device
+                .set_limit(sys::CUlimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, request)
+                .map_err(|e| format!("set persisting L2 limit: {e}"))?;
+            // 2. 设置流的访问策略窗口
+            let mut value: sys::CUstreamAttrValue = unsafe { std::mem::zeroed() };
+            unsafe {
+                value.accessPolicyWindow = sys::CUaccessPolicyWindow {
+                    base_ptr: base_ptr as *mut core::ffi::c_void,
+                    num_bytes: eff_bytes,
+                    hitRatio: 1.0,
+                    hitProp: sys::CUaccessProperty::CU_ACCESS_PROPERTY_PERSISTING,
+                    missProp: sys::CUaccessProperty::CU_ACCESS_PROPERTY_STREAMING,
+                };
+            }
+            let res = unsafe {
+                sys::cuStreamSetAttribute(
+                    stream.cu_stream(),
+                    sys::CUlaunchAttributeID::CU_LAUNCH_ATTRIBUTE_ACCESS_POLICY_WINDOW,
+                    &value,
+                )
+            };
+            if res != sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("cuStreamSetAttribute failed: {res:?}"));
+            }
+            Ok(())
+        }
+
+        /// 清除流的 persisting-L2 窗口（恢复正常访问属性）。
+        #[cfg(feature = "cuda")]
+        #[allow(dead_code)]
+        pub fn clear_l2_window(
+            &self,
+            stream: &cudarc::driver::CudaStream,
+        ) -> Result<(), String> {
+            use cudarc::driver::sys;
+            let mut value: sys::CUstreamAttrValue = unsafe { std::mem::zeroed() };
+            unsafe {
+                value.accessPolicyWindow = sys::CUaccessPolicyWindow {
+                    base_ptr: core::ptr::null_mut(),
+                    num_bytes: 0,
+                    hitRatio: 0.0,
+                    hitProp: sys::CUaccessProperty::CU_ACCESS_PROPERTY_NORMAL,
+                    missProp: sys::CUaccessProperty::CU_ACCESS_PROPERTY_NORMAL,
+                };
+            }
+            let res = unsafe {
+                sys::cuStreamSetAttribute(
+                    stream.cu_stream(),
+                    sys::CUlaunchAttributeID::CU_LAUNCH_ATTRIBUTE_ACCESS_POLICY_WINDOW,
+                    &value,
+                )
+            };
+            if res != sys::CUresult::CUDA_SUCCESS {
+                return Err(format!("clear L2 window failed: {res:?}"));
+            }
+            Ok(())
+        }
+
         /// 冒烟/自检：`out[i] = a[i] + b[i]`。
         pub fn f32_add(&self, a: &[f32], b: &[f32]) -> Result<Vec<f32>, String> {
             assert_eq!(a.len(), b.len());
