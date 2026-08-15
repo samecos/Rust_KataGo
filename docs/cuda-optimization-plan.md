@@ -156,6 +156,52 @@
 - **但工程量大**:量化图需接到自研 kernel/CUTLASS,且精度需逐层验证。
   **结论:现阶段 FP16 + cuBLASLt 已是最佳性价比;FP8 留作后续大工程。**
 
+### 混合精度实测终局(2026-08-15,三段实验闭环)
+
+**① kernel 级微基准**(tests/bench_lowprec.rs,cuBLASLt,us/iter):
+
+| 形状(N×K) | M=2888 fp16 | fp8 | int8 |
+|---|---|---|---|
+| 1152×384 (qkv/up) | 38.6 | **23.9 (-38%)** | 全部布局组合 heuristic 拒绝 |
+| 384×1152 (down) | 34.4 | **21.7 (-37%)** | 同上 |
+| 384×384 (outproj) | 22.3 | 18.7 (-16%) | 同上 |
+
+- M=5776 时 fp8 down-proj -58%;但 M=361 时 outproj fp8 **反而更慢**
+  (17.2 vs 16.1)——FP8 只在部分形状有收益,需 per-shape 选择。
+- **cublasLt INT8(imma) 在 CUDA13.2/SM120 全灭**(COL32/COL4_4R2_8C/
+  ROW/scaleF32 六组合全 INVALID_VALUE)——NVIDIA 已在新架构砍掉该路径。
+
+**② 端到端精度模拟**(scripts/sim_quant.py,ReferenceEvaluator 逐语义
+模拟,官方 transformer scope=231 个 trunk MatMul,16 个对拍局面):
+
+| 变体 | top-1 | policy KL | winprob 误差 | 判定 |
+|---|---|---|---|---|
+| fp8w(仅权重 E4M3) | 14/16 | 8.6e-3 | ≤8.6% | 勉强 |
+| fp8full(E4M3 全) | 13/16 | 2.0e-2 | ≤6.9%,**翻非平局点 pos10** | ❌ 不达标 |
+| **int8full(per-token×per-chan)** | 14/16 | **1.2e-3** | ≤3.8% | ✅ 达标 |
+
+- FP8 的 3 位尾数是硬地板:per-row/per-channel 缩放几乎不改善
+  (3.75e-2→3.56e-2),MXFP8 block-scale 也救不了 mantissa。
+- int8full 的 2 处 top-1 翻转(pos0/2)margin 均 <0.01(近乎平局),
+  所有非平局位置全部保持——**INT8 精度可用于生产**。
+
+**③ INT8 自研 kernel 原型**(cuda-kernels/gemm_int8.cu,t64 骨架
+imma m16n8k32 变体,epilogue 内反量化直出 f16):
+- **正确性一次通过**(bad=0/50304,max_rel=0)——片段布局推导正确。
+- 速度:仅 7-73 TOPS(INT8 峰值 176 的 27-42%),vs cuBLASLt FP16
+  **0.65-1.28x**——追平都费劲,远低于 1.5x 继续门槛。
+- 原因:手工 kernel 效率天花板(~50% 峰值,与手写 FP16 vs cuBLASLt
+  的 67% 同一量级);即使优化到厂商级 ~80%,也只有 ~1.35x,
+  再扣量化/反量化开销,端到端预期 +5~10% 而精度有代价。
+
+**最终结论(数据驱动):维持 FP16 + cuBLASLt**。
+- FP8 E4M3:速度够,精度不够(围棋 value/policy 对 3 位尾数敏感)。
+- INT8:精度够,但 SM120 上无厂商 GEMM,自研追不平 cuBLASLt FP16。
+- INT4/FP4:精度比 FP8 更差,直接出局。
+- 复测入口:`--test bench_lowprec`(微基准)、`--test bench_lowprec_scale`
+  (缩放策略)、`scripts/sim_quant.py`(端到端精度)、igemm kernel 保留
+  在 kernel 表中(正确性已验证,未来 NVIDIA 恢复 INT8 路径或换硬件时启用)。
+
 ## 决策组（严格有序，后组不得改写前组配置键）
 
 | # | 组 | 战术 | 状态 |

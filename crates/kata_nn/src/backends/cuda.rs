@@ -76,6 +76,31 @@ mod imp {
     unsafe impl Sync for CublasLtState {}
 
     impl CudaRuntime {
+        /// cublasLt 句柄（实验/测试路径用；生产 GEMM 走 cublaslt_gemm*）。
+        #[doc(hidden)]
+        pub fn cublaslt_handle(&self) -> Option<cudarc::cublaslt::sys::cublasLtHandle_t> {
+            self.cublaslt.as_ref().map(|st| st.handle)
+        }
+
+        /// cublasLt 工作区大小（字节）。
+        #[doc(hidden)]
+        pub fn cublaslt_workspace_len(&self) -> usize {
+            self.cublaslt.as_ref().map(|st| st.workspace.len()).unwrap_or(0)
+        }
+
+        /// cublasLt 工作区设备指针（调用方须保证 rt 存活）。
+        #[doc(hidden)]
+        pub fn cublaslt_workspace_ptr(&self, stream: &cudarc::driver::CudaStream) -> (u64, u64) {
+            use cudarc::driver::DevicePtr;
+            match &self.cublaslt {
+                Some(st) => {
+                    let (p, _g) = st.workspace.device_ptr(stream);
+                    (p, 0)
+                }
+                None => (0, 0),
+            }
+        }
+
         /// 初始化设备 0 并加载最优 SM 目标的全部 kernel（fail-closed）。
         pub fn new() -> Result<Self, String> {
             let device = CudaContext::new(0).map_err(|e| format!("CUDA device 0 init failed: {e}"))?;
