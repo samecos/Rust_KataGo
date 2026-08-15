@@ -12,7 +12,8 @@ mod imp {
         CudaContext, CudaFunction, CudaModule, CudaSlice, LaunchConfig, PushKernelArg,
     };
     use cudarc::driver::sys::CUdevice_attribute;
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     // 由 build.rs 生成的 PTX 表：`(target_id, compute_capability, [(kernel_name, ptx_bytes)])`。
     include!(concat!(env!("OUT_DIR"), "/cuda_kernels.rs"));
@@ -59,7 +60,20 @@ mod imp {
         pub device: Arc<CudaContext>,
         pub target_id: String,
         modules: Vec<(String, Arc<CudaModule>)>,
+        /// cuBLASLt GEMM(f16 输入 f32 累加输出),按 (m,n,k) 缓存启发式算法。
+        /// graph capture 前需 warmup(第一次调用完成算法选择)。
+        cublaslt: Option<CublasLtState>,
     }
+
+    /// cuBLASLt 状态:handle + workspace + 算法缓存。
+    struct CublasLtState {
+        handle: cudarc::cublaslt::sys::cublasLtHandle_t,
+        workspace: CudaSlice<u8>,
+        algo_cache: Mutex<HashMap<(usize, usize, usize, bool), cudarc::cublaslt::sys::cublasLtMatmulAlgo_t>>,
+    }
+    // cuBLASLt handle 是 opaque 指针,create 后可跨线程使用(文档:线程安全)。
+    unsafe impl Send for CublasLtState {}
+    unsafe impl Sync for CublasLtState {}
 
     impl CudaRuntime {
         /// 初始化设备 0 并加载最优 SM 目标的全部 kernel（fail-closed）。
@@ -81,11 +95,204 @@ mod imp {
                     .map_err(|e| format!("failed to load PTX for kernel {name}: {e}"))?;
                 modules.push((name.to_string(), module));
             }
+            // cuBLASLt 初始化(可选;失败降级为手写 kernel)
+            let cublaslt = Self::init_cublaslt(&device);
             Ok(Self {
                 device,
                 target_id: target_id.to_string(),
                 modules,
+                cublaslt,
             })
+        }
+
+        /// 初始化 cuBLASLt handle + workspace。
+        fn init_cublaslt(device: &Arc<CudaContext>) -> Option<CublasLtState> {
+            use cudarc::cublaslt::sys;
+            unsafe {
+                let mut handle: sys::cublasLtHandle_t = std::ptr::null_mut();
+                let r = sys::cublasLtCreate(&mut handle);
+                if r != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                    eprintln!("note: cublasLtCreate failed ({r:?}), cublaslt disabled");
+                    return None;
+                }
+                let stream = device.default_stream();
+                let ws: CudaSlice<u8> = match stream.alloc(32 * 1024 * 1024) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        eprintln!("note: cublaslt workspace alloc failed ({e}), disabled");
+                        return None;
+                    }
+                };
+                Some(CublasLtState {
+                    handle,
+                    workspace: ws,
+                    algo_cache: Mutex::new(HashMap::new()),
+                })
+            }
+        }
+
+        /// cuBLASLt GEMM：`C[m,n] = alpha * A[m,k] @ B[n,k]^T + beta*C`。
+        /// f16 输入、f32 累加、f32 输出。返回是否成功（false → 调用方回退手写）。
+        /// graph capture 前须至少调用一次同 shape（完成算法选择）。
+        #[allow(clippy::too_many_arguments)]
+        pub fn cublaslt_gemm(
+            &self,
+            stream: &cudarc::driver::CudaStream,
+            a: &CudaSlice<u16>,
+            b: &CudaSlice<u16>,
+            c: &mut CudaSlice<f32>,
+            m: usize,
+            n: usize,
+            k: usize,
+            beta: f32,
+        ) -> Result<bool, String> {
+            use cudarc::cublaslt::sys;
+            let Some(st) = &self.cublaslt else { return Ok(false) };
+            let key = (m, n, k, beta != 0.0);
+            let algo = {
+                let cache = st.algo_cache.lock().unwrap();
+                cache.get(&key).copied()
+            };
+            let algo = match algo {
+                Some(a) => Some(a),
+                None => match self.cublaslt_select_algo(st, m, n, k)? {
+                    Some(a) => {
+                        st.algo_cache.lock().unwrap().insert(key, a);
+                        Some(a)
+                    }
+                    None => None,
+                },
+            };
+            let Some(algo) = algo else { return Ok(false) };
+            self.cublaslt_exec(st, stream, &algo, a, b, c, m, n, k, beta)?;
+            Ok(true)
+        }
+
+        /// 选算法(heuristic 查询)。
+        fn cublaslt_select_algo(
+            &self,
+            st: &CublasLtState,
+            m: usize,
+            n: usize,
+            k: usize,
+        ) -> Result<Option<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t>, String> {
+            use cudarc::cublaslt::sys;
+            unsafe {
+                let mut desc: sys::cublasLtMatmulDesc_t = std::ptr::null_mut();
+                sys::cublasLtMatmulDescCreate(
+                    &mut desc,
+                    sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                    sys::cudaDataType_t::CUDA_R_32F,
+                );
+                let transa: u32 = 1; // CUBLAS_OP_T
+                let transb: u32 = 0; // CUBLAS_OP_N
+                sys::cublasLtMatmulDescSetAttribute(
+                    desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSA,
+                    &transa as *const _ as *const _, std::mem::size_of_val(&transa));
+                sys::cublasLtMatmulDescSetAttribute(
+                    desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSB,
+                    &transb as *const _ as *const _, std::mem::size_of_val(&transb));
+                // 布局(列主序映射):A_cm=B 内存 [k,n] ld=k;B_cm=A 内存 [k,m] ld=k;C [n,m] ld=n
+                let mut a_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                let mut b_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                let mut c_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                sys::cublasLtMatrixLayoutCreate(&mut a_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, n as u64, k as i64);
+                sys::cublasLtMatrixLayoutCreate(&mut b_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, m as u64, k as i64);
+                sys::cublasLtMatrixLayoutCreate(&mut c_lay, sys::cudaDataType_t::CUDA_R_32F, n as u64, m as u64, n as i64);
+                let mut pref: sys::cublasLtMatmulPreference_t = std::ptr::null_mut();
+                sys::cublasLtMatmulPreferenceCreate(&mut pref);
+                let ws_size = st.workspace.len();
+                sys::cublasLtMatmulPreferenceSetAttribute(
+                    pref,
+                    sys::cublasLtMatmulPreferenceAttributes_t::CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                    &ws_size as *const _ as *const _, std::mem::size_of_val(&ws_size));
+                let mut heur: sys::cublasLtMatmulHeuristicResult_t = std::mem::zeroed();
+                let mut cnt = 0i32;
+                let r = sys::cublasLtMatmulAlgoGetHeuristic(
+                    st.handle, desc, a_lay, b_lay, c_lay, c_lay, pref, 1, &mut heur, &mut cnt,
+                );
+                sys::cublasLtMatmulDescDestroy(desc);
+                sys::cublasLtMatrixLayoutDestroy(a_lay);
+                sys::cublasLtMatrixLayoutDestroy(b_lay);
+                sys::cublasLtMatrixLayoutDestroy(c_lay);
+                sys::cublasLtMatmulPreferenceDestroy(pref);
+                if r != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS || cnt == 0 {
+                    return Ok(None);
+                }
+                Ok(Some(heur.algo))
+            }
+        }
+
+        /// 执行 cuBLASLt GEMM(已选算法)。
+        #[allow(clippy::too_many_arguments)]
+        fn cublaslt_exec(
+            &self,
+            st: &CublasLtState,
+            stream: &cudarc::driver::CudaStream,
+            algo: &cudarc::cublaslt::sys::cublasLtMatmulAlgo_t,
+            a: &CudaSlice<u16>,
+            b: &CudaSlice<u16>,
+            c: &mut CudaSlice<f32>,
+            m: usize,
+            n: usize,
+            k: usize,
+            beta: f32,
+        ) -> Result<(), String> {
+            use cudarc::cublaslt::sys;
+            use cudarc::driver::{DevicePtr, DevicePtrMut};
+            unsafe {
+                let mut desc: sys::cublasLtMatmulDesc_t = std::ptr::null_mut();
+                sys::cublasLtMatmulDescCreate(
+                    &mut desc,
+                    sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                    sys::cudaDataType_t::CUDA_R_32F,
+                );
+                let transa: u32 = 1; // CUBLAS_OP_T
+                let transb: u32 = 0; // CUBLAS_OP_N
+                sys::cublasLtMatmulDescSetAttribute(
+                    desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSA,
+                    &transa as *const _ as *const _, std::mem::size_of_val(&transa));
+                sys::cublasLtMatmulDescSetAttribute(
+                    desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSB,
+                    &transb as *const _ as *const _, std::mem::size_of_val(&transb));
+                let mut a_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                let mut b_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                let mut c_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
+                sys::cublasLtMatrixLayoutCreate(&mut a_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, n as u64, k as i64);
+                sys::cublasLtMatrixLayoutCreate(&mut b_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, m as u64, k as i64);
+                sys::cublasLtMatrixLayoutCreate(&mut c_lay, sys::cudaDataType_t::CUDA_R_32F, n as u64, m as u64, n as i64);
+                let alpha = 1.0f32;
+                let (a_ptr, _ga) = a.device_ptr(stream);
+                let (b_ptr, _gb) = b.device_ptr(stream);
+                let (c_ptr, _gc) = c.device_ptr_mut(stream);
+                let (ws_ptr, _gw) = st.workspace.device_ptr(stream);
+                let r = sys::cublasLtMatmul(
+                    st.handle,
+                    desc,
+                    &alpha as *const _ as *const _,
+                    b_ptr as *const _,   // A_cm = B
+                    a_lay,
+                    a_ptr as *const _,   // B_cm = A
+                    b_lay,
+                    &beta as *const _ as *const _,
+                    c_ptr as *const _,
+                    c_lay,
+                    c_ptr as *mut _,
+                    c_lay,
+                    algo,
+                    ws_ptr as *mut _,
+                    st.workspace.len(),
+                    stream.cu_stream() as _,
+                );
+                sys::cublasLtMatmulDescDestroy(desc);
+                sys::cublasLtMatrixLayoutDestroy(a_lay);
+                sys::cublasLtMatrixLayoutDestroy(b_lay);
+                sys::cublasLtMatrixLayoutDestroy(c_lay);
+                if r != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                    return Err(format!("cublasLtMatmul failed: {r:?}"));
+                }
+            }
+            Ok(())
         }
 
         /// 按名字查找 kernel 函数。

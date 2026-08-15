@@ -749,3 +749,102 @@ fn cuda_hgemm_t64n32_vs_cpu() {
     eprintln!("t64n32 max_err = {max_err:.3e}");
     assert!(max_err < 0.01, "t64n32 误差过大");
 }
+
+/// 手写 GEMM 纯时间(batch=1,与 cublaslt_bench.cu 同形状对照)。
+#[test]
+fn cuda_hgemm_pure_time() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else { return };
+    use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
+    use kata_nn::backends::cuda::f32_to_f16_bits;
+    let (m, n, k) = (361usize, 384usize, 768usize);
+    let mut rng = kata_core::rng::Rand::new_from_seed("pure-time");
+    let rand_f = |rng: &mut kata_core::rng::Rand| -> f32 {
+        (rng.next_u64() as f64 / u64::MAX as f64 - 0.5) as f32 * 2.0
+    };
+    let a: Vec<u16> = (0..m * k).map(|_| f32_to_f16_bits(rand_f(&mut rng))).collect();
+    let b: Vec<u16> = (0..n * k).map(|_| f32_to_f16_bits(rand_f(&mut rng))).collect();
+    let stream = rt.device.default_stream();
+    let mut d_a: CudaSlice<u16> = unsafe { stream.alloc(m * k) }.unwrap();
+    let mut d_b: CudaSlice<u16> = unsafe { stream.alloc(n * k) }.unwrap();
+    let mut d_c: CudaSlice<f32> = stream.alloc_zeros(m * n).unwrap();
+    stream.memcpy_htod(a.as_slice(), &mut d_a).unwrap();
+    stream.memcpy_htod(b.as_slice(), &mut d_b).unwrap();
+
+    for kname in ["hgemm_v2_kernel", "hgemm_t64_kernel"] {
+        let f = rt.get_func(kname).unwrap();
+        let (tile, thr) = if kname.contains("t64") { (64usize, 256u32) } else { (128, 256) };
+        let cfg = LaunchConfig {
+            grid_dim: (m.div_ceil(tile) as u32, n.div_ceil(tile) as u32, 1),
+            block_dim: (thr, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        for _ in 0..3 {
+            unsafe { stream.launch_builder(&f).arg(&d_a).arg(&d_b).arg(&mut d_c)
+                .arg(&(m as i32)).arg(&(n as i32)).arg(&(k as i32)).arg(&1.0f32).arg(&0.0f32).launch(cfg) }.unwrap();
+        }
+        stream.synchronize().unwrap();
+        let mut best = f32::MAX;
+        for _ in 0..5 {
+            let t0 = std::time::Instant::now();
+            for _ in 0..50 {
+                unsafe { stream.launch_builder(&f).arg(&d_a).arg(&d_b).arg(&mut d_c)
+                    .arg(&(m as i32)).arg(&(n as i32)).arg(&(k as i32)).arg(&1.0f32).arg(&0.0f32).launch(cfg) }.unwrap();
+            }
+            stream.synchronize().unwrap();
+            best = best.min(t0.elapsed().as_micros() as f32 / 50.0);
+        }
+        eprintln!("{kname} [{m}x{n}x{k}] = {best:.2} us");
+    }
+}
+
+/// cuBLASLt GEMM 数值对拍 + 计时(f16 in, f32 out)。
+#[test]
+fn cuda_cublaslt_gemm_vs_cpu() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else { return };
+    use cudarc::driver::CudaSlice;
+    use kata_nn::backends::cuda::{f16_to_f32_bits, f32_to_f16_bits};
+    let (m, n, k) = (361usize, 384usize, 768usize);
+    let mut rng = kata_core::rng::Rand::new_from_seed("lt-verify");
+    let rand_f = |rng: &mut kata_core::rng::Rand| -> f32 {
+        (rng.next_u64() as f64 / u64::MAX as f64 - 0.5) as f32 * 2.0
+    };
+    let a: Vec<u16> = (0..m * k).map(|_| f32_to_f16_bits(rand_f(&mut rng))).collect();
+    let b: Vec<u16> = (0..n * k).map(|_| f32_to_f16_bits(rand_f(&mut rng))).collect();
+    let stream = rt.device.default_stream();
+    let mut d_a: CudaSlice<u16> = unsafe { stream.alloc(m * k) }.unwrap();
+    let mut d_b: CudaSlice<u16> = unsafe { stream.alloc(n * k) }.unwrap();
+    let mut d_c: CudaSlice<f32> = stream.alloc_zeros(m * n).unwrap();
+    stream.memcpy_htod(a.as_slice(), &mut d_a).unwrap();
+    stream.memcpy_htod(b.as_slice(), &mut d_b).unwrap();
+    let ok = rt.cublaslt_gemm(&stream, &d_a, &d_b, &mut d_c, m, n, k, 0.0).expect("lt call");
+    assert!(ok, "cublaslt 不可用");
+    stream.synchronize().unwrap();
+    let mut out = vec![0.0f32; m * n];
+    stream.memcpy_dtoh(&d_c, &mut out).unwrap();
+    stream.synchronize().unwrap();
+    let mut max_err = 0.0f32;
+    for row in 0..m {
+        for col in 0..n {
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += f16_to_f32_bits(a[row * k + kk]) * f16_to_f32_bits(b[col * k + kk]);
+            }
+            max_err = max_err.max((out[row * n + col] - acc).abs());
+        }
+    }
+    eprintln!("cublaslt max_err = {max_err:.3e}");
+    assert!(max_err < 0.01, "cublaslt 误差过大");
+    // 计时
+    let mut best = f32::MAX;
+    for _ in 0..5 {
+        let t0 = std::time::Instant::now();
+        for _ in 0..50 {
+            rt.cublaslt_gemm(&stream, &d_a, &d_b, &mut d_c, m, n, k, 0.0).unwrap();
+        }
+        stream.synchronize().unwrap();
+        best = best.min(t0.elapsed().as_micros() as f32 / 50.0);
+    }
+    eprintln!("cublaslt_gemm [{m}x{n}x{k}] = {best:.2} us");
+}

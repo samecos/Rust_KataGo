@@ -24,7 +24,7 @@ parking_lot = { workspace = true }
 prost = "0.13"
 serde = { workspace = true }
 thiserror = { workspace = true }
-cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system", "nvrtc"] }
+cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system", "nvrtc", "cublaslt"] }
 
 [build-dependencies]
 cc = "1"

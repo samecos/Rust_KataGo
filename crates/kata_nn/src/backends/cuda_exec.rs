@@ -973,6 +973,12 @@ fn hgemm(
         rt.get_func("hgemm_v2_kernel")?
     };
     let stream = active_stream(rt);
+    // cuBLASLt 旁路(KATAGO_CUDA_CUBLASLT=1,仅非 pad 的 f32 输出 GEMM)。
+    if std::env::var("KATAGO_CUDA_CUBLASLT").is_ok() && b.kp == b.k {
+        if rt.cublaslt_gemm(&stream, a, &b.data, c, m, b.n, b.k, 0.0)? {
+            return Ok(());
+        }
+    }
     let (tile_m, tile_n, kname) = if use_t32 { (32usize, 32usize, "hgemm_t32") } else if use_t64n32 { (64usize, 32usize, "hgemm_t64n32") } else if m < 1024 { (64usize, 64usize, "hgemm_t64") } else { (128usize, 128usize, "hgemm_v2") };
     let grid = (m.div_ceil(tile_m) as u32, b.n.div_ceil(tile_n) as u32, 1u32);
     let cfg = LaunchConfig {
@@ -1062,6 +1068,12 @@ fn hgemm_residual(
         rt.get_func("hgemm_v2_kernel")?
     };
     let stream = active_stream(rt);
+    // cuBLASLt 旁路(KATAGO_CUDA_CUBLASLT=1,beta=1 残差)。
+    if std::env::var("KATAGO_CUDA_CUBLASLT").is_ok() && b.kp == b.k {
+        if rt.cublaslt_gemm(&stream, a, &b.data, c, m, b.n, b.k, 1.0)? {
+            return Ok(());
+        }
+    }
     let (tile_m, tile_n, kname) = if use_t32 { (32usize, 32usize, "hgemm_t32") } else if use_t64n32 { (64usize, 32usize, "hgemm_t64n32") } else if m < 1024 { (64usize, 64usize, "hgemm_t64") } else { (128usize, 128usize, "hgemm_v2") };
     let grid = (m.div_ceil(tile_m) as u32, b.n.div_ceil(tile_n) as u32, 1u32);
     let cfg = LaunchConfig {
