@@ -583,3 +583,66 @@ fn cuda_attention_fa2_nan_pattern() {
     eprintln!("  bad cols (first 16): {:?}", &bad_cols[..bad_cols.len().min(16)]);
     eprintln!("  bad cols count: {}", bad_cols.len());
 }
+
+/// 诊断:graph 重放的 per-node 开销。capture N 个 trivial kernel 到 graph,
+/// 重放计时,推算 node 间调度开销。
+///
+/// 实测(RT×5070Ti,WDDM+WSL 均同):graph 重放 per-kernel ~1.1µs,
+/// 不是此前以为的 ~22µs。即 t=1 的 graph sync ~4.4ms 就是真实 kernel
+/// 执行时间(batch=1 下 GEMM grid 仅 27-108 blocks,SM 利用率 <30% 且
+/// tail effect 主导),与 OS/WDDM 无关。优化方向=大 batch 摊薄,而非减 kernel。
+#[test]
+#[ignore]
+fn cuda_graph_node_overhead() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else { return };
+    use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
+    let n = 1024usize;
+    let a: Vec<f32> = (0..n).map(|i| i as f32).collect();
+    let b: Vec<f32> = (0..n).map(|i| (i as f32) * 0.5).collect();
+    let stream = rt.device.new_stream().unwrap();
+    let mut d_a: CudaSlice<f32> = unsafe { stream.alloc(n) }.unwrap();
+    let mut d_b: CudaSlice<f32> = unsafe { stream.alloc(n) }.unwrap();
+    let mut d_out: CudaSlice<f32> = stream.alloc_zeros(n).unwrap();
+    stream.memcpy_htod(a.as_slice(), &mut d_a).unwrap();
+    stream.memcpy_htod(b.as_slice(), &mut d_b).unwrap();
+    let f = rt.get_func("f32_add_kernel").unwrap();
+    let cfg = LaunchConfig::for_num_elems(n as u32);
+
+    // 直连基线:N 次 launch 的 sync 时间
+    for nk in [1usize, 10, 50, 100] {
+        // 直连
+        let t0 = std::time::Instant::now();
+        for _ in 0..nk {
+            unsafe {
+                stream.launch_builder(&f).arg(&d_a).arg(&d_b).arg(&mut d_out).arg(&(n as i32)).launch(cfg)
+            }.unwrap();
+        }
+        stream.synchronize().unwrap();
+        let direct = t0.elapsed();
+        // graph capture + 重放
+        let t1 = std::time::Instant::now();
+        stream.begin_capture(cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL).unwrap();
+        for _ in 0..nk {
+            unsafe {
+                stream.launch_builder(&f).arg(&d_a).arg(&d_b).arg(&mut d_out).arg(&(n as i32)).launch(cfg)
+            }.unwrap();
+        }
+        let flags: cudarc::driver::sys::CUgraphInstantiate_flags = unsafe { std::mem::transmute(0u32) };
+        let graph = stream.end_capture(flags).unwrap().unwrap();
+        graph.upload().unwrap();
+        let cap_time = t1.elapsed();
+        // 重放(先跑一次热身)
+        graph.launch().unwrap();
+        stream.synchronize().unwrap();
+        let t2 = std::time::Instant::now();
+        let reps = 20;
+        for _ in 0..reps {
+            graph.launch().unwrap();
+            stream.synchronize().unwrap();
+        }
+        let replay = t2.elapsed() / reps;
+        eprintln!("nk={nk}: direct={direct:?} graph_replay={replay:?} (capture {cap_time:?}) per-kernel: direct={:.1}us graph={:.1}us",
+            direct.as_micros() as f64 / nk as f64, replay.as_micros() as f64 / nk as f64);
+    }
+}
