@@ -134,6 +134,18 @@
   后续提升只能来自 kernel 本身(T(B) 曲线下移)。
 - 代码保留:`KATAGO_CUDA_PADBATCH=1` 可随时重开 padding 复测。
 
+**B16 高并发复测(2026-08-15 二轮,应要求 t=16..64 重做)**:
+- PAD-B16 vs NOPAD-cap16(nnEvals/s):t=16 639 vs **692**;t=24 561 vs
+  **736**;t=32 752≈**765**;t=48 759≈764。**任何线程数 padding 都不赢**:
+  低线程填不满(padding 纯浪费),高线程攒批自然满(padding 退化为恒等)。
+  结论最终成立:精确尺寸,永不凑满。
+- **意外收获——batch 上限 cap16 优于放任更大**:同 32 线程,cap16
+  (avgBatch 15.86)765 evals/s vs limit=32(avgBatch 15.91)695;
+  t=48 cap16 764 vs limit=48(avgBatch 23.7)703。**B16 之后每行成本
+  转劣,batch 不是越大越好;24+ 线程也应保持 nnMaxBatchSize=16**。
+- t=64 数据警示:avgBatch 21 > cap 16——同根树多线程 NN cache 命中
+  被计入 nnEvals,高线程绝对值仅作参考(相对比较在同污染口径下有效)。
+
 **开关**:`KATAGO_CUDA_NOPIPELINE=1` 回退同步循环;`KATAGO_CUDA_NOGRAPH=1`
 直连(调试);完成事件无条件创建(直连模式流水线门控仍可用)。
 
