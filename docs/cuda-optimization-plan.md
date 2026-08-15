@@ -124,6 +124,16 @@
   所有模式吞吐翻倍(连同步路径 766→1033,因为同步路径同样有尺寸抖动)。
 - serve 线程 yield 自旋烧 1 核(fork 同款),9950X 16 核下可接受。
 
+**B16 凑满实测证伪(2026-08-15,--fixed-batch-size 16 严格 ABBA)**:
+- T(B) 曲线:B2≈4.4ms、B4≈6.7ms、B8≈11.6ms、B16≈12.5ms——过陡。
+- PAD vs NOPAD(visits/s):t=4 253 vs **745**;t=8 452 vs **1022**;
+  t=16 1181 vs **1227**。中低并发需求填不满大 batch,padding 纯亏。
+- 每行成本 B16(0.78ms)虽仅为 B4(1.7ms)一半,但需求侧到不了:
+  t=16/24/32 探测显示 nnEvals/s 在 ~690(avgBatch 8)饱和,再加线程
+  不涨。结论:精确尺寸 + per-size 缓存是最优;调度层已无油水,
+  后续提升只能来自 kernel 本身(T(B) 曲线下移)。
+- 代码保留:`KATAGO_CUDA_PADBATCH=1` 可随时重开 padding 复测。
+
 **开关**:`KATAGO_CUDA_NOPIPELINE=1` 回退同步循环;`KATAGO_CUDA_NOGRAPH=1`
 直连(调试);完成事件无条件创建(直连模式流水线门控仍可用)。
 
@@ -164,6 +174,8 @@
 ## 调度层（fork 复刻清单）
 
 - nnBatchAwareDispatch：固定物理 batch（B16），不足时尾批复制 padding，设备空闲才发射
+  - **本地证伪**（2026-08-15）：T(B) 过陡，t=8 PAD 452 vs NOPAD 1022；
+    保留 `KATAGO_CUDA_PADBATCH=1` 开关复测用
 - ✅ cudaAsyncInferPipeline（2026-08-15 完成，见"事件门控流水线"节）：
   事件循环 + 完成即投递 + 在途双批；**适配差异**：单流双槽 graph
   （非 fork 的三流），per-size graph 缓存（真凶修复），inflight≤2

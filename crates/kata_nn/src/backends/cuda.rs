@@ -999,6 +999,8 @@ mod backend_impl {
         nn_y_len: i32,
         max_batch_size: i32,
         inputs_use_nhwc: bool,
+        /// B16 凑满：n>1 时物理 batch 补齐到 max_batch_size（尾批复制）。
+        pad_to_max: bool,
     }
 
     impl ComputeHandle for CudaComputeHandle {
@@ -1041,7 +1043,18 @@ mod backend_impl {
             const NUM_SPATIAL_CHANNELS: i32 = 22;
             const NUM_GLOBAL_CHANNELS: usize = 19;
             let single_spatial = (NUM_SPATIAL_CHANNELS * nn_x_len * nn_y_len) as usize;
-            let phys_batch = n;
+            // 物理 batch 策略（2026-08-15 ABBA 定论）：精确尺寸（per-size
+            // graph 缓存使变尺寸零成本）。B16 凑满（KATAGO_CUDA_PADBATCH=1,
+            // n>1 补齐到 handle 上限、尾批复制）已实测证伪——T(B) 曲线
+            // 过陡：B16≈12.5ms vs B8≈11.6ms vs B4≈6.7ms vs B2≈4.4ms,
+            // t=8 时 PAD 452 vs NOPAD 1022 visits/s。每行成本 B16(0.78ms)
+            // 仅为 B4(1.7ms)一半，但中低并发下需求不足以填满大 batch。
+            // n==1 保持小图（单线程延迟优先）。
+            let phys_batch = if n == 1 || !h.pad_to_max {
+                n
+            } else {
+                h.max_batch_size as usize
+            };
             let mut spatial_host = vec![0.0f32; phys_batch * single_spatial];
             let mut global_host = vec![0.0f32; phys_batch * NUM_GLOBAL_CHANNELS];
             for i in 0..n {
@@ -1061,6 +1074,15 @@ mod backend_impl {
                 let gb = &input_bufs[i].row_global_buf;
                 let copy_len = NUM_GLOBAL_CHANNELS.min(gb.len());
                 global_host[gl_off..gl_off + copy_len].copy_from_slice(&gb[..copy_len]);
+            }
+            // 尾批复制 padding：重复最后一行真实数据（输出时丢弃 padding 行）。
+            for i in n..phys_batch {
+                let src = (n - 1) * single_spatial;
+                let dst = i * single_spatial;
+                spatial_host.copy_within(src..src + single_spatial, dst);
+                let gsrc = (n - 1) * NUM_GLOBAL_CHANNELS;
+                let gdst = i * NUM_GLOBAL_CHANNELS;
+                global_host.copy_within(gsrc..gsrc + NUM_GLOBAL_CHANNELS, gdst);
             }
 
             let stream = &h.stream;
@@ -1223,11 +1245,16 @@ mod backend_impl {
             let nn_y_len = h.nn_y_len;
             let policy_area = (nn_x_len * nn_y_len) as usize;
             let slot = token & 1;
+            // 状态按物理 batch（token 高位）索引——B16 凑满时 n 是逻辑行数,
+            // 与 phys_batch 不同,必须用 token 解码而非 n。
+            let phys_batch = token >> 1;
             let mut g = h.graph_state.lock().unwrap();
             let st = g
                 .as_mut()
-                .and_then(|g| g.by_size.get_mut(&n))
-                .ok_or_else(|| NeuralNetError(format!("finish: no graph state for batch {n}")))?;
+                .and_then(|g| g.by_size.get_mut(&phys_batch))
+                .ok_or_else(|| {
+                    NeuralNetError(format!("finish: no graph state for phys batch {phys_batch}"))
+                })?;
             let sl = &mut st.slots[slot];
             match sl.done_event.as_ref() {
                 Some(ev) => ev.synchronize().map_err(|e| NeuralNetError(format!("event sync: {e}")))?,
@@ -1411,6 +1438,7 @@ mod backend_impl {
                 nn_y_len: c.nn_y_len,
                 max_batch_size,
                 inputs_use_nhwc,
+                pad_to_max: std::env::var("KATAGO_CUDA_PADBATCH").is_ok(),
             }))
         }
 
