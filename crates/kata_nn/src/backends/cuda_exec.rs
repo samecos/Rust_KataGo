@@ -933,17 +933,22 @@ fn hgemm(
     c: &mut CudaSlice<f32>,
     m: usize,
 ) -> Result<(), String> {
-    let f = if m < 1024 {
+    // tile 选择：N≤512 且 M 小 → t32(grid 是 t64 的 4 倍,解 N=384 的 starved);
+    // M<1024 → t64;大 → v2(128)。
+    let use_t32 = std::env::var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
+    let f = if use_t32 {
+        rt.get_func("hgemm_t32_kernel")?
+    } else if m < 1024 {
         rt.get_func("hgemm_t64_kernel")?
     } else {
         rt.get_func("hgemm_v2_kernel")?
     };
     let stream = active_stream(rt);
-    let (tile, kname) = if m < 1024 { (64usize, "hgemm_t64") } else { (128usize, "hgemm_v2") };
+    let (tile, kname) = if use_t32 { (32usize, "hgemm_t32") } else if m < 1024 { (64usize, "hgemm_t64") } else { (128usize, "hgemm_v2") };
     let grid = (m.div_ceil(tile) as u32, b.n.div_ceil(tile) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
-        block_dim: (256, 1, 1),
+        block_dim: (if use_t32 { 128 } else { 256 }, 1, 1),
         shared_mem_bytes: 0,
     };
     let (alpha, beta) = (1.0f32, 0.0f32);
@@ -973,17 +978,20 @@ fn hgemm_f16(
     c: &mut CudaSlice<u16>,
     m: usize,
 ) -> Result<(), String> {
-    let f = if m < 1024 {
+    let use_t32 = std::env::var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
+    let f = if use_t32 {
+        rt.get_func("hgemm_t32_f16out_kernel")?
+    } else if m < 1024 {
         rt.get_func("hgemm_t64_f16out_kernel")?
     } else {
         rt.get_func("hgemm_v2_f16out_kernel")?
     };
     let stream = active_stream(rt);
-    let (tile, kname) = if m < 1024 { (64usize, "hgemm_t64_f16out") } else { (128usize, "hgemm_v2_f16out") };
+    let (tile, kname) = if use_t32 { (32usize, "hgemm_t32_f16out") } else if m < 1024 { (64usize, "hgemm_t64_f16out") } else { (128usize, "hgemm_v2_f16out") };
     let grid = (m.div_ceil(tile) as u32, b.n.div_ceil(tile) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
-        block_dim: (256, 1, 1),
+        block_dim: (if use_t32 { 128 } else { 256 }, 1, 1),
         shared_mem_bytes: 0,
     };
     let (alpha, beta) = (1.0f32, 0.0f32);
@@ -1013,17 +1021,20 @@ fn hgemm_residual(
     c: &mut CudaSlice<f32>,
     m: usize,
 ) -> Result<(), String> {
-    let f = if m < 1024 {
+    let use_t32 = std::env::var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
+    let f = if use_t32 {
+        rt.get_func("hgemm_t32_kernel")?
+    } else if m < 1024 {
         rt.get_func("hgemm_t64_kernel")?
     } else {
         rt.get_func("hgemm_v2_kernel")?
     };
     let stream = active_stream(rt);
-    let (tile, kname) = if m < 1024 { (64usize, "hgemm_t64") } else { (128usize, "hgemm_v2") };
+    let (tile, kname) = if use_t32 { (32usize, "hgemm_t32") } else if m < 1024 { (64usize, "hgemm_t64") } else { (128usize, "hgemm_v2") };
     let grid = (m.div_ceil(tile) as u32, b.n.div_ceil(tile) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
-        block_dim: (256, 1, 1),
+        block_dim: (if use_t32 { 128 } else { 256 }, 1, 1),
         shared_mem_bytes: 0,
     };
     let (alpha, beta) = (1.0f32, 1.0f32);
@@ -1558,25 +1569,54 @@ fn rms_norm_f32(
     ncols: usize,
     rows: usize,
 ) -> Result<(), String> {
-    let f = rt.get_func("rms_norm_f32_w4_kernel")?;
-    let stream = active_stream(rt);
-    let cfg = LaunchConfig {
-        grid_dim: (rows.div_ceil(4) as u32, 1, 1),
-        block_dim: (128, 1, 1),
-        shared_mem_bytes: 0,
+    // KATAGO_CUDA_RMS=v1 回退旧单行版(诊断 warp4 写坏 act384 的嫌疑)。
+    let use_v1 = std::env::var("KATAGO_CUDA_RMS").as_deref() == Ok("v1");
+    let (f, cfg) = if use_v1 {
+        (
+            rt.get_func("rms_norm_f32_kernel")?,
+            LaunchConfig {
+                grid_dim: (rows as u32, 1, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: 0,
+            },
+        )
+    } else {
+        (
+            rt.get_func("rms_norm_f32_w4_kernel")?,
+            LaunchConfig {
+                grid_dim: (rows.div_ceil(4) as u32, 1, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: 0,
+            },
+        )
     };
-    unsafe {
-        stream
-            .launch_builder(&f)
-            .arg(x)
-            .arg(scale)
-            .arg(out)
-            .arg(&eps)
-            .arg(&(ncols as i32))
-            .arg(&(rows as i32))
-            .launch(cfg)
+    let stream = active_stream(rt);
+    if use_v1 {
+        unsafe {
+            stream
+                .launch_builder(&f)
+                .arg(x)
+                .arg(scale)
+                .arg(out)
+                .arg(&eps)
+                .arg(&(ncols as i32))
+                .launch(cfg)
+        }
+        .map_err(|e| format!("rms_norm_f32 launch failed: {e}"))?;
+    } else {
+        unsafe {
+            stream
+                .launch_builder(&f)
+                .arg(x)
+                .arg(scale)
+                .arg(out)
+                .arg(&eps)
+                .arg(&(ncols as i32))
+                .arg(&(rows as i32))
+                .launch(cfg)
+        }
+        .map_err(|e| format!("rms_norm_f32 launch failed: {e}"))?;
     }
-    .map_err(|e| format!("rms_norm_f32 launch failed: {e}"))?;
     Ok(())
 }
 

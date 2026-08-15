@@ -646,3 +646,55 @@ fn cuda_graph_node_overhead() {
             direct.as_micros() as f64 / nk as f64, replay.as_micros() as f64 / nk as f64);
     }
 }
+
+/// t32 GEMM 数值对拍：A[M,K] f16、B[N,K] f16 → C[M,N] f32,与 CPU 参考对比。
+#[test]
+fn cuda_hgemm_t32_vs_cpu() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else { return };
+    use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
+    use kata_nn::backends::cuda::{f16_to_f32_bits, f32_to_f16_bits};
+    let (m, n, k) = (200usize, 384usize, 768usize);
+    let mut rng = kata_core::rng::Rand::new_from_seed("t32-test");
+    let rand_f = |rng: &mut kata_core::rng::Rand| -> f32 {
+        (rng.next_u64() as f64 / u64::MAX as f64 - 0.5) as f32 * 2.0
+    };
+    let a: Vec<u16> = (0..m * k).map(|_| f32_to_f16_bits(rand_f(&mut rng))).collect();
+    let b: Vec<u16> = (0..n * k).map(|_| f32_to_f16_bits(rand_f(&mut rng))).collect();
+    let stream = rt.device.default_stream();
+    let mut d_a: CudaSlice<u16> = unsafe { stream.alloc(m * k) }.unwrap();
+    let mut d_b: CudaSlice<u16> = unsafe { stream.alloc(n * k) }.unwrap();
+    let mut d_c: CudaSlice<f32> = stream.alloc_zeros(m * n).unwrap();
+    stream.memcpy_htod(a.as_slice(), &mut d_a).unwrap();
+    stream.memcpy_htod(b.as_slice(), &mut d_b).unwrap();
+    let f = rt.get_func("hgemm_t32_kernel").unwrap();
+    let cfg = LaunchConfig {
+        grid_dim: (m.div_ceil(32) as u32, n.div_ceil(32) as u32, 1),
+        block_dim: (128, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let (alpha, beta) = (1.0f32, 0.0f32);
+    unsafe {
+        stream
+            .launch_builder(&f).arg(&d_a).arg(&d_b).arg(&mut d_c)
+            .arg(&(m as i32)).arg(&(n as i32)).arg(&(k as i32)).arg(&alpha).arg(&beta)
+            .launch(cfg)
+    }
+    .unwrap();
+    let mut out = vec![0.0f32; m * n];
+    stream.memcpy_dtoh(&d_c, &mut out).unwrap();
+    stream.synchronize().unwrap();
+    // CPU 参考
+    let mut max_err = 0.0f32;
+    for row in 0..m {
+        for col in 0..n {
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += f16_to_f32_bits(a[row * k + kk]) * f16_to_f32_bits(b[col * k + kk]);
+            }
+            max_err = max_err.max((out[row * n + col] - acc).abs());
+        }
+    }
+    eprintln!("t32 max_err = {max_err:.3e}");
+    assert!(max_err < 0.01, "t32 误差过大");
+}

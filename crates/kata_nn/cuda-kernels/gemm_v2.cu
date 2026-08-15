@@ -656,3 +656,191 @@ hgemm_t64_swiglu_residual_kernel(const __half* __restrict__ A_dual,
                                  float alpha, float beta) {
     t64_hgemm_impl<false, true>(A_dual, B, C, nullptr, M, N, K, alpha, beta);
 }
+
+// ---------------------------------------------------------------------------
+// GEMM tile 32×32×64 变体（小 batch 且 N 小场景：M=361 N=384 时 grid 12×12
+// = 144 blocks，是 t64 的 4 倍）。128 线程 4 warps(2×2，每 warp 16×16)。
+// ---------------------------------------------------------------------------
+
+#define T32_BM 32
+#define T32_BN 32
+#define T32_BK 64
+#define T32_THREADS 128
+
+// 64 列 tile 打包偏移（行组 = 8 行 × 128B = 1024B；BK=64 即 64 列）。
+__device__ __forceinline__ unsigned t32_smem_off(int r, int c) {
+    return ((unsigned)(r >> 3) << 10) | ((unsigned)(c >> 3) << 7) |
+           ((unsigned)(r & 7) << 4) | ((unsigned)(c & 7) << 1);
+}
+
+// 每 k-tile：A/B 各 32×64 f16 = 4KB = 256 个 16B chunk（128 线程 × 2）。
+// 64 列 = 8 个 16B 块/行：row = cid>>3，c16 = cid&7。
+template <bool IS_B>
+__device__ __forceinline__ void t32_load_chunk(
+    __half* sA, __half* sB, const __half* __restrict__ A,
+    const __half* __restrict__ B, int stage, int cid, int kk,
+    int M, int N, int K, int blockM, int blockN) {
+    const int row = cid >> 3;
+    const int c16 = cid & 7;
+    const int k_start = kk + c16 * 8;
+    const unsigned saddr =
+        (unsigned)__cvta_generic_to_shared(IS_B ? sB : sA) +
+        stage * (T32_BM * T32_BK * 2) + t32_smem_off(row, c16 * 8);
+    if (k_start >= K) {
+        v2_smem_zero16(saddr);
+        return;
+    }
+    if (IS_B) {
+        if (blockN + row < N) {
+            const __half* g = B + (size_t)(blockN + row) * K + k_start;
+            v2_cp_async16(saddr, g);
+        }
+    } else {
+        if (blockM + row < M) {
+            const __half* g = A + (size_t)(blockM + row) * K + k_start;
+            v2_cp_async16(saddr, g);
+        }
+    }
+}
+
+template <bool F16_OUT>
+__device__ __forceinline__ void t32_hgemm_impl(
+    const __half* __restrict__ A, const __half* __restrict__ B,
+    float* __restrict__ Cf, __half* __restrict__ Ch, int M, int N, int K,
+    float alpha, float beta) {
+    __shared__ __half sA[T64_STAGES][T32_BM * T32_BK];
+    __shared__ __half sB[T64_STAGES][T32_BN * T32_BK];
+
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int blockM = blockIdx.x * T32_BM;
+    const int blockN = blockIdx.y * T32_BN;
+    const int warpM = blockM + (warp >> 1) * 16;  // 2 行组 × 16 行
+    const int warpN = blockN + (warp & 1) * 16;   // 2 列组 × 16 列
+
+    // 累加器：1 M 步 × 2 N 步 × 4 f32
+    float c[2][4];
+#pragma unroll
+    for (int j = 0; j < 2; ++j)
+#pragma unroll
+        for (int r = 0; r < 4; ++r) c[j][r] = 0.0f;
+
+    auto issue_stage = [&](int stage, int kk) {
+        // 每级 256 chunk，每线程 2 个 A + 2 个 B
+        t32_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M,
+                              N, K, blockM, blockN);
+        t32_load_chunk<false>(&sA[0][0], &sB[0][0], A, B, stage,
+                              tid + T32_THREADS, kk, M, N, K, blockM, blockN);
+        t32_load_chunk<true>(&sA[0][0], &sB[0][0], A, B, stage, tid, kk, M, N,
+                             K, blockM, blockN);
+        t32_load_chunk<true>(&sA[0][0], &sB[0][0], A, B, stage,
+                             tid + T32_THREADS, kk, M, N, K, blockM, blockN);
+    };
+
+    issue_stage(0, 0);
+    v2_cp_commit();
+
+    for (int kk = 0; kk < K; kk += T32_BK) {
+        const int stage = (kk / T32_BK) & 1;
+        if (kk + T32_BK < K) {
+            issue_stage(stage ^ 1, kk + T32_BK);
+            v2_cp_commit();
+            v2_cp_wait<1>();
+        } else {
+            v2_cp_wait<0>();
+        }
+        __syncthreads();
+
+        const unsigned sA_base =
+            (unsigned)__cvta_generic_to_shared(&sA[stage][0]);
+        const unsigned sB_base =
+            (unsigned)__cvta_generic_to_shared(&sB[stage][0]);
+        const int wrow = warp >> 1;  // 0..1（16 行组）
+        const int wcol = warp & 1;   // 0..1（16 列组）
+
+        // B：2 个 N 步 × 8 个 k8 窗口（64 列：2 个 ldmatrix_x4 各覆盖 32 列）。
+        unsigned b_frag[2][8];
+#pragma unroll
+        for (int t = 0; t < 2; ++t) {
+            const unsigned b_base =
+                sB_base + (((wcol * 16 + t * 8) >> 3) << 10);
+            v2_ldmatrix_x4(b_frag[t][0], b_frag[t][1], b_frag[t][2],
+                           b_frag[t][3], b_base, 256, lane);
+            v2_ldmatrix_x4(b_frag[t][4], b_frag[t][5], b_frag[t][6],
+                           b_frag[t][7], b_base + 512, 256, lane);
+        }
+        // A：1 个 M 步 × 4 个 k16 步。32 列 tile 行组 512B → delta2=512。
+        unsigned a_frag[4][4];
+#pragma unroll
+        for (int s = 0; s < 4; ++s) {
+            // 64 列布局行组 1024B → delta2=1024（r+8 行组）
+            const unsigned a_base =
+                sA_base + (((wrow * 16) >> 3) << 10) + s * 256;
+            v2_ldmatrix_x4(a_frag[s][0], a_frag[s][1], a_frag[s][2],
+                           a_frag[s][3], a_base, 1024, lane);
+        }
+#pragma unroll
+        for (int s = 0; s < 4; ++s) {
+            const unsigned a0 = a_frag[s][0];
+            const unsigned a1 = a_frag[s][2];
+            const unsigned a2 = a_frag[s][1];
+            const unsigned a3 = a_frag[s][3];
+#pragma unroll
+            for (int t = 0; t < 2; ++t) {
+                const unsigned b0 = b_frag[t][s * 2];
+                const unsigned b1 = b_frag[t][s * 2 + 1];
+                asm volatile(
+                    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                    : "+f"(c[t][0]), "+f"(c[t][1]), "+f"(c[t][2]),
+                      "+f"(c[t][3])
+                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+            }
+        }
+        __syncthreads();
+    }
+
+    const int row0 = warpM + lane / 4;
+    const int col0 = warpN + (lane % 4) * 2;
+#pragma unroll
+    for (int t = 0; t < 2; ++t) {
+        const int row = row0;
+        const int col = col0 + t * 8;
+        if (row >= M || col >= N) continue;
+        const float v0 = alpha * c[t][0];
+        const float v1 = alpha * c[t][1];
+        const float v2 = alpha * c[t][2];
+        const float v3 = alpha * c[t][3];
+        if (F16_OUT) {
+            __half* cp = Ch + (size_t)row * N + col;
+            cp[0] = __float2half_rn(v0);
+            if (col + 1 < N) cp[1] = __float2half_rn(v1);
+            if (row + 8 < M) {
+                cp[8 * N] = __float2half_rn(v2);
+                if (col + 1 < N) cp[8 * N + 1] = __float2half_rn(v3);
+            }
+        } else {
+            float* cp = Cf + (size_t)row * N + col;
+            cp[0] = v0 + beta * cp[0];
+            if (col + 1 < N) cp[1] = v1 + beta * cp[1];
+            if (row + 8 < M) {
+                cp[8 * N] = v2 + beta * cp[8 * N];
+                if (col + 1 < N) cp[8 * N + 1] = v3 + beta * cp[8 * N + 1];
+            }
+        }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(T32_THREADS) hgemm_t32_kernel(
+    const __half* __restrict__ A, const __half* __restrict__ B,
+    float* __restrict__ C, int M, int N, int K, float alpha, float beta) {
+    t32_hgemm_impl<false>(A, B, C, nullptr, M, N, K, alpha, beta);
+}
+
+extern "C" __global__ void __launch_bounds__(T32_THREADS)
+hgemm_t32_f16out_kernel(const __half* __restrict__ A,
+                        const __half* __restrict__ B, __half* __restrict__ C,
+                        int M, int N, int K, float alpha, float beta) {
+    t32_hgemm_impl<true>(A, B, nullptr, C, M, N, K, alpha, beta);
+}
