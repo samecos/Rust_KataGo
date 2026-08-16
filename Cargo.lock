@@ -1020,6 +1020,7 @@ dependencies = [
  "cc",
  "cudarc",
  "flate2",
+ "hex",
  "kata_core",
  "kata_data",
  "kata_game",
@@ -1030,6 +1031,7 @@ dependencies = [
  "protoc-bin-vendored",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 

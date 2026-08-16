@@ -180,6 +180,18 @@ pub struct GtpEngine {
     genmove_timer: ClockTimer,
     genmove_time_sum: f64,
     genmove_expected_id: i32,
+
+    /// 进行中的流式分析（lz-analyze/kata-analyze 带 interval）：搜索由
+    /// 后台线程运行直到 stop/下一条命令，info 行由 AsyncBot 回调线程
+    /// 按 interval 持续写出。停止时用于兜底输出最后一帧 + 空行。
+    streaming_analyze: Option<StreamingAnalyze>,
+}
+
+/// 流式分析的在途状态。
+struct StreamingAnalyze {
+    pla: Player,
+    args: AnalyzeArgs,
+    emitted: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Arguments controlling a genmove/search command.
@@ -525,6 +537,7 @@ impl GtpEngine {
             genmove_timer: ClockTimer::new(),
             genmove_time_sum: 0.0,
             genmove_expected_id: 0,
+            streaming_analyze: None,
         };
 
         engine.set_or_reset_board_size(default_board_x_size, default_board_y_size)?;
@@ -640,6 +653,7 @@ impl GtpEngine {
             genmove_timer: ClockTimer::new(),
             genmove_time_sum: 0.0,
             genmove_expected_id: 0,
+            streaming_analyze: None,
         }
     }
 
@@ -1216,8 +1230,7 @@ impl GtpEngine {
 
             if currently_analyzing {
                 currently_analyzing = false;
-                self.stop_and_wait();
-                writeln!(output.lock().unwrap())?;
+                self.stop_streaming_analyze(&output)?;
             }
             if currently_genmoving {
                 currently_genmoving = false;
@@ -1822,7 +1835,7 @@ impl GtpEngine {
                         let gargs = self.build_genmove_args(debug);
 
                         let (move_str, move_loc) =
-                            self.gen_move(pla, &gargs, &AnalyzeArgs::default());
+                            self.gen_move(pla, &gargs, &AnalyzeArgs::default(), &output);
                         Self::write_response(&output, has_id, id, false, &move_str)?;
                         suppress_response = true;
 
@@ -1860,7 +1873,7 @@ impl GtpEngine {
                         let out = Arc::clone(&output);
                         let mut analyze_out = String::new();
                         let (move_str, move_loc) =
-                            self.gen_move_analyze(pla, &gargs, &args, &mut analyze_out);
+                            self.gen_move_analyze(pla, &gargs, &args, &mut analyze_out, &out);
                         if !analyze_out.is_empty() {
                             write!(out.lock().unwrap(), "{}", analyze_out)?;
                         }
@@ -1890,13 +1903,8 @@ impl GtpEngine {
                     } else {
                         Self::write_response(&output, has_id, id, false, "")?;
                         suppress_response = true;
-                        let mut analyze_out = String::new();
-                        self.run_analyze(pla, &args, &mut analyze_out);
-                        if !analyze_out.is_empty() {
-                            write!(output.lock().unwrap(), "{}", analyze_out)?;
-                        }
-                        writeln!(output.lock().unwrap())?;
-                        currently_analyzing = true;
+                        self.run_analyze(pla, &args, &output)?;
+                        currently_analyzing = self.streaming_analyze.is_some();
                     }
                 }
                 "clear_cache" => self.clear_cache(),
@@ -2152,7 +2160,11 @@ impl GtpEngine {
                     response_is_error = true;
                 }
                 "stop" => {
-                    self.stop_and_wait();
+                    if self.streaming_analyze.is_some() {
+                        self.stop_streaming_analyze(&output)?;
+                    } else {
+                        self.stop_and_wait();
+                    }
                 }
                 _ => {
                     response_is_error = true;
@@ -2172,8 +2184,7 @@ impl GtpEngine {
         }
 
         if currently_analyzing {
-            self.stop_and_wait();
-            writeln!(output.lock().unwrap())?;
+            self.stop_streaming_analyze(&output)?;
         }
         if currently_genmoving {
             self.stop_and_wait();
@@ -2266,8 +2277,14 @@ impl GtpEngine {
         }
     }
 
-    fn gen_move(&mut self, pla: Player, gargs: &GenmoveArgs, args: &AnalyzeArgs) -> (String, Loc) {
-        self.launch_gen_move(pla, gargs, args);
+    fn gen_move(
+        &mut self,
+        pla: Player,
+        gargs: &GenmoveArgs,
+        args: &AnalyzeArgs,
+        output: &OutputHandle,
+    ) -> (String, Loc) {
+        self.launch_gen_move(pla, gargs, args, output);
         self.bot.wait_for_search_to_end();
         let search = self.bot.get_search_stop_and_wait();
         let mut move_loc = search.get_chosen_move_loc();
@@ -2324,19 +2341,63 @@ impl GtpEngine {
         gargs: &GenmoveArgs,
         args: &AnalyzeArgs,
         out: &mut String,
+        output: &OutputHandle,
     ) -> (String, Loc) {
-        let (move_str, move_loc) = self.gen_move(pla, gargs, args);
-        let search = self.bot.get_search();
-        let analyze_line =
-            Self::format_analyze_data(search, args, self.analysis_pv_len, self.perspective);
-        if !analyze_line.is_empty() {
-            out.push_str(&analyze_line);
-            out.push('\n');
+        let has_interval = args.seconds_per_report > 0.0
+            && args.seconds_per_report < TimeControls::UNLIMITED_TIME_DEFAULT;
+        let (move_str, move_loc) = self.gen_move(pla, gargs, args, output);
+        if !has_interval {
+            // 无 interval：搜索完成后一次性输出一帧（旧语义）。
+            // 流式模式的帧已由回调实时写出，这里不重复。
+            let search = self.bot.get_search();
+            let analyze_line =
+                Self::format_analyze_data(search, args, self.analysis_pv_len, self.perspective);
+            if !analyze_line.is_empty() {
+                out.push_str(&analyze_line);
+                out.push('\n');
+            }
         }
         (move_str, move_loc)
     }
 
-    fn run_analyze(&mut self, pla: Player, args: &AnalyzeArgs, out: &mut String) {
+    /// 停止进行中的流式分析并补输出：正常已有 info 帧时补空行结束；
+    /// 一帧都没出（analyze 后立刻被打断）时最多再等一个 interval 让
+    /// 首帧产生（回调线程会写 emitted），仍无帧则补一帧收尾——对齐
+    /// C++ 回调「至少输出一次」语义，避免 GUI 永远等不到数据。
+    fn stop_streaming_analyze(&mut self, output: &OutputHandle) -> io::Result<()> {
+        let Some(sa) = self.streaming_analyze.take() else {
+            return Ok(());
+        };
+        if !sa.emitted.load(std::sync::atomic::Ordering::Acquire) {
+            // 零帧被打断（如 analyze 后立即 quit、GUI 快速切换局面）：
+            // 再等最多 1s 让首帧产生（覆盖引擎冷启动 + 首评估；实测
+            // dummy/debug ~0.4s）。有帧时循环立即退出，无额外开销。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1u64);
+            while !sa.emitted.load(std::sync::atomic::Ordering::Acquire)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        self.bot.stop_and_wait();
+        if !sa.emitted.load(std::sync::atomic::Ordering::Acquire) {
+            let search = self.bot.get_search_stop_and_wait();
+            let line =
+                Self::format_analyze_data(search, &sa.args, self.analysis_pv_len, self.perspective);
+            if !line.is_empty() {
+                writeln!(output.lock().unwrap(), "{line}")?;
+            }
+        }
+        writeln!(output.lock().unwrap())?;
+        Ok(())
+    }
+
+    fn run_analyze(
+        &mut self,
+        pla: Player,
+        args: &AnalyzeArgs,
+        output: &OutputHandle,
+    ) -> io::Result<()> {
         if self.is_genmove_params {
             self.bot.set_params(&self.analysis_params);
             self.is_genmove_params = false;
@@ -2352,19 +2413,56 @@ impl GtpEngine {
                 || args.show_moves_ownership_stdev,
         );
 
-        let tc = TimeControls::new();
-        self.bot.gen_move_synchronous(pla, &tc);
-        self.bot.wait_for_search_to_end();
-        let search = self.bot.get_search_stop_and_wait();
-        let analyze_line =
-            Self::format_analyze_data(search, args, self.analysis_pv_len, self.perspective);
-        if !analyze_line.is_empty() {
-            out.push_str(&analyze_line);
-            out.push('\n');
+        let has_interval = args.seconds_per_report > 0.0
+            && args.seconds_per_report < TimeControls::UNLIMITED_TIME_DEFAULT;
+        if !has_interval {
+            // 无 interval（旧语义）：跑满 maxVisits/maxTime 一次性输出一帧。
+            let tc = TimeControls::new();
+            self.bot.gen_move_synchronous(pla, &tc);
+            self.bot.wait_for_search_to_end();
+            let search = self.bot.get_search_stop_and_wait();
+            let analyze_line =
+                Self::format_analyze_data(search, args, self.analysis_pv_len, self.perspective);
+            if !analyze_line.is_empty() {
+                writeln!(output.lock().unwrap(), "{analyze_line}")?;
+            }
+            writeln!(output.lock().unwrap())?;
+            return Ok(());
         }
+
+        // 流式（对齐 C++ `analyzeAsync`）：后台搜索跑到 stop 为止
+        //（searchFactor=1e40），回调线程按 interval 持续输出 info 行。
+        // 回调在 AsyncBot 内部线程执行，仅持 output 锁，不触 engine 状态。
+        let emitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let out = Arc::clone(output);
+        let cb_args = args.clone();
+        let pv_len = self.analysis_pv_len;
+        let perspective = self.perspective;
+        let cb_emitted = Arc::clone(&emitted);
+        let callback: Box<dyn Fn(&Search) + Send + Sync> = Box::new(move |search: &Search| {
+            let line = Self::format_analyze_data(search, &cb_args, pv_len, perspective);
+            if !line.is_empty() {
+                let _ = writeln!(out.lock().unwrap(), "{line}");
+                cb_emitted.store(true, std::sync::atomic::Ordering::Release);
+            }
+        });
+        self.bot
+            .analyze_async(pla, 1e40, args.seconds_per_report, args.seconds_per_report, callback);
+        self.streaming_analyze = Some(StreamingAnalyze {
+            pla,
+            args: args.clone(),
+            emitted,
+        });
+        Ok(())
     }
 
-    fn launch_gen_move(&mut self, pla: Player, _gargs: &GenmoveArgs, args: &AnalyzeArgs) {
+    fn launch_gen_move(
+        &mut self,
+        pla: Player,
+        _gargs: &GenmoveArgs,
+        args: &AnalyzeArgs,
+        output: &OutputHandle,
+    ) {
         self.genmove_timer.reset();
         self.nn_eval.clear_cache();
         if let Some(he) = self.human_eval {
@@ -2442,16 +2540,47 @@ impl GtpEngine {
             } else {
                 self.bot.set_always_include_owner_map(false);
             }
-            // The Rust port renders the analysis line after the search
-            // completes (gen_move_analyze), so unlike C++'s
-            // `genMoveAsyncAnalyze` no periodic callback is needed here.
-            self.bot.gen_move_async_with_factor(
-                pla,
-                expected_search_id,
-                tc,
-                search_factor,
-                Box::new(|_move_loc: Loc, _search_id: i32, _search: &Search| {}),
-            );
+            // 带 interval 时按 C++ `genMoveAsyncAnalyze` 流式输出：搜索
+            // 期间回调持续产 info 行；落子结果仍由 gen_move 的同步等待
+            // 收取（on_move 空壳）。无 interval 保持旧语义（搜索完成后
+            // gen_move_analyze 一次性输出一帧）。
+            let has_interval = args.seconds_per_report > 0.0
+                && args.seconds_per_report < TimeControls::UNLIMITED_TIME_DEFAULT;
+            let noop_on_move: Box<dyn Fn(Loc, i32, &Search) + Send + Sync> =
+                Box::new(|_move_loc: Loc, _search_id: i32, _search: &Search| {});
+            if has_interval {
+                let out: OutputHandle = Arc::clone(output);
+                let cb_args = args.clone();
+                let pv_len = self.analysis_pv_len;
+                let perspective = self.perspective;
+                let callback: Box<dyn Fn(&Search) + Send + Sync> =
+                    Box::new(move |search: &Search| {
+                        let line =
+                            Self::format_analyze_data(search, &cb_args, pv_len, perspective);
+                        if !line.is_empty() {
+                            let _ = writeln!(out.lock().unwrap(), "{line}");
+                        }
+                    });
+                self.bot.gen_move_async_analyze_with_begun(
+                    pla,
+                    expected_search_id,
+                    tc,
+                    search_factor,
+                    noop_on_move,
+                    args.seconds_per_report,
+                    args.seconds_per_report,
+                    callback,
+                    None,
+                );
+            } else {
+                self.bot.gen_move_async_with_factor(
+                    pla,
+                    expected_search_id,
+                    tc,
+                    search_factor,
+                    noop_on_move,
+                );
+            }
         } else {
             self.bot.gen_move_async_with_factor(
                 pla,
@@ -2577,6 +2706,27 @@ impl GtpEngine {
                 data.order
             ));
             data.write_pv(&mut out, board);
+        }
+        // kata 扩展：树平均所有权热图（Sabaki/Lizzie 领地显示）。
+        // 布局对齐 C++：每 pos 一个值，黑视角由 perspective 翻转。
+        if args.show_ownership && args.kata {
+            let ownership = search.get_average_tree_ownership(None);
+            if !ownership.is_empty() {
+                let nn_x_len = search.nn_x_len;
+                out.push_str(" ownership");
+                for y in 0..board.y_size {
+                    for x in 0..board.x_size {
+                        let pos = nn_pos::xy_to_pos(x, y, nn_x_len) as usize;
+                        let v = ownership.get(pos).copied().unwrap_or(0.0);
+                        let v = if perspective == P_BLACK {
+                            -v
+                        } else {
+                            v
+                        };
+                        out.push_str(&format!(" {v}"));
+                    }
+                }
+            }
         }
         out
     }

@@ -284,7 +284,7 @@ impl CudaModel {
         }
         // split-K 状态：Some(beta) 表示上一个 GEMM 是 split-K partial，
         // 待下一个 RmsNorm 融合求和。KATAGO_CUDA_SPLITK=1 启用。
-        let splitk_on = std::env::var("KATAGO_CUDA_SPLITK").is_ok();
+        let splitk_on = crate::tactic_plan::tactic_var("KATAGO_CUDA_SPLITK").is_ok();
         let mut pending_splitk_beta: Option<f32> = None;
         let mut li = 0usize;
         while li < self.layers.len() {
@@ -304,9 +304,13 @@ impl CudaModel {
                 let _ = ev_start.as_ref().unwrap().record(&stream);
             }
             // 融合前瞻：返回 true 表示已把下一层（GateSilu）一并消费。
-            // KATAGO_CUDA_FUSION=none|up|down|all（默认 all；诊断用）。
-            let fusion_mode = std::env::var("KATAGO_CUDA_FUSION")
-                .unwrap_or_else(|_| "all".to_string());
+            // KATAGO_CUDA_FUSION=none|up|down|all。默认 none：融合 epilogue
+            // 走手写 GEMM，cuBLASLt（默认开）下慢于「cuBLASLt + 独立
+            // elementwise」（ABBA 2026-08-15：t=1 302→374、t=8 621→678
+            // nnEvals/s）；纯手写 GEMM（CUBLASLT=0）时融合仍是收益，
+            // 供 autotune 按组合实测选择。
+            let fusion_mode = crate::tactic_plan::tactic_var("KATAGO_CUDA_FUSION")
+                .unwrap_or_else(|_| "none".to_string());
             let fuse_up = fusion_mode == "all" || fusion_mode == "up";
             let fuse_down = fusion_mode == "all" || fusion_mode == "down";
             let skip_next = match lb {
@@ -366,7 +370,10 @@ impl CudaModel {
                                 false
                             }
                         } else {
-                            // act384f16 已由块尾 down 的 gatesilu epilogue 写好
+                            // 未融合（FUSION=none/down）时独立 GateSilu(384)
+                            // 原地写 act384 f32，此处须转换出 f16 流
+                            // （融合路径由 down 的 gatesilu epilogue 双写省掉本步）。
+                            f32_to_f16(rt, act384, act384f16, m * mid)?;
                             hgemm_residual(rt, act384f16, w, act768, m)?;
                             false
                         }
@@ -413,7 +420,7 @@ impl CudaModel {
                     // FA2：qkv GEMM f16 packed([M,1152] 复用 act1152)→
                     // attention 内部加载时做 RoPE（省独立 rope kernel）。
                     // v3 回退：f32 GEMM + 独立 rope 拆分 qbuf/kbuf/vbuf。
-                    let use_v3 = std::env::var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3");
+                    let use_v3 = crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3");
                     if use_v3 {
                         timed!("qkv", hgemm(rt, normed, qkv, gemm_out, m));
                         timed!(
@@ -961,8 +968,8 @@ fn hgemm(
 ) -> Result<(), String> {
     // tile 选择：N≤512 且 M 小 → t32(grid 是 t64 的 4 倍,解 N=384 的 starved);
     // M<1024 → t64;大 → v2(128)。
-    let use_t32 = std::env::var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
-    let use_t64n32 = std::env::var("KATAGO_CUDA_T64N32").is_ok() && m < 1024 && b.n <= 512;
+    let use_t32 = crate::tactic_plan::tactic_var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
+    let use_t64n32 = crate::tactic_plan::tactic_var("KATAGO_CUDA_T64N32").is_ok() && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_kernel")?
     } else if use_t64n32 {
@@ -974,7 +981,7 @@ fn hgemm(
     };
     let stream = active_stream(rt);
     // cuBLASLt 旁路(KATAGO_CUDA_CUBLASLT=1,仅非 pad 的 f32 输出 GEMM)。
-    if std::env::var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
+    if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         if rt.cublaslt_gemm(&stream, a, &b.data, c, m, b.n, b.k, 0.0)? {
             return Ok(());
         }
@@ -1014,13 +1021,13 @@ fn hgemm_f16(
     m: usize,
 ) -> Result<(), String> {
     // cuBLASLt f16 输出旁路（KATAGO_CUDA_CUBLASLT=1）。
-    if std::env::var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
+    if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         let stream0 = active_stream(rt);
         if rt.cublaslt_gemm_f16out(&stream0, a, &b.data, c, m, b.n, b.k)? {
             return Ok(());
         }
     }
-    let use_t32 = std::env::var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
+    let use_t32 = crate::tactic_plan::tactic_var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_f16out_kernel")?
     } else if m < 1024 {
@@ -1063,8 +1070,8 @@ fn hgemm_residual(
     c: &mut CudaSlice<f32>,
     m: usize,
 ) -> Result<(), String> {
-    let use_t32 = std::env::var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
-    let use_t64n32 = std::env::var("KATAGO_CUDA_T64N32").is_ok() && m < 1024 && b.n <= 512;
+    let use_t32 = crate::tactic_plan::tactic_var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
+    let use_t64n32 = crate::tactic_plan::tactic_var("KATAGO_CUDA_T64N32").is_ok() && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_kernel")?
     } else if use_t64n32 {
@@ -1076,7 +1083,7 @@ fn hgemm_residual(
     };
     let stream = active_stream(rt);
     // cuBLASLt 旁路(KATAGO_CUDA_CUBLASLT=1,beta=1 残差)。
-    if std::env::var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
+    if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         if rt.cublaslt_gemm(&stream, a, &b.data, c, m, b.n, b.k, 1.0)? {
             return Ok(());
         }
@@ -1695,7 +1702,7 @@ fn rms_norm_f32(
     rows: usize,
 ) -> Result<(), String> {
     // KATAGO_CUDA_RMS=v1 回退旧单行版(诊断 warp4 写坏 act384 的嫌疑)。
-    let use_v1 = std::env::var("KATAGO_CUDA_RMS").as_deref() == Ok("v1");
+    let use_v1 = crate::tactic_plan::tactic_var("KATAGO_CUDA_RMS").as_deref() == Ok("v1");
     let (f, cfg) = if use_v1 {
         (
             rt.get_func("rms_norm_f32_kernel")?,
@@ -1851,7 +1858,7 @@ fn attention_row(
     assert_eq!(d, 32, "attention 要求 D=32（smem/打包布局按 D=32 编译期定）");
     // 默认 FA2（tensor core QK + 标量 PV，对拍已验证）；
     // KATAGO_CUDA_ATTN=v3 回退旧 kernel（数值对照兜底）。
-    let use_v3 = std::env::var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3");
+    let use_v3 = crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3");
     // v3（warp-per-row 标量点积，数值已验证）；
     // 输出直接写 merge 后布局 [B*S, H*D]（省 attn_merge 独立 kernel）。
     let f = if use_v3 {

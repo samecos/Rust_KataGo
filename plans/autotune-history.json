@@ -1,0 +1,213 @@
+{
+  "started_utc": "2026-08-15T23:45:22.356455+00:00",
+  "threads": [
+    4,
+    16
+  ],
+  "iterations": 200,
+  "min_improvement": 0.01,
+  "device": {
+    "architecture": "sm_120",
+    "compute_capability": "12.0",
+    "gpu_name": "NVIDIA GeForce RTX 5070 Ti",
+    "l2_cache_bytes": 50331648,
+    "model_sha256": "f2fc09fdf58a3e8a4b97addceab0c853874c52709152e61935b6ac6b9f474f94",
+    "sm_count": 70
+  },
+  "groups": [
+    {
+      "name": "gemm",
+      "candidates": [
+        {
+          "config": {},
+          "skipped": "identical to current winner"
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_CUBLASLT": "0"
+          },
+          "incumbent_geo": 661.2903452043676,
+          "challenger_geo": 415.32925176450675,
+          "win": false
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_CUBLASLT": "0",
+            "KATAGO_CUDA_T32": "1"
+          },
+          "incumbent_geo": 681.5477195513927,
+          "challenger_geo": 405.1721503721941,
+          "win": false
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_CUBLASLT": "0",
+            "KATAGO_CUDA_T64N32": "1"
+          },
+          "incumbent_geo": 672.062351490784,
+          "challenger_geo": 411.6057830266839,
+          "win": false
+        }
+      ],
+      "winner": {}
+    },
+    {
+      "name": "fusion",
+      "candidates": [
+        {
+          "config": {},
+          "skipped": "identical to current winner"
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_FUSION": "all"
+          },
+          "incumbent_geo": 681.0974175596849,
+          "challenger_geo": 609.1716310732807,
+          "win": false
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_FUSION": "up"
+          },
+          "incumbent_geo": 681.1919023957892,
+          "challenger_geo": 451.4995301713785,
+          "win": false
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_FUSION": "down"
+          },
+          "incumbent_geo": 681.3006287789841,
+          "challenger_geo": 626.0216639263481,
+          "win": false
+        }
+      ],
+      "winner": {}
+    },
+    {
+      "name": "attention",
+      "candidates": [
+        {
+          "config": {},
+          "skipped": "identical to current winner"
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_ATTN": "v3"
+          },
+          "incumbent_geo": 681.2891278858557,
+          "challenger_geo": 343.63257646913235,
+          "win": false
+        }
+      ],
+      "winner": {}
+    },
+    {
+      "name": "rmsnorm",
+      "candidates": [
+        {
+          "config": {},
+          "skipped": "identical to current winner"
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_RMS": "v1"
+          },
+          "incumbent_geo": 680.4276232014931,
+          "challenger_geo": 667.2471180071286,
+          "win": false
+        }
+      ],
+      "winner": {}
+    },
+    {
+      "name": "splitk",
+      "candidates": [
+        {
+          "config": {},
+          "skipped": "identical to current winner"
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_SPLITK": "1"
+          },
+          "incumbent_geo": 680.120213920767,
+          "challenger_geo": 576.7392574870131,
+          "win": false
+        }
+      ],
+      "winner": {}
+    },
+    {
+      "name": "graph_pipeline",
+      "candidates": [
+        {
+          "config": {},
+          "skipped": "identical to current winner"
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_NOGRAPH": "1"
+          },
+          "incumbent_geo": 680.4469047847061,
+          "challenger_geo": 585.7727167417679,
+          "win": false
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_NOPIPELINE": "1"
+          },
+          "incumbent_geo": 682.7627245346994,
+          "challenger_geo": 647.9319348954482,
+          "win": false
+        }
+      ],
+      "winner": {}
+    },
+    {
+      "name": "batching",
+      "candidates": [
+        {
+          "config": {},
+          "skipped": "identical to current winner"
+        },
+        {
+          "config": {
+            "KATAGO_CUDA_PADBATCH": "1"
+          },
+          "incumbent_geo": 681.1199758261635,
+          "challenger_geo": 492.444260725446,
+          "win": false
+        }
+      ],
+      "winner": {}
+    },
+    {
+      "name": "batch_window",
+      "candidates": [
+        {
+          "config": {},
+          "skipped": "identical to current winner"
+        },
+        {
+          "config": {
+            "KATAGO_NN_BATCH_WINDOW_US": "3000"
+          },
+          "incumbent_geo": 679.9808313567315,
+          "challenger_geo": 681.050332756357,
+          "win": false
+        },
+        {
+          "config": {
+            "KATAGO_NN_BATCH_WINDOW_US": "12000"
+          },
+          "incumbent_geo": 679.6365606296117,
+          "challenger_geo": 680.028827302576,
+          "win": false
+        }
+      ],
+      "winner": {}
+    }
+  ]
+}

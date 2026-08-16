@@ -13,6 +13,7 @@ pub mod onnx_model;
 pub mod onnx_parser;
 pub mod score_value;
 pub mod sgf_meta;
+pub mod tactic_plan;
 pub mod version;
 
 /// Prost-generated ONNX protobuf types (from the vendored `onnx.proto`).

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "kind": "cuda-tactic-plan",
+  "plan_id": "sm120-nvidia-geforce-rtx-5070--autotune-20260816-075041",
+  "generated_utc": "2026-08-15T23:50:41.946912+00:00",
+  "target": {
+    "architecture": "sm_120",
+    "gpu_name": "NVIDIA GeForce RTX 5070 Ti",
+    "compute_capability": "12.0",
+    "sm_count": 70,
+    "l2_cache_bytes": 50331648,
+    "model_sha256": "f2fc09fdf58a3e8a4b97addceab0c853874c52709152e61935b6ac6b9f474f94"
+  },
+  "apply": {
+    "tactic_overrides": {}
+  },
+  "selection": {
+    "method": "ordered decision groups, ABBA (I-C-C-I) geometric mean",
+    "min_improvement": 0.01,
+    "threads": [
+      4,
+      16
+    ],
+    "iterations": 200,
+    "host": "PC-20260403ICGL"
+  },
+  "history_file": "plans\\autotune-history.json"
+}

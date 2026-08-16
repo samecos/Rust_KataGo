@@ -259,7 +259,7 @@ impl SharedState {
             let mut batch = vec![request];
             let target_batch_size = self.current_batch_size.load(Ordering::Relaxed).max(1) as usize;
             // 凑批窗口可由 KATAGO_NN_BATCH_WINDOW_US 覆盖（调优）。
-            let busy_us: u64 = std::env::var("KATAGO_NN_BATCH_WINDOW_US")
+            let busy_us: u64 = crate::tactic_plan::tactic_var("KATAGO_NN_BATCH_WINDOW_US")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8000);
@@ -1111,6 +1111,10 @@ impl NnEvaluator {
         include_owner_map: bool,
     ) {
         buf.has_result = false;
+        // 供 serve 侧/backend 回填判断（finish_output 读
+        // `NNResultBuf::include_owner_map`）；此前漏设导致搜索树
+        // NNOutput 恒无 ownership（kata-analyze ownership 全 0）。
+        buf.include_owner_map = include_owner_map;
 
         let nn_x_len = self.shared.nn_x_len;
         let nn_y_len = self.shared.nn_y_len;
@@ -1290,6 +1294,9 @@ impl NnEvaluator {
         // only needs to read them (matching C++ semantics).
         let fa0 = std::time::Instant::now();
         let mut filled_buf = NNResultBuf::new();
+        // backend 回填 ownership 的判断依据（finish_output 读该字段）；
+        // 从本次请求继承（filled_buf 是新建的，不携带 evaluate 侧设置）。
+        filled_buf.include_owner_map = include_owner_map;
         Self::fill_nn_input(
             board,
             history,

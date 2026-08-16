@@ -17,12 +17,15 @@ cuda = ["dep:cudarc"]
 
 [dependencies]
 flate2 = { workspace = true }
+hex = { workspace = true }
 kata_core = { path = "../kata_core" }
 kata_game = { path = "../kata_game" }
 ndarray = { workspace = true }
 parking_lot = { workspace = true }
 prost = "0.13"
 serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system", "nvrtc", "cublaslt"] }
 

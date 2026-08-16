@@ -8,7 +8,7 @@ the fork files as of 2026-08-13.
 
 Hardware note: the certified production plan was scanned on an RTX 5080 (SM120,
 84 SMs, 64 MB L2) with physical batch B16 and 2 streams. Our target RTX 5070 Ti is
-the same SM120 arch (96 SMs, 48 MB L2) — kernels transfer, only the persisting-L2
+the same SM120 arch (70 SMs per cuda-fingerprint, 48 MB L2) — kernels transfer, only the persisting-L2
 budget shrinks.
 
 ## Certified production plan (B16, S2) — one-glance summary

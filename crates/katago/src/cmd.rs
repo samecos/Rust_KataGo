@@ -3,6 +3,7 @@
 pub mod analysis;
 pub mod benchmark;
 pub mod contribute;
+pub mod cuda_fingerprint;
 pub mod eval_sgf;
 pub mod gatekeeper;
 pub mod gen_book;

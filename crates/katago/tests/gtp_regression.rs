@@ -225,6 +225,54 @@ fn gtp_analysis_commands_smoke() {
 }
 
 #[test]
+fn gtp_analyze_streaming_frames() {
+    // 流式 analyze：带 interval 时应在 stop/quit 前产出多个 info 帧，
+    // 且 visits 逐帧递增（持续刷新而非一次性输出）。
+    let mut child = Command::new(env!("CARGO_BIN_EXE_katago-rs"))
+        .args([
+            "gtp",
+            "--config",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/gtp_smoke.cfg"),
+            "--model",
+            "/dev/null",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn katago-rs gtp");
+    let mut stdin = child.stdin.take().expect("stdin");
+    writeln!(stdin, "boardsize 19").unwrap();
+    writeln!(stdin, "clear_board").unwrap();
+    writeln!(stdin, "lz-analyze B 10 minmoves 0 maxmoves 1").unwrap();
+    // 给流式帧 1.2s 产出窗口（debug 构建 + dummy 冷启动首帧 ~0.4s）。
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    writeln!(stdin, "stop").unwrap();
+    writeln!(stdin, "quit").unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().expect("wait");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let frames: Vec<&str> = text.lines().filter(|l| l.starts_with("info move")).collect();
+    assert!(frames.len() >= 2, "流式应产出 ≥2 帧, got {}: {text:?}", frames.len());
+    let v = |f: &str| -> i64 {
+        f.split("visits ").nth(1).and_then(|s| s.split(' ').next()).and_then(|s| s.parse().ok()).unwrap_or(-1)
+    };
+    assert!(v(frames[0]) < v(frames[frames.len() - 1]), "visits 应逐帧递增");
+}
+
+#[test]
+fn gtp_analyze_no_interval_single_frame() {
+    // 无 interval（旧语义）：跑满搜索后一次性输出一帧。
+    let replies = gtp_session(&[
+        "boardsize 19",
+        "clear_board",
+        "lz-analyze B minmoves 0 maxmoves 1",
+    ]);
+    let frames: Vec<&str> = replies.lines().filter(|l| l.starts_with("info move")).collect();
+    assert_eq!(frames.len(), 1, "无 interval 应恰一帧: {replies:?}");
+}
+
+#[test]
 fn gtp_free_handicap_and_sgf_io() {
     // set_free_handicap：指定让子位置
     let replies = gtp_session(&[

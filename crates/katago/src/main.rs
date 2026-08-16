@@ -36,6 +36,7 @@ fn run(args: Vec<String>) -> i32 {
         "gtp" => cmd::gtp::gtp(rest),
         "analysis" => cmd::analysis::analysis(rest),
         "benchmark" => cmd::benchmark::benchmark(rest),
+        "cuda-fingerprint" => cmd::cuda_fingerprint::cuda_fingerprint(rest),
         "contribute" => cmd::contribute::contribute(rest),
         "evalsgf" => cmd::eval_sgf::evalsgf(rest),
         "gatekeeper" => cmd::gatekeeper::gatekeeper(rest),

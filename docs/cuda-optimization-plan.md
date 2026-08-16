@@ -12,8 +12,7 @@
 
 | 提交 | 改动 | nnEvals/s | 附注 |
 |---|---|---|---|
-| 85931e5 | 执行器 v1 落地 | 47 | 基线 |
-| 271be9b | GEMM v2(smem 双缓冲+cp.async+ldmatrix,tile 128×128×32) | 58.5 | +24% |
+| 85931e5 | 执行器 v1 落地 | 47 | 基线 || 271be9b | GEMM v2(smem 双缓冲+cp.async+ldmatrix,tile 128×128×32) | 58.5 | +24% |
 | 8f24fb0 | kernel 融合(FFN 6→4、attn 6→5、Linear 3→2 launch) | 61.5 | +5% |
 | 05c44a8 | attention v3(warp-per-row+cp.async 64 键分块+128B 打包 smem) | **114** | attn 0.27→0.056ms/层(4.8×);v2 方案此前被证伪(40<47) |
 | (证伪) | dual FFN(gate+up 单 GEMM) | 回退 | agent-16 ABBA 慢于基线 |
@@ -28,6 +27,7 @@
 | 5b5c490 | G4 ValueHead 三输出 GEMM 合并 | 211 | -4 kernel |
 | (本轮) | G4 PolicyHead conv1p/g 合并 + 头分支融合 + ValueHead 拆写 | 211 | -6 kernel |
 | (本轮) | **serve 线程默认 1 + 凑批窗口 8ms**(对齐 C++,batch 2.68→4.0) | t=8 **359** | t=16 441 |
+| (2026-08-15) | **autotune 机制落地 + FUSION 默认翻转为 none**(修 act384f16 断裂 bug) | t=1 302→**374**(+24%) | t=8 621→678(+9%);详见下节 |
 
 **2026-08-14 最终口径(release,benchmark v=1500 n=1)**：
 
@@ -59,7 +59,7 @@
 - graph 重放的 per-kernel 调度开销实测仅 **~1.1µs**(非此前假设的 ~22µs),
   且 **WSL 与 Windows 完全相同** → t=1 的 graph sync ~4.4ms 是**真实的
   GPU kernel 执行时间**,不是调度/WDDM 开销。
-- batch=1 时 GEMM grid 仅 27-108 blocks(96 SM 利用率 <30%),tail effect
+- batch=1 时 GEMM grid 仅 27-108 blocks(70 SM 利用率 <30%),tail effect
   主导 → t=1 的 208 是 batch=1 的固有小矩阵效率,与 OS/驱动无关。
 - **优化方向因此改变**:不是减 kernel 数(graph node 开销本来就小),
   而是 batch=1 的 GEMM 效率(split-K / 更小 tile / stream-K)——这是
@@ -146,6 +146,58 @@
 - t=64 数据警示:avgBatch 21 > cap 16——同根树多线程 NN cache 命中
   被计入 nnEvals,高线程绝对值仅作参考(相对比较在同污染口径下有效)。
 
+## 离线 autotune + plan JSON(2026-08-15 落地)
+
+**机制**(fork `cuda_tactic_workflow.py` 方法论本地化):
+- `scripts/autotune.py`:8 个有序决策组(gemm/fusion/attention/rmsnorm/
+  splitk/graph_pipeline/batching/batch_window)→ 候选 = 真实 tactic 开关
+  赋值 → ABBA(I-C-C-I 几何均值,min_improvement 1%)→ 产出
+  `plans/best-tactic-plan.json` + `plans/autotune-history.json`(逐候选留痕)。
+- Rust 侧 `kata_nn/src/tactic_plan.rs`:配置键 `cudaTacticPlan` 加载 plan,
+  **fail-closed 指纹校验**(GPU 名/CC/SM 数/L2/模型 SHA-256/tactic 键域
+  逐项比对,不匹配即报错,绝不静默回退);`tactic_var()` 优先级
+  plan > 环境变量 > 代码默认;多模型只允许同一 plan 幂等重装。
+- 设备指纹:`katago-rs cuda-fingerprint [--model FILE]`(JSON)。
+- 接入:`--override-config nnBackend=cudabackend,cudaTacticPlan=<path>`。
+
+**首轮全量裁决**(t=4/16 双档几何均值,已含正确性门):
+| 组 | 胜者 | 关键数据 |
+|---|---|---|
+| gemm | 默认(cuBLASLt) | 手写 -33%(384 vs 587) |
+| fusion | **FUSION=none(默认翻转)** | none 658 vs all 582;详见下节 |
+| attention | FA2(默认) | v3 慢一半(330 vs 658) |
+| rmsnorm | warp4-vec8(默认) | v1 -2% |
+| splitk | 关(默认) | -15%(555 vs 654) |
+| graph_pipeline | graph+pipeline(默认) | NOGRAPH -13%、NOPIPELINE -2% |
+| batching | 精确尺寸(默认) | PAD -28%(475 vs 659) |
+| batch_window | 8ms(默认) | 3ms/12ms 均持平(±0.1%) |
+
+**FUSION 默认翻案(重要,机制价值的首个实证)**:
+- 首轮 autotune FUSION=none +13% 胜出,与历史提交(8f24fb0 +5%、971601e
+  重大收益)矛盾 → 排查发现 **FUSION=none 路径 act384f16 数据流断裂**
+  (独立 GateSilu 原地写 f32,up 投影却读无人写入的 f16 缓冲)——
+  修复(补 f32_to_f16)后对拍 PASS,ABBA 复测 none 仍胜:t=1 302→374
+  (+24%)、t=8 621→678(+9%)。
+- 根因:融合 epilogue 是**手写 GEMM**;cuBLASLt(865ba08)接管 hgemm/
+  hgemm_residual 后,融合路径绕过了 cuBLASLt 的更优 kernel——
+  剖析实证:未融合 cuBLASLt 3-kernel(Ffn 均 0.048ms、Linear 0.026ms)
+  快于手写融合 1-kernel(0.060/0.030ms)。融合收益结论属于手写
+  GEMM 时代,cuBLASLt 后被推翻;默认改 none,all/up/down 保留为
+  CUBLASLT=0 组合候选。
+- 教训入流程:autotune 只测速度不测正确性,首次启用一条休眠路径前
+  必须先过整图对拍(本例正是对拍抓住了坏路径)。
+
+**G7 双流拓扑证伪**(ABBA t=8/16 × 2 轮):serve=2 全面落败
+(t=8 620 vs 681、t=16 727 vs 773),avgBatch 7.94→4.33 腰斩——
+两个消费者把并发请求拆成小批,事件门控流水线下单消费者即最优。
+权重共享(Arc 跨 handle 复用)本就成立,G7 按本地数据关闭。
+
+**PV mma 进一步调优:评估后搁置**——attention kernel 0.0233ms/层 ×
+32 层 ≈ 0.75ms/前向,仅占前向 ~14%;PV 已是 tensor core,剩余方向
+(softmax 与 K 预取重叠、stage 数)上限 <4% 且无明确战术,不值得
+为微收益冒数值纪律风险。
+
+
 **开关**:`KATAGO_CUDA_NOPIPELINE=1` 回退同步循环;`KATAGO_CUDA_NOGRAPH=1`
 直连(调试);完成事件无条件创建(直连模式流水线门控仍可用)。
 
@@ -218,16 +270,19 @@ imma m16n8k32 变体,epilogue 内反量化直出 f16):
 
 | # | 组 | 战术 | 状态 |
 |---|---|---|---|
-| G1 | fa4 / wide_projection / qkv_rope / dual_ffn | 宽 QKV 单 GEMM（M=B×361、N=1152、K=384，packed 行 [Q384\|K384\|V384]，tile M128×N128×K64 s2）；FA attention（tile M128×N64、stages=1、noncausal 无掩码、both16 双 FP16 累加 + **rescale 舍回 FP16 累加器**、128 线程）；Q/K RoPE 为**独立 batch 共享 kernel**（361×192 线程、half2 对、按 B 展开，非 GEMM epilogue——SM120 证伪了融合）；dual FFN 共享 A + SwiGLU epilogue（CUTLASS LeftSiLUAndMul） | 部分：attention 已换 v3(非 FA4 tile 但达标)；dual FFN 进行中；宽 QKV/RoPE 未做 |
+| G1 | fa4 / wide_projection / qkv_rope / dual_ffn | 宽 QKV 单 GEMM（M=B×361、N=1152、K=384，packed 行 [Q384\|K384\|V384]，tile M128×N128×K64 s2）；FA attention（tile M128×N64、stages=1、noncausal 无掩码、both16 双 FP16 累加 + **rescale 舍回 FP16 累加器**、128 线程）；Q/K RoPE 为**独立 batch 共享 kernel**（361×192 线程、half2 对、按 B 展开，非 GEMM epilogue——SM120 证伪了融合）；dual FFN 共享 A + SwiGLU epilogue（CUTLASS LeftSiLUAndMul） | ✅ 等价完成（本地路线）：qkv packed GEMM f16、RoPE 融合进 FA2（10c4f1c）、FA2 全张量核（83ba18d）、dual FFN + swiglu_dual |
 | G2 | fused_residual / linear2 / outproj | GEMM beta=1 原位残差（C==D 同指针，epilogue 先读 C 再写 D；tile 128×128×32、warp 64×64×32、3 stages） | ✅ 已做(8f24fb0)：hgemm_residual beta=1 + hgemm_f16 直出 epilogue |
-| G3 | postconv_bn / preconv / pointwise | affine+SiLU（half2 `__hfma2`，sigmoid 逐 half 转 float）；RMSNorm C384 用 warp4-vec8（**零共享内存**：uint4+uint2 载入 12 half/lane、单 XOR 链归约、4 行/块）；SwiGLU 已折入 G1 FFN epilogue | 待做(RMSNorm/affine 仍是简单版) |
-| G4 | wide_head / policy_p1 / head_bn | wide head 投影（三合一 GEMM，full-c384：P1@0..96、G1@96..192、V1@192..384）；fused policy P1（half→float 直出 + BN fold + silu）；head BN half→float（V1 写 half+float 双输出） | 待做 |
+| G3 | postconv_bn / preconv / pointwise | affine+SiLU（half2 `__hfma2`，sigmoid 逐 half 转 float）；RMSNorm C384 用 warp4-vec8（**零共享内存**：uint4+uint2 载入 12 half/lane、单 XOR 链归约、4 行/块）；SwiGLU 已折入 G1 FFN epilogue | ✅ 已做：rms_norm_f32 即 warp4-vec8；gatesilu 融合经 autotune 翻案为默认关（见 autotune 节） |
+| G4 | wide_head / policy_p1 / head_bn | wide head 投影（三合一 GEMM，full-c384：P1@0..96、G1@96..192、V1@192..384）；fused policy P1（half→float 直出 + BN fold + silu）；head BN half→float（V1 写 half+float 双输出） | ✅ 等价路线完成：conv1p\|g 合并 GEMM、pass 分支融合、ValueHead 三输出合一（-10 kernel） |
 | G5 | rmsnorm | （已并入 G3） | — |
-| G6 | l2 | persisting-L2（trunk 窗口 = B×361×768×2B ≈ 8.5MB、inner = B×361×384×2B ≈ 4.2MB；cudaDeviceSetLimit + cudaStreamSetAttribute access-policy；**5070 Ti 48MB L2/36MB persisting 上限，2 流 26.6MB 可 fit**） | 待做 |
-| G7 | weight_sharing | 普通权重跨流共享（cudaShareModelWeights） | 待做 |
-| G8 | initial_conv | 3×3 卷积 im2col+GEMM 的 sm120 特化（K=198→pad 208=13×16）——**fork 用 cuDNN frontend（eng45-tile0-stages2），本机无 cuDNN 故走 im2col** | 待做 |
-| G9 | initial_global | initial global matmul-add 融合 | 待做 |
-| G10 | value_terminal | value terminal 拆分（fork 认证 plan 中**已禁用**，走官方路径；低优先级） | 待做 |
+| G6 | l2 | persisting-L2（trunk 窗口 = B×361×768×2B ≈ 8.5MB、inner = B×361×384×2B ≈ 4.2MB；cudaDeviceSetLimit + cudaStreamSetAttribute access-policy） | ✅ 已实验并本地证伪（c16aa26）：batch≤16 工作集 ~13MB 本已驻留 48MB L2，无收益；API 保留 |
+| G7 | weight_sharing | 普通权重跨流共享（cudaShareModelWeights） | ❌ 双流拓扑 ABBA 证伪（2026-08-15，见 autotune 节）：serve=2 时 t=8 620 vs 681、t=16 727 vs 773，avgBatch 7.94→4.33 腰斩——事件门控流水线下单消费者即最优，权重共享（Arc 复用）本就成立 |
+| G8 | initial_conv | 3×3 卷积 im2col+GEMM 的 sm120 特化（K=198→pad 208=13×16）——**fork 用 cuDNN frontend（eng45-tile0-stages2），本机无 cuDNN 故走 im2col** | ✅ im2col K=198→208 已实现（fork cuDNN 路线本机不可用） |
+| G9 | initial_global | initial global matmul-add 融合 | ✅ conv+global 加和+门控融合 kernel 已实现 |
+| G10 | value_terminal | value terminal 拆分（fork 认证 plan 中**已禁用**，走官方路径；低优先级） | ✅ 等价达成：value_fc_fused 单 kernel 写 3 输出 |
+
+**注**：上表为 fork 战术映射视角的终态。本地实际决策组的最新裁决以
+`scripts/autotune.py` 的 DECISION_GROUPS + `plans/autotune-history.json` 留痕为准。
 
 ## 调度层（fork 复刻清单）
 
@@ -244,9 +299,13 @@ imma m16n8k32 变体,epilogue 内反量化直出 f16):
 
 ## plan JSON（fail-closed）
 
-- target 指纹：compute capability + 设备 16 属性 + 模型 SHA-256 + batch + 精度 + 流拓扑
-- apply：per-batch tactic overrides；final_joint：性能证书 + 正确性证书
-- 加载校验：任何不匹配即报错，绝不静默回退
+- ✅ 已落地（2026-08-15）：`kata_nn/src/tactic_plan.rs` + `scripts/autotune.py`
+  产出 `plans/best-tactic-plan.json`。target 指纹 = GPU 名 + CC + SM 数 +
+  L2 + 模型 SHA-256；加载校验任何不匹配即报错，绝不静默回退；tactic
+  键域白名单防 plan 与代码版本漂移失配。详见「离线 autotune + plan JSON」节。
+- fork 的 per-batch tactic overrides / final_joint 证书字段未照搬：本地
+  tactic 全部是全批次开关，无 per-batch 维度；证书信息由
+  autotune-history.json 承载。
 
 ## 正确性门
 

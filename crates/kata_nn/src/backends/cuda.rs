@@ -905,8 +905,45 @@ mod imp {
         let mut out = vec![0u16; n];
         stream.memcpy_dtoh(&d_o, &mut out).map_err(|e| e.to_string())?;
         Ok(out.iter().map(|&b| f16_to_f32_bits(b)).collect())
+        }
     }
-    }
+}
+
+/// 当前设备的 tactic-plan 指纹（`cuda-fingerprint` 子命令与 plan 校验共用）。
+/// `gpu_idx` 传 `None` 用默认设备。
+#[cfg(feature = "cuda")]
+pub fn current_device_fingerprint(
+    gpu_idx: Option<i32>,
+) -> Result<crate::tactic_plan::DeviceFingerprint, String> {
+    let dev = match gpu_idx {
+        Some(i) => cudarc::driver::CudaContext::new(i as usize).map_err(|e| e.to_string())?,
+        None => cudarc::driver::CudaContext::new(0).map_err(|e| e.to_string())?,
+    };
+    device_fingerprint(&dev)
+}
+
+/// 当前设备的 tactic-plan 指纹（`cuda-fingerprint` 子命令与 plan 校验共用）。
+#[cfg(feature = "cuda")]
+pub fn device_fingerprint(
+    dev: &cudarc::driver::CudaContext,
+) -> Result<crate::tactic_plan::DeviceFingerprint, String> {
+    use cudarc::driver::sys::CUdevice_attribute as Attr;
+    let major = dev
+        .attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .map_err(|e| format!("query cc major: {e}"))?;
+    let minor = dev
+        .attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+        .map_err(|e| format!("query cc minor: {e}"))?;
+    Ok(crate::tactic_plan::DeviceFingerprint {
+        gpu_name: dev.name().map_err(|e| format!("query device name: {e}"))?,
+        compute_capability: format!("{major}.{minor}"),
+        sm_count: dev
+            .attribute(Attr::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+            .map_err(|e| format!("query sm count: {e}"))? as u32,
+        l2_cache_bytes: dev
+            .attribute(Attr::CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE)
+            .map_err(|e| format!("query l2 size: {e}"))? as u64,
+    })
 }
 
 /// CUDA 后端入口（无 feature 时的占位实现）。
@@ -949,6 +986,8 @@ mod backend_impl {
         model_desc: ModelDesc,
         model: Arc<CudaModel>,
         rt: Arc<CudaRuntime>,
+        /// 模型文件路径（cudaTacticPlan 指纹校验时算 SHA-256 用）。
+        model_path: String,
     }
 
     impl LoadedModel for CudaLoadedModel {
@@ -1115,7 +1154,7 @@ mod backend_impl {
             let g = g.get_or_insert_with(|| CudaGraphState {
                 by_size: std::collections::HashMap::new(),
             });
-            let force_direct = std::env::var("KATAGO_CUDA_NOGRAPH").is_ok();
+            let force_direct = crate::tactic_plan::tactic_var("KATAGO_CUDA_NOGRAPH").is_ok();
             // per-size 缓存：新尺寸才创建（capture 期间全局互斥 + 设备清场）。
             // 已有尺寸直接复用，零重捕获；旧尺寸状态永久保留，在途批不失效。
             if !g.by_size.contains_key(&phys_batch) {
@@ -1406,24 +1445,49 @@ mod backend_impl {
                 model_desc: parsed.model_desc,
                 model,
                 rt,
+                model_path: file.to_string(),
             }))
         }
 
         fn create_compute_context(
             &self,
             _gpu_idxs: &[i32],
-            _logger: &Logger,
+            logger: &Logger,
             nn_x_len: i32,
             nn_y_len: i32,
             _home_data_dir_override: &str,
             _use_fp16_mode: Enabled,
             loaded_model: &dyn LoadedModel,
-            _cfg: &Config,
+            cfg: &Config,
         ) -> Result<Box<dyn ComputeContext>, NeuralNetError> {
             let model = loaded_model
                 .as_any()
                 .downcast_ref::<CudaLoadedModel>()
                 .ok_or_else(|| NeuralNetError("Wrong loaded model type".to_string()))?;
+            // cudaTacticPlan：离线 autotune 认证 plan，fail-closed 安装
+            // tactic 覆盖（先于 serve 线程 spawn 与一切 tactic 读取）。
+            if cfg.contains("cudaTacticPlan") {
+                let path = cfg
+                    .get_string("cudaTacticPlan")
+                    .map_err(|e| NeuralNetError(format!("cudaTacticPlan: {e}")))?;
+                let fp = super::device_fingerprint(&model.rt.device)
+                    .map_err(|e| NeuralNetError(e))?;
+                let model_sha = crate::tactic_plan::sha256_file(std::path::Path::new(
+                    &model.model_path,
+                ))
+                .map_err(|e| NeuralNetError(e))?;
+                crate::tactic_plan::load_and_install(
+                    std::path::Path::new(&path),
+                    &fp,
+                    &model_sha,
+                )
+                .map_err(|e| NeuralNetError(e))?;
+                logger.write(&format!(
+                    "cudaTacticPlan '{}' installed (plan id: {})\n",
+                    path,
+                    crate::tactic_plan::installed_plan_id().unwrap_or("?")
+                ));
+            }
             Ok(Box::new(CudaComputeContext {
                 model: model.model.clone(),
                 rt: model.rt.clone(),
@@ -1463,7 +1527,7 @@ mod backend_impl {
                 nn_y_len: c.nn_y_len,
                 max_batch_size,
                 inputs_use_nhwc,
-                pad_to_max: std::env::var("KATAGO_CUDA_PADBATCH").is_ok(),
+                pad_to_max: crate::tactic_plan::tactic_var("KATAGO_CUDA_PADBATCH").is_ok(),
             }))
         }
 
@@ -1515,7 +1579,7 @@ mod backend_impl {
 
         fn supports_async_pipeline(&self) -> bool {
             // KATAGO_CUDA_NOPIPELINE=1：回退同步 serve 循环（ABBA 对照/调试）。
-            std::env::var("KATAGO_CUDA_NOPIPELINE").is_err()
+            crate::tactic_plan::tactic_var("KATAGO_CUDA_NOPIPELINE").is_err()
         }
 
         fn submit_output(

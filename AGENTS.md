@@ -22,9 +22,13 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   nnBackend=cudabackend --override-config numSearchThreads=1 -v 20 -n 1 -t 1,4`
   (注意:不带 -t 时走 auto-tune,每个线程配置都重新加载模型 ~25s,很慢;
   务必用 -t 指定 1-2 个配置)
-- per-layer 剖析:`KATAGO_CUDA_PROFILE=1` + GTP `kata-raw-nn 0`(逐层/attention
-  子段耗时);输入 dump:`KATAGO_CUDA_DUMP_INPUT=<dir>`;逐层 dump:
-  `KATAGO_CUDA_DEBUG_LAYER=<i>`
+- 离线 autotune:`python scripts/autotune.py --threads both`(8 决策组 ABBA,
+  产出 plans/best-tactic-plan.json);接入选认证 plan:`--override-config
+  nnBackend=cudabackend,cudaTacticPlan=D:/code/Rust_KataGo/plans/best-tactic-plan.json`
+  (fail-closed:指纹/模型不匹配即报错);设备指纹:`katago-rs cuda-fingerprint --model <f>`
+- per-layer 剖析:`KATAGO_CUDA_PROFILE=1` + GTP `kata-raw-nn all`(逐层/attention
+  子段耗时,graph 模式下被跳过需配 `KATAGO_CUDA_NOGRAPH=1`);输入 dump:
+  `KATAGO_CUDA_DUMP_INPUT=<dir>`;逐层 dump:`KATAGO_CUDA_DEBUG_LAYER=<i>`
 
 ## 后端选择
 
@@ -56,8 +60,13 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   禁 fast_math
 - 后端路线:手写 CUDA C++/PTX kernel 为主线(nvcc 编译 + cudarc 加载),
   TensorRT 兜底,plan JSON fail-closed
+- tactic 开关(KATAGO_CUDA_* 环境变量)一律经 `tactic_plan::tactic_var()`
+  读取(优先级 plan > env > 默认;直接 env::var 会绕过认证 plan);
+  默认值变更必须 autotune ABBA + 对拍双证据
 - 依赖真实模型的测试用 `KATAGO_TEST_MODEL_DIR` 环境变量定位模型,缺失时自动跳过
 - 新后端实现需实现 `kata_nn::backend::Backend` trait 并接入 `kata_program::setup`
   的 backend 选择
 - 性能变更必须 ABBA 实测(基准命令见上),慢于基线即回退;数值变更必须过
-  整图对拍(compare_nn_output.py RESULT: PASS)
+  整图对拍(compare_nn_output.py RESULT: PASS);启用休眠代码路径(如
+  长期未跑的 tactic 组合)前同样先过对拍(FUSION=none 的 act384f16
+  断裂 bug 即先例)
