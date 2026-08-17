@@ -74,7 +74,8 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   TensorRT 兜底,plan JSON fail-closed
 - tactic 开关(KATAGO_CUDA_* 环境变量)一律经 `tactic_plan::tactic_var()`
   读取(优先级 plan > env > 默认;直接 env::var 会绕过认证 plan);
-  默认值变更必须 autotune ABBA + 对拍双证据
+  默认值变更必须 autotune ABBA + 对拍双证据。当前 plan 已启用
+  `KATAGO_CUDA_CUBLASLT_RANK=time`(cuBLASLt top-8 计时重排,M1:+2.55%)
 - 依赖真实模型的测试用 `KATAGO_TEST_MODEL_DIR` 环境变量定位模型,缺失时自动跳过
 - 新后端实现需实现 `kata_nn::backend::Backend` trait 并接入 `kata_program::setup`
   的 backend 选择

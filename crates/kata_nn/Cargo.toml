@@ -27,7 +27,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system", "nvrtc", "cublaslt"] }
+cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system", "nvrtc", "cublaslt", "cublas"] }
 
 [build-dependencies]
 cc = "1"

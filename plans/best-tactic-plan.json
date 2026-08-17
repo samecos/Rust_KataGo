@@ -12,7 +12,9 @@
     "model_sha256": "f2fc09fdf58a3e8a4b97addceab0c853874c52709152e61935b6ac6b9f474f94"
   },
   "apply": {
-    "tactic_overrides": {}
+    "tactic_overrides": {
+      "KATAGO_CUDA_CUBLASLT_RANK": "time"
+    }
   },
   "selection": {
     "method": "ordered decision groups, ABBA (I-C-C-I) geometric mean",

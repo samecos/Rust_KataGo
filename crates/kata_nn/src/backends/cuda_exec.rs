@@ -63,6 +63,12 @@ fn active_stream(rt: &CudaRuntime) -> Arc<CudaStream> {
     })
 }
 
+/// 取当前线程活跃流的 Arc 克隆(C1 计时选算法需要 Arc 才能分配 scratch
+/// 并在同一流上计时,保证与真实工作同流有序);非 apply 语境返回 None。
+pub(crate) fn active_stream_clone() -> Option<Arc<CudaStream>> {
+    ACTIVE_STREAM.with(|s| s.borrow().as_ref().cloned())
+}
+
 /// capture 模式是否开启（apply 内部据此跳过不可重放的操作）。
 pub fn capturing() -> bool {
     CAPTURING.with(|c| c.get())

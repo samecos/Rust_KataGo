@@ -75,6 +75,15 @@ mod imp {
     unsafe impl Send for CublasLtState {}
     unsafe impl Sync for CublasLtState {}
 
+    /// C1 开关(KATAGO_CUDA_CUBLASLT_RANK=time):算法选择从"启发式首选"
+    /// 改为"top-8 候选实测计时取最优"。M0 探针实测 qkv 形状首选非最优(-26%)。
+    /// 经 tactic_plan::tactic_var 读取(plan > env > 默认)。
+    pub(crate) fn cublaslt_rank_time() -> bool {
+        crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT_RANK")
+            .map(|v| v == "time")
+            .unwrap_or(false)
+    }
+
     impl CudaRuntime {
         /// cublasLt 句柄（实验/测试路径用；生产 GEMM 走 cublaslt_gemm*）。
         #[doc(hidden)]
@@ -171,22 +180,38 @@ mod imp {
             k: usize,
             beta: f32,
         ) -> Result<bool, String> {
-            use cudarc::cublaslt::sys;
             let Some(st) = &self.cublaslt else { return Ok(false) };
             let key = (m, n, k, beta != 0.0);
-            let algo = {
-                let cache = st.algo_cache.lock().unwrap();
-                cache.get(&key).copied()
-            };
-            let algo = match algo {
+            let cached = st.algo_cache.lock().unwrap().get(&key).copied();
+            let algo = match cached {
                 Some(a) => Some(a),
-                None => match self.cublaslt_select_algo(st, m, n, k)? {
-                    Some(a) => {
-                        st.algo_cache.lock().unwrap().insert(key, a);
-                        Some(a)
+                None => {
+                    let cands = self.cublaslt_select_algos(st, m, n, k, false)?;
+                    if cands.is_empty() {
+                        None
+                    } else if cublaslt_rank_time() && !crate::backends::cuda_exec::capturing() {
+                        // C1 计时重排:在当前活跃流上逐候选计时(scratch 承载输出,
+                        // beta=0,不碰真实 C);与真实工作同流提交,天然有序。
+                        let tstream = crate::backends::cuda_exec::active_stream_clone()
+                            .unwrap_or_else(|| self.device.default_stream());
+                        let mut scratch: CudaSlice<f32> = unsafe { tstream.alloc(c.len()) }
+                            .map_err(|e| format!("rank scratch alloc: {e}"))?;
+                        let pick = self
+                            .cublaslt_time_candidates_f32(
+                                st, &tstream, &cands, a, b, &mut scratch, m, n, k,
+                            )
+                            .unwrap_or(cands[0]);
+                        st.algo_cache.lock().unwrap().insert(key, pick);
+                        Some(pick)
+                    } else if crate::backends::cuda_exec::capturing() {
+                        // capture 中同步非法,无法计时:用启发式首选且不写缓存,
+                        // 避免把未计时的选择固化进缓存。
+                        Some(cands[0])
+                    } else {
+                        st.algo_cache.lock().unwrap().insert(key, cands[0]);
+                        Some(cands[0])
                     }
-                    None => None,
-                },
+                }
             };
             let Some(algo) = algo else { return Ok(false) };
             self.cublaslt_exec(st, stream, &algo, a, b, c, m, n, k, beta)?;
@@ -206,36 +231,175 @@ mod imp {
             n: usize,
             k: usize,
         ) -> Result<bool, String> {
-            use cudarc::cublaslt::sys;
             let Some(st) = &self.cublaslt else { return Ok(false) };
             let key = (m, n, k, true); // f16out 用 beta=true 槽位区分
-            let algo = {
-                let cache = st.algo_cache.lock().unwrap();
-                cache.get(&key).copied()
-            };
-            let algo = match algo {
+            let cached = st.algo_cache.lock().unwrap().get(&key).copied();
+            let algo = match cached {
                 Some(a) => Some(a),
-                None => match self.cublaslt_select_algo_f16(st, m, n, k)? {
-                    Some(a) => {
-                        st.algo_cache.lock().unwrap().insert(key, a);
-                        Some(a)
+                None => {
+                    let cands = self.cublaslt_select_algos(st, m, n, k, true)?;
+                    if cands.is_empty() {
+                        None
+                    } else if cublaslt_rank_time() && !crate::backends::cuda_exec::capturing() {
+                        let tstream = crate::backends::cuda_exec::active_stream_clone()
+                            .unwrap_or_else(|| self.device.default_stream());
+                        let mut scratch: CudaSlice<u16> = unsafe { tstream.alloc(c.len()) }
+                            .map_err(|e| format!("rank scratch alloc: {e}"))?;
+                        let pick = self
+                            .cublaslt_time_candidates_f16(
+                                st, &tstream, &cands, a, b, &mut scratch, m, n, k,
+                            )
+                            .unwrap_or(cands[0]);
+                        st.algo_cache.lock().unwrap().insert(key, pick);
+                        Some(pick)
+                    } else if crate::backends::cuda_exec::capturing() {
+                        Some(cands[0])
+                    } else {
+                        st.algo_cache.lock().unwrap().insert(key, cands[0]);
+                        Some(cands[0])
                     }
-                    None => None,
-                },
+                }
             };
             let Some(algo) = algo else { return Ok(false) };
             self.cublaslt_exec_f16(st, stream, &algo, a, b, c, m, n, k)?;
             Ok(true)
         }
 
-        /// 选算法(heuristic 查询)。
-        fn cublaslt_select_algo(
+        /// C1:候选逐个计时(3 预热 + 12 计时,beta=0 写 scratch),返回最快者。
+        /// 仅相对排名有意义;首选与最优差 <2% 时不打日志。
+        #[allow(clippy::too_many_arguments)]
+        fn cublaslt_time_candidates_f32(
+            &self,
+            st: &CublasLtState,
+            stream: &cudarc::driver::CudaStream,
+            cands: &[cudarc::cublaslt::sys::cublasLtMatmulAlgo_t],
+            a: &CudaSlice<u16>,
+            b: &CudaSlice<u16>,
+            scratch: &mut CudaSlice<f32>,
+            m: usize,
+            n: usize,
+            k: usize,
+        ) -> Option<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t> {
+            let mut best: Option<(f64, cudarc::cublaslt::sys::cublasLtMatmulAlgo_t)> = None;
+            let mut first_ms = f64::NAN;
+            for (i, cand) in cands.iter().enumerate() {
+                let mut failed = false;
+                for _ in 0..3 {
+                    if self
+                        .cublaslt_exec(st, stream, cand, a, b, scratch, m, n, k, 0.0)
+                        .is_err()
+                    {
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed || stream.synchronize().is_err() {
+                    continue;
+                }
+                let t0 = std::time::Instant::now();
+                for _ in 0..12 {
+                    if self
+                        .cublaslt_exec(st, stream, cand, a, b, scratch, m, n, k, 0.0)
+                        .is_err()
+                    {
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed || stream.synchronize().is_err() {
+                    continue;
+                }
+                let ms = t0.elapsed().as_secs_f64() * 1000.0 / 12.0;
+                if i == 0 {
+                    first_ms = ms;
+                }
+                if best.as_ref().map(|(t, _)| ms < *t).unwrap_or(true) {
+                    best = Some((ms, *cand));
+                }
+            }
+            if let Some((bms, _)) = &best {
+                if first_ms.is_finite() && *bms < first_ms * 0.98 {
+                    eprintln!(
+                        "[cublaslt-rank] m={m} n={n} k={k} f32out: #0 {first_ms:.4}ms → best {:.4}ms (-{:.0}%)",
+                        bms, (first_ms - bms) / first_ms * 100.0
+                    );
+                }
+            }
+            best.map(|(_, a)| a)
+        }
+
+        /// f16 输出版本的候选计时(同 f32 版逻辑)。
+        #[allow(clippy::too_many_arguments)]
+        fn cublaslt_time_candidates_f16(
+            &self,
+            st: &CublasLtState,
+            stream: &cudarc::driver::CudaStream,
+            cands: &[cudarc::cublaslt::sys::cublasLtMatmulAlgo_t],
+            a: &CudaSlice<u16>,
+            b: &CudaSlice<u16>,
+            scratch: &mut CudaSlice<u16>,
+            m: usize,
+            n: usize,
+            k: usize,
+        ) -> Option<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t> {
+            let mut best: Option<(f64, cudarc::cublaslt::sys::cublasLtMatmulAlgo_t)> = None;
+            let mut first_ms = f64::NAN;
+            for (i, cand) in cands.iter().enumerate() {
+                let mut failed = false;
+                for _ in 0..3 {
+                    if self
+                        .cublaslt_exec_f16(st, stream, cand, a, b, scratch, m, n, k)
+                        .is_err()
+                    {
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed || stream.synchronize().is_err() {
+                    continue;
+                }
+                let t0 = std::time::Instant::now();
+                for _ in 0..12 {
+                    if self
+                        .cublaslt_exec_f16(st, stream, cand, a, b, scratch, m, n, k)
+                        .is_err()
+                    {
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed || stream.synchronize().is_err() {
+                    continue;
+                }
+                let ms = t0.elapsed().as_secs_f64() * 1000.0 / 12.0;
+                if i == 0 {
+                    first_ms = ms;
+                }
+                if best.as_ref().map(|(t, _)| ms < *t).unwrap_or(true) {
+                    best = Some((ms, *cand));
+                }
+            }
+            if let Some((bms, _)) = &best {
+                if first_ms.is_finite() && *bms < first_ms * 0.98 {
+                    eprintln!(
+                        "[cublaslt-rank] m={m} n={n} k={k} f16out: #0 {first_ms:.4}ms → best {:.4}ms (-{:.0}%)",
+                        bms, (first_ms - bms) / first_ms * 100.0
+                    );
+                }
+            }
+            best.map(|(_, a)| a)
+        }
+
+        /// 选算法:heuristic 查询 top-8,按原顺序返回(索引 0 = 启发式首选)。
+        /// f16out=true 时 C/D 布局为 CUDA_R_16F(qkv packed / dual FFN 用)。
+        fn cublaslt_select_algos(
             &self,
             st: &CublasLtState,
             m: usize,
             n: usize,
             k: usize,
-        ) -> Result<Option<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t>, String> {
+            f16out: bool,
+        ) -> Result<Vec<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t>, String> {
             use cudarc::cublaslt::sys;
             unsafe {
                 let mut desc: sys::cublasLtMatmulDesc_t = std::ptr::null_mut();
@@ -253,12 +417,17 @@ mod imp {
                     desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSB,
                     &transb as *const _ as *const _, std::mem::size_of_val(&transb));
                 // 布局(列主序映射):A_cm=B 内存 [k,n] ld=k;B_cm=A 内存 [k,m] ld=k;C [n,m] ld=n
+                let cdtype = if f16out {
+                    sys::cudaDataType_t::CUDA_R_16F
+                } else {
+                    sys::cudaDataType_t::CUDA_R_32F
+                };
                 let mut a_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
                 let mut b_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
                 let mut c_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
                 sys::cublasLtMatrixLayoutCreate(&mut a_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, n as u64, k as i64);
                 sys::cublasLtMatrixLayoutCreate(&mut b_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, m as u64, k as i64);
-                sys::cublasLtMatrixLayoutCreate(&mut c_lay, sys::cudaDataType_t::CUDA_R_32F, n as u64, m as u64, n as i64);
+                sys::cublasLtMatrixLayoutCreate(&mut c_lay, cdtype, n as u64, m as u64, n as i64);
                 let mut pref: sys::cublasLtMatmulPreference_t = std::ptr::null_mut();
                 sys::cublasLtMatmulPreferenceCreate(&mut pref);
                 let ws_size = st.workspace.len();
@@ -266,10 +435,13 @@ mod imp {
                     pref,
                     sys::cublasLtMatmulPreferenceAttributes_t::CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
                     &ws_size as *const _ as *const _, std::mem::size_of_val(&ws_size));
-                let mut heur: sys::cublasLtMatmulHeuristicResult_t = std::mem::zeroed();
+                const REQ: usize = 8;
+                let mut heur: Vec<sys::cublasLtMatmulHeuristicResult_t> =
+                    vec![std::mem::zeroed(); REQ];
                 let mut cnt = 0i32;
                 let r = sys::cublasLtMatmulAlgoGetHeuristic(
-                    st.handle, desc, a_lay, b_lay, c_lay, c_lay, pref, 1, &mut heur, &mut cnt,
+                    st.handle, desc, a_lay, b_lay, c_lay, c_lay, pref,
+                    REQ as i32, heur.as_mut_ptr(), &mut cnt,
                 );
                 sys::cublasLtMatmulDescDestroy(desc);
                 sys::cublasLtMatrixLayoutDestroy(a_lay);
@@ -277,9 +449,14 @@ mod imp {
                 sys::cublasLtMatrixLayoutDestroy(c_lay);
                 sys::cublasLtMatmulPreferenceDestroy(pref);
                 if r != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS || cnt == 0 {
-                    return Ok(None);
+                    return Ok(Vec::new());
                 }
-                Ok(Some(heur.algo))
+                Ok(heur
+                    .into_iter()
+                    .take(cnt as usize)
+                    .filter(|h| h.workspaceSize <= ws_size)
+                    .map(|h| h.algo)
+                    .collect())
             }
         }
 
@@ -353,60 +530,6 @@ mod imp {
                 }
             }
             Ok(())
-        }
-
-        /// f16 输出的算法选择(Cdesc = CUDA_R_16F)。
-        fn cublaslt_select_algo_f16(
-            &self,
-            st: &CublasLtState,
-            m: usize,
-            n: usize,
-            k: usize,
-        ) -> Result<Option<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t>, String> {
-            use cudarc::cublaslt::sys;
-            unsafe {
-                let mut desc: sys::cublasLtMatmulDesc_t = std::ptr::null_mut();
-                sys::cublasLtMatmulDescCreate(
-                    &mut desc,
-                    sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                    sys::cudaDataType_t::CUDA_R_32F,
-                );
-                let transa: u32 = 1;
-                let transb: u32 = 0;
-                sys::cublasLtMatmulDescSetAttribute(
-                    desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSA,
-                    &transa as *const _ as *const _, std::mem::size_of_val(&transa));
-                sys::cublasLtMatmulDescSetAttribute(
-                    desc, sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSB,
-                    &transb as *const _ as *const _, std::mem::size_of_val(&transb));
-                let mut a_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
-                let mut b_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
-                let mut c_lay: sys::cublasLtMatrixLayout_t = std::ptr::null_mut();
-                sys::cublasLtMatrixLayoutCreate(&mut a_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, n as u64, k as i64);
-                sys::cublasLtMatrixLayoutCreate(&mut b_lay, sys::cudaDataType_t::CUDA_R_16F, k as u64, m as u64, k as i64);
-                sys::cublasLtMatrixLayoutCreate(&mut c_lay, sys::cudaDataType_t::CUDA_R_16F, n as u64, m as u64, n as i64);
-                let mut pref: sys::cublasLtMatmulPreference_t = std::ptr::null_mut();
-                sys::cublasLtMatmulPreferenceCreate(&mut pref);
-                let ws_size = st.workspace.len();
-                sys::cublasLtMatmulPreferenceSetAttribute(
-                    pref,
-                    sys::cublasLtMatmulPreferenceAttributes_t::CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                    &ws_size as *const _ as *const _, std::mem::size_of_val(&ws_size));
-                let mut heur: sys::cublasLtMatmulHeuristicResult_t = std::mem::zeroed();
-                let mut cnt = 0i32;
-                let r = sys::cublasLtMatmulAlgoGetHeuristic(
-                    st.handle, desc, a_lay, b_lay, c_lay, c_lay, pref, 1, &mut heur, &mut cnt,
-                );
-                sys::cublasLtMatmulDescDestroy(desc);
-                sys::cublasLtMatrixLayoutDestroy(a_lay);
-                sys::cublasLtMatrixLayoutDestroy(b_lay);
-                sys::cublasLtMatrixLayoutDestroy(c_lay);
-                sys::cublasLtMatmulPreferenceDestroy(pref);
-                if r != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS || cnt == 0 {
-                    return Ok(None);
-                }
-                Ok(Some(heur.algo))
-            }
         }
 
         /// f16 输出的执行(Cdesc = CUDA_R_16F,C 为 f16)。
@@ -1170,7 +1293,7 @@ mod backend_impl {
                 let mut ws = CudaWorkspace::new(stream, &h.model, phys_batch)
                     .map_err(|e| NeuralNetError(format!("CUDA workspace alloc failed: {e}")))?;
                 let mut slot_vec: Vec<CudaSlot> = Vec::with_capacity(2);
-                for _slot in 0..2 {
+                for slot_idx in 0..2 {
                     let mut in_spatial: cudarc::driver::CudaSlice<f32> =
                         unsafe { stream.alloc(spatial_host.len()) }
                             .map_err(|e| NeuralNetError(format!("alloc in_spatial: {e}")))?;
@@ -1201,6 +1324,17 @@ mod backend_impl {
                     let graph = if force_direct {
                         None
                     } else {
+                        // C1(KATAGO_CUDA_CUBLASLT_RANK=time):capture 前先直连
+                        // 跑一次——计时重排在非 capture 语境完成该 M 的算法选择
+                        // 并写入缓存,随后的 capture 才能把优胜 kernel 烙进 graph。
+                        if slot_idx == 0 && super::imp::cublaslt_rank_time() {
+                            h.model
+                                .apply(&h.rt, stream, &mut ws, &in_spatial, &in_global)
+                                .map_err(|e| NeuralNetError(format!("pre-capture warm: {e}")))?;
+                            h.rt.device
+                                .synchronize()
+                                .map_err(|e| NeuralNetError(format!("pre-capture warm sync: {e}")))?;
+                        }
                         h.rt.device.synchronize().map_err(|e| NeuralNetError(format!("pre-capture sync: {e}")))?;
                         set_capturing(true);
                         let cap_result = (|| -> Result<cudarc::driver::CudaGraph, NeuralNetError> {

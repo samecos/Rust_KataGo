@@ -453,3 +453,34 @@ mma.sync 数据通路(util 98%),SM 无余量给第二流;fork 的双流收益前
 | 5 | A-lite:搜索语境凑批(765→871 的 12%) | 搜索口径 +12% | 仅搜索语境;nnbench 固定 B 口径已无空间 |
 | 6 | A 完整 fork 拓扑(双流/padding) | ~0 | 双流 -2% 实测;饱和证据;graph 互斥 |
 | — | D cuDNN 初始卷积 | 搁置 | H5:1.6% |
+
+## M1 C0/C1(2026-08-17:C0 证伪,C1 落地 +2.6%)
+
+### C0 证伪:经典 cublas 不放出 nvjet
+
+probe_classic_cublas_nvjet(cublasGemmEx,CUBLAS_COMPUTE_32F,CUBLAS_GEMM_DEFAULT):
+ffn_up 0.1296 / qkv 0.0681 / ffn_down 0.1139 ms —— 与 cuBLASLt 几乎逐位同速
+(Lt: 0.1303/0.0619/0.1112),**经典 cublas 同样走 mma.sync 遗留路径,本机
+FP16 形状拿不到 nvjet/tcgen05 的免费午餐**。tcgen05 只剩 CUTLASS 4.x sm120f
+工程路线(C2,M3)。
+
+### C1 落地:cuBLASLt top-N 计时重排(tactic KATAGO_CUDA_CUBLASLT_RANK=time)
+
+- 实现:heuristic 请求从 1 改为 top-8;cache miss 且非 capture 时在当前活跃
+  流上逐候选计时(3 预热+12 计时,beta=0 写 scratch,不碰真实 C),取最优
+  写入算法缓存;capture 中用启发式首选且不写缓存(防固化);新尺寸 capture
+  前先直连预热一次(RANK=time 时),让 graph 烙进计时优胜 kernel。
+  plan 白名单+值域(time|heuristic)已入 tactic_plan.rs,fail-closed 生效。
+- 单形状实测(selection 日志):qkv(m=5776)0.0681→0.0621(-9%)、
+  ffn_up 0.1297→0.1166(-10%)、linear 384 系 -8~12%;B1(m=361)各形状
+  -5~28%。**启发式首选系统性非最优**。
+- ABBA(nnbench eval B16,W32,i200):A 893.5/891.7,B 916.5/914.3 →
+  **+2.55%**(>1% 采纳线);B8 BA:844.0→850.5(+0.8%,无回归)。
+- 对拍:KATAGO_CUDA_CUBLASLT_RANK=time 下 dump_nn_io_cuda →
+  compare_nn_output **RESULT: PASS**(16/16 top-1,全 gate OK)。
+- 已入 plans/best-tactic-plan.json tactic_overrides(plan 驱动,无需环境变量;
+  验证:不接 env 仅接 plan 时 selection 日志生效)。
+- 测试注意:dump_nn_io_cuda 三测试**并发**(cargo 默认)且开 RANK=time 时
+  会卡死(多 runtime/多流并发计时,疑 WDDM 驱动级互斥自旋);串行
+  `--test-threads=1` 时开不开 RANK 都 2.7s 通过。生产 serve=1 单消费者
+  不受影响(ABBA/对拍均在此口径验证)。跑该测试二进制一律串行。

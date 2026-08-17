@@ -24,6 +24,7 @@ use std::sync::OnceLock;
 pub const ALLOWED_TACTIC_KEYS: &[&str] = &[
     "KATAGO_CUDA_ATTN",
     "KATAGO_CUDA_CUBLASLT",
+    "KATAGO_CUDA_CUBLASLT_RANK",
     "KATAGO_CUDA_FUSION",
     "KATAGO_CUDA_NOGRAPH",
     "KATAGO_CUDA_NOPIPELINE",
@@ -110,6 +111,8 @@ fn validate_value(key: &str, value: &str) -> Result<(), String> {
         "KATAGO_CUDA_ATTN" => value == "v3",
         "KATAGO_CUDA_RMS" => value == "v1",
         "KATAGO_CUDA_FUSION" => matches!(value, "none" | "up" | "down" | "all"),
+        // cuBLASLt 算法选择策略:heuristic=首选(默认),time=top-N 计时重排
+        "KATAGO_CUDA_CUBLASLT_RANK" => matches!(value, "heuristic" | "time"),
         // 微秒窗口
         "KATAGO_NN_BATCH_WINDOW_US" => {
             value.parse::<u64>().map(|v| v <= 1_000_000).unwrap_or(false)

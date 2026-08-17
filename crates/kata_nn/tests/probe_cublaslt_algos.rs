@@ -1,6 +1,9 @@
 //! cuBLASLt heuristic 探针(H3 验证):拉取生产 GEMM 形状的全部 heuristic
 //! 候选,逐个实测计时,判断 sm120 上 cuBLASLt 13.x 候选池里是否存在显著
 //! 更快的(疑 nvjet/tcgen05)算法。
+//! 第二个测试(C0):经典 cuBLAS(cublasGemmEx)同形状计时——CUDA 12.8+ 的
+//! 经典 cublas 在 sm120 上对部分 FP16 形状会派发 nvjet(tcgen05)kernel,
+//! 与 Lt 候选池(已证全是 mma.sync 遗留路径)对照。
 //!
 //! 运行:`cargo test -p kata_nn --test probe_cublaslt_algos --features cuda --release -- --nocapture`
 //! 配合 `CUBLASLT_LOG_LEVEL=5 CUBLASLT_LOG_FILE=<f>` 可把每个候选执行时的
@@ -189,5 +192,81 @@ fn probe_cublaslt_heuristic_pool() {
             sys::cublasLtMatrixLayoutDestroy(b_lay);
             sys::cublasLtMatrixLayoutDestroy(c_lay);
         }
+    }
+}
+
+/// C0:经典 cuBLAS(cublasGemmEx)在 sm120 上同形状计时对照。
+/// 列主序映射与 Lt 路径一致:C_cm[N,M] = W[K,N]^T @ X[K,M]。
+#[test]
+fn probe_classic_cublas_nvjet() {
+    use cudarc::cublas::sys as csys;
+
+    let Ok(rt) = kata_nn::backends::cuda::CudaRuntime::new() else {
+        eprintln!("skipped: CUDA runtime unavailable");
+        return;
+    };
+    let stream = rt.device.default_stream();
+    let shapes = [
+        Shape { name: "ffn_up", m: 5776, n: 2304, k: 384, f16out: true },
+        Shape { name: "qkv", m: 5776, n: 1152, k: 384, f16out: true },
+        Shape { name: "ffn_down", m: 5776, n: 384, k: 2304, f16out: false },
+    ];
+    unsafe {
+        let mut handle: csys::cublasHandle_t = std::ptr::null_mut();
+        let r = csys::cublasCreate_v2(&mut handle);
+        assert_eq!(r, csys::cublasStatus_t::CUBLAS_STATUS_SUCCESS);
+        csys::cublasSetStream_v2(handle, stream.cu_stream() as _);
+        for s in &shapes {
+            let mut d_w = stream.alloc::<u16>((s.k * s.n) as usize).expect("alloc w");
+            let mut d_x = stream.alloc::<u16>((s.k * s.m) as usize).expect("alloc x");
+            let mut d_c16 = stream.alloc::<u16>((s.n * s.m).max(1) as usize).expect("alloc c16");
+            let mut d_c32 = stream.alloc::<f32>((s.n * s.m) as usize).expect("alloc c32");
+            let ones = vec![0x3C00u16; (s.k * s.n).max(s.k * s.m) as usize];
+            stream.memcpy_htod(&ones[..(s.k * s.n) as usize], &mut d_w).expect("htod w");
+            stream.memcpy_htod(&ones[..(s.k * s.m) as usize], &mut d_x).expect("htod x");
+            let alpha = 1.0f32;
+            let beta = 0.0f32;
+            let ctype = if s.f16out { csys::cudaDataType_t::CUDA_R_16F } else { csys::cudaDataType_t::CUDA_R_32F };
+            let mut run_once = || {
+                let (w_ptr, _g1) = d_w.device_ptr(&stream);
+                let (x_ptr, _g2) = d_x.device_ptr(&stream);
+                let c_ptr = if s.f16out {
+                    let (p, _g3) = d_c16.device_ptr_mut(&stream);
+                    p
+                } else {
+                    let (p, _g3) = d_c32.device_ptr_mut(&stream);
+                    p
+                };
+                csys::cublasGemmEx(
+                    handle,
+                    csys::cublasOperation_t::CUBLAS_OP_T,
+                    csys::cublasOperation_t::CUBLAS_OP_N,
+                    s.n as i32, // m(列主序行数)= N
+                    s.m as i32, // n(列主序列数)= M
+                    s.k as i32,
+                    &alpha as *const _ as *const _,
+                    w_ptr as *const _, csys::cudaDataType_t::CUDA_R_16F, s.k as i32,
+                    x_ptr as *const _, csys::cudaDataType_t::CUDA_R_16F, s.k as i32,
+                    &beta as *const _ as *const _,
+                    c_ptr as *mut _, ctype, s.n as i32,
+                    csys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                    csys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+                )
+            };
+            let rr = run_once();
+            if rr != csys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+                println!("== {}: classic cublas exec failed: {rr:?}", s.name);
+                continue;
+            }
+            for _ in 0..5 { run_once(); }
+            stream.synchronize().expect("warmup sync");
+            let t0 = std::time::Instant::now();
+            for _ in 0..50 { run_once(); }
+            stream.synchronize().expect("timed sync");
+            let ms = t0.elapsed().as_secs_f64() * 1000.0 / 50.0;
+            println!("== {} M={} N={} K={} {}: classic cublas {ms:.4} ms(Lt 最优对照:ffn_up 0.1303 / qkv 0.0619 / ffn_down 0.1112)",
+                s.name, s.m, s.n, s.k, if s.f16out { "f16" } else { "f32" });
+        }
+        csys::cublasDestroy_v2(handle);
     }
 }
