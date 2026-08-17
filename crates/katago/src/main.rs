@@ -36,6 +36,7 @@ fn run(args: Vec<String>) -> i32 {
         "gtp" => cmd::gtp::gtp(rest),
         "analysis" => cmd::analysis::analysis(rest),
         "benchmark" => cmd::benchmark::benchmark(rest),
+        "nnbench" => cmd::nnbench::nnbench(rest),
         "cuda-fingerprint" => cmd::cuda_fingerprint::cuda_fingerprint(rest),
         "contribute" => cmd::contribute::contribute(rest),
         "evalsgf" => cmd::eval_sgf::evalsgf(rest),
@@ -99,6 +100,7 @@ fn print_usage(program: &str) {
     eprintln!("  gtp                         Run the GTP engine (placeholder)");
     eprintln!("  analysis                    Run the JSON analysis engine");
     eprintln!("  benchmark                   Run NN/search benchmark");
+    eprintln!("  nnbench                     Pure NN forward throughput benchmark (cuda)");
     eprintln!(
         "  contribute                  Contribute games to distributed training (not enabled)"
     );

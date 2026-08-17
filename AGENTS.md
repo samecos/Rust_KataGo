@@ -29,6 +29,13 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
 - per-layer 剖析:`KATAGO_CUDA_PROFILE=1` + GTP `kata-raw-nn all`(逐层/attention
   子段耗时,graph 模式下被跳过需配 `KATAGO_CUDA_NOGRAPH=1`);输入 dump:
   `KATAGO_CUDA_DUMP_INPUT=<dir>`;逐层 dump:`KATAGO_CUDA_DEBUG_LAYER=<i>`
+- nnbench(固定物理 batch 吞吐,对齐 C++ benchmarknn):`./target/release/katago-rs.exe
+  nnbench --model D:/code/b11fix.onnx --override-config nnBackend=cudabackend
+  --mode eval --batch 1,2,4,8,12,16,24,32 --iterations 400`(`--mode direct`=
+  CudaModel::apply 直连含拷贝,`--mode kernel`=纯前向;eval 的 --workers 默认
+  2×当前 batch——serve target 是发射阈值非上限,worker 过多会把 avgBatch 抬高);
+  cuBLASLt 候选池探针:`cargo test -p kata_nn --test probe_cublaslt_algos
+  --features cuda --release -- --nocapture`
 
 ## 后端选择
 
@@ -47,10 +54,15 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   executor),由 build.rs 按 `configs/sm-targets.json`(sm_120 优先)用 nvcc
   编译成 PTX 嵌入
 - `cpp-shim/`:TensorRT C++ FFI shim
-- `configs/`:sm-targets.json、gtp_smoke.cfg
+- `configs/`:sm-targets.json、gtp_smoke.cfg、gtp_cuda.cfg、gtp_trt.cfg、
+  gtp_benchmark.cfg
 - `scripts/`:冒烟/对拍/对局脚本(compare_nn_output.py、play_match.py、autotune.py)
-- `docs/`:需求汇总.md(含进度 §9)、cuda-optimization-plan.md(M4 路线图与
-  SM120 时效资料)、fork-sm120-kernel-notes.md(KataGomo_fork 认证 plan 提炼)
+- `docs/`:需求汇总.md(含进度 §9)、cuda-fork-parity-plan.md(**对齐/超越
+  fork 主规划,跨对话对齐入口,CUDA 性能动工前必读其 §1/§2/§8**)、
+  cuda-optimization-plan.md(M4 路线图与 SM120 时效资料)、
+  fork-sm120-kernel-notes.md(KataGomo_fork 认证 plan 提炼)、
+  使用与GUI接入.md(GTP GUI 接入与配置用法)
+- `plans/`:autotune 产物(best-tactic-plan.json、autotune-history.json)
 
 ## 约定
 

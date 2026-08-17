@@ -375,3 +375,81 @@ imma m16n8k32 变体,epilogue 内反量化直出 f16):
 - **实现参考**：CUTLASS 4.x 已支持 sm_120（消费级 Blackwell）的 tcgen05 GEMM 模板；[tcgen05 for dummies（gau-nernst, 2025-12-21）](https://gau-nernst.github.io/tcgen05/) 有 sm_100 的逐指令级讲解（tmem 分配、tcgen05.mma 描述符、ld/st、commit/mbarrier），消费级差异主要在 cluster/cta_group 与 tmem 尺寸。
 - **本项目定位**：基线手写 PTX（hgemm m16n8k16 / 共享内存归约 attention）为**正确性优先**；M4 的 tcgen05 路径按 fork 认证 plan（FA4 tile M128×N64 s1 both16）实施，编译开关经 `configs/sm-targets.json` 的 `arch` 字段（如 `sm_120f`）选择，失败回退基线。
 
+
+## M0 Phase 0 测量(2026-08-17,nnbench 直测;fork parity plan §5 决策表落数)
+
+工具:`katago-rs nnbench`(本次入库,crates/katago/src/cmd/nnbench.rs)。
+三模式:kernel=纯前向无拷贝无 graph;direct=+H2D/D2H 每轮同步;eval=生产栈全链路。
+**nnbench 已修**:eval 的 workers 默认值改为 2×当前 batch(原为 2×最大 batch)——
+serve_pipelined 的 target 是发射**阈值**非上限,发射取走整个 filling;W/3>target
+时在途满 2 期间 filling 积过 target,avgBatch 被抬到 ~W/3(实测 W=64 时 b=1..16
+全部 avgBatch≈21.3)。W=2b 时阈值发射主导,avgBatch 精确落在 b(15.98@b16)。
+
+### T(B) 直测曲线(负载下 SM 2805MHz/3090MHz、util 98%、无节流)
+
+| B | kernel ms | direct ms | eval nnEval/s (W=2b) | eval 批周期 ms |
+|---|---|---|---|---|
+| 1 | 3.381 | 3.965 | 410.9 | ~2.43 |
+| 2 | 4.227 | 4.542 | 546.9 | 3.66 |
+| 4 | 5.734 | 5.977 | 745.6 | 5.37 |
+| 8 | 10.110 | 10.566 | 821.5 | 9.74 |
+| 12 | 13.798 | 14.323 | 877.4 | 13.68 |
+| 16 | 18.480 | 19.262 | 871.0 | 18.37 |
+| 24 | 28.425 | 29.158 | 842.0 | 28.50 |
+| 32 | 38.322 | 38.860 | 826.6 | 38.71 |
+
+eval 批周期 = perBatchMs/2(W=2b ⇒ 一次 evaluate 延迟约含 2 个批周期)。
+B8→B32 完全线性(每行 ~0.95ms)⇒ **B16 已计算饱和**;B1~B4 亚线性(发射/延迟
+bound,graph 在 B1 收益大:eval 2.43ms vs kernel 3.38ms)。
+
+### H1-H5 裁决
+
+| 假设 | 结论 | 数据 |
+|---|---|---|
+| H1 T(B16)≈12.5ms | **证伪(旧值作废)** | kernel 18.48ms;graph 批周期 18.37ms;单流上限 ≈871~894 行/s。旧 12.5ms 来源不明(疑搜索语境折算),以直测为准 |
+| H2 每批 ~8ms 非 kernel 开销 | **证伪(固定 B 口径)** | eval B16 = kernel 上限的 97%(非 kernel ≈0.5ms/批,graph 净省 ~0.7ms)。搜索语境 t=32 765 vs nnbench 871 的 12% 差来自凑批/CPU 编码竞争,非固定 B 口径开销 |
+| H3 cuBLASLt 走 tcgen05 | **证伪(未走)** | CUBLASLT_LOG_LEVEL=5:全部 cublasLtMatmul 为 algoId=21 + MATMUL_TILE_*/STAGES_* 遗留枚举(s16816 mma.sync 类);3 形状×8 候选全池无 nvjet/tcgen05/innerShape 痕迹(probe_cublaslt_algos 实测计时) |
+| H4 attention ~14% | **上修** | B16 逐层:FA2 core 1.9~3.3ms(13~22%);attention 全段(qkv+core+outproj)6.99/15.0ms ≈ 47%(含 GEMM) |
+| H5 初始卷积 >5% | **否决** | InitialConv 0.238ms = 1.6% → 方案 D 搁置 |
+
+### B16 逐层构成(profile 事件和 15.0ms,wall 18.5ms;差值=发射间隙)
+
+| 段 | ms | 占比 |
+|---|---|---|
+| Ffn(FFN GEMM)×33 | 9.25 | 61.6% |
+| attention 子段:qkv 2.44 + core 3.26 + outproj 1.28(×33) | 6.99 | ~47% 与层表有口径差 |
+| Linear(bottleneck 投影)×22 | 1.46 | 9.7% |
+| RmsNorm×66 | 0.98 | 6.5% |
+| GateSilu×21 | 0.76 | 5.1% |
+| InitialConv / heads / TrunkFinal / im2col | 0.62 | 4.1% |
+
+模型结构注:b11fix = 11 块 × 3 attention 子层(共 33),bottleneck 384↔trunk 768。
+
+### cuBLASLt 微基准(M=5776=B16,每候选 50 迭代计时)
+
+| 形状 | 最优 | 启发式首选(#0) | 备注 |
+|---|---|---|---|
+| ffn_up 384→2304 f16 | 0.1303ms(#1) | 0.1312 | 78.5 TF,mma.sync 屋顶附近 |
+| qkv 384→1152 f16 | **0.0619(#1)** | 0.0836 | **首选非最优,-26%**;33 层 ≈ 0.73ms ≈ 前向 4% |
+| ffn_down 2304→384 f32 | 0.1112(#2) | 0.1150 | -3%;91.9 TF |
+
+### 双流(fork 拓扑组件)在当前 kernel 栈下证伪
+
+serve=2(numNNServerThreadsPerModel=2)× 固定 B16 × W64:**852.8 nnEval/s
+(avgBatch 14.85)vs 单流 871**——无收益。且 WDDM 下双线程 graph capture 互斥
+(CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED,与 test_cuda.rs 注释的既有约束一致),
+自动回退 nograph;即便补齐 graph 也仅追平单流。物理原因:B16 GEMM 已吃满
+mma.sync 数据通路(util 98%),SM 无余量给第二流;fork 的双流收益前提
+(kernel 未饱和)在我们栈上不成立。§9 开放问题 4 同时得证(capture 互斥)。
+
+### Phase 0 后方案优先级(推翻 fork parity plan §3「调度/拓扑最大杠杆」旧判断)
+
+| 序 | 方案 | 预期 | 依据 |
+|---|---|---|---|
+| 1 | C1:cuBLASLt top-N 计时重排(tactic) | +3~5% | qkv #1 -26% 实测;每形状 load 时计时要选 |
+| 2 | C2:tcgen05 GEMM 通路(CUTLASS 4.x sm120f;可先试经典 cublas 是否放出 nvjet) | +20~40% 上限 | H3:主 GEMM 全在 mma.sync;GEMM 占 75~85% |
+| 3 | B3:FA4 attention tile | +5~10% | attn core 13~22%,自成 kernel 无 cuBLASLt 门槛 |
+| 4 | B2:dual-FFN 融合 | +2~4% | FFN 62%;门槛:主循环 ≥0.130ms(ffn_up 78.5TF) |
+| 5 | A-lite:搜索语境凑批(765→871 的 12%) | 搜索口径 +12% | 仅搜索语境;nnbench 固定 B 口径已无空间 |
+| 6 | A 完整 fork 拓扑(双流/padding) | ~0 | 双流 -2% 实测;饱和证据;graph 互斥 |
+| — | D cuDNN 初始卷积 | 搁置 | H5:1.6% |
