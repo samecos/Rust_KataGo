@@ -484,3 +484,44 @@ FP16 形状拿不到 nvjet/tcgen05 的免费午餐**。tcgen05 只剩 CUTLASS 4.
   会卡死(多 runtime/多流并发计时,疑 WDDM 驱动级互斥自旋);串行
   `--test-threads=1` 时开不开 RANK 都 2.7s 通过。生产 serve=1 单消费者
   不受影响(ABBA/对拍均在此口径验证)。跑该测试二进制一律串行。
+
+## M2(2026-08-17):B3 证伪回退;B2 dual-FFN 落地(+29.8% @B16)
+
+### B3 证伪(FA4 tile 移植,两变体均负,已回退)
+
+- 分析:FA4 的 M128×N64/128 线程瓦片在 mma.sync 路径不成立——累加器无
+  tmem,128 线程下寄存器挨饿;FA4 的速度来源是 tcgen05,瓦片形状本身无营养。
+  改做 mma.sync 原生两个微优化:P 直供寄存器(C→A 片段恒等,去 s_p smem
+  往返)+ Q 片段外提(attention_fa4.cu,与 FA2 逐位同值)。
+- 实测(B16 attn core 逐层均值,FA2=0.1061ms):P-reg 单改 0.1184(-12%);
+  P-reg+Q-hoist 0.1095(-3%)——**smem 往返实际是免费的,寄存器打包链反成
+  关键路径**。ptxas:FA2 127 regs/40KB smem,FA4 112 regs/24KB,均无 spill。
+- 结论:现行 FA2 kernel 已是 mma.sync 局部最优;B3 关闭,代码全回退。
+
+### B2 门槛与落地(CUTLASS DualGemm + SwiGLU epilogue)
+
+- **门槛微基准**(target/bench_cutlass_ffn.cu,M=5776 N=2304 K=384 f16,
+  CUTLASS 3.9.2 Sm80 tensorop):fork dual_ffn 瓦片 128x64x32s3 = **0.1116ms
+  (91.6 TF)**,fork linear2 128x128x32s3 = 0.1117 —— 优于 cuBLASLt
+  heuristic 0.1303 与 C1 计时 0.117,门槛通过。
+- **集成**:cuda-host/dual_ffn_cutlass.cu(新,nvcc -c → cc 归档静态链接,
+  非 PTX 嵌入路径;build.rs 经 KATAGO_CUTLASS_ROOT / third_party/cutlass /
+  D:/code/cutlass 查找,缺 CUTLASS 自动跳过无 cfg,tactic 静默回退)。
+  DualGemm 每 tokens 缓存 State;gate/up = packed dual 权重前后 1152 行
+  零拷贝切片。**坑:fork 的 B 布局是 [K,N] RowMajor,本仓库权重是
+  out-first [N,K] —— 对应 CUTLASS B ColumnMajor ld=K(照抄 fork ld 即
+  对拍 FAIL 的根因)。**
+- 数值:自写 ExactRoundSiLUMul epilogue —— 两份 FP32 acc 先 __float2half_rn
+  (复刻 f16 GEMM 输出的存储舍入边界),精确 expf SiLU,乘积 rn 写出;
+  与 hgemm_f16+swiglu_dual 两 kernel 路径逐位一致。
+- **对拍 PASS**(DUALFFN=1,16/16 top-1,全 gate OK)。
+- **ABBA**(nnbench eval B16 W32 i200,双侧均 C1):A 848.3/846.2,B
+  1106.3/1093.5 → **+29.8%**。收益分解(kernel 模式 20.05→15.08ms):
+  GEMM 主循环差仅 ~0.005ms/层,主体是省掉 act2304(26.6MB@B16)的写+
+  读回 + swiglu kernel ≈ 53MB/层 DRAM 往返 × 33 层,叠加 L2 污染消除。
+- B8 对照:plan-only(C1+DUALFFN)1006.4 vs C1-only 850.5(+18%,无回归)。
+- 已入 plan JSON:KATAGO_CUDA_DUALFFN=1(plan 驱动免环境变量,验证
+  plan-only B16=1112.4)。
+- 新 tactic 键:KATAGO_CUDA_DUALFFN(0|1,白名单+值域已入 tactic_plan.rs)。
+- capture 安全:capture 前预热条件泛化为 RANK=time 或 DUALFFN=1 均触发
+  (DualGemm 首调用 initialize 在 capture 外完成)。

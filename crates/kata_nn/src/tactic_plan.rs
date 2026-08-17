@@ -25,6 +25,7 @@ pub const ALLOWED_TACTIC_KEYS: &[&str] = &[
     "KATAGO_CUDA_ATTN",
     "KATAGO_CUDA_CUBLASLT",
     "KATAGO_CUDA_CUBLASLT_RANK",
+    "KATAGO_CUDA_DUALFFN",
     "KATAGO_CUDA_FUSION",
     "KATAGO_CUDA_NOGRAPH",
     "KATAGO_CUDA_NOPIPELINE",
@@ -101,6 +102,7 @@ fn validate_value(key: &str, value: &str) -> Result<(), String> {
     let ok = match key {
         // 0/1 开关
         "KATAGO_CUDA_CUBLASLT"
+        | "KATAGO_CUDA_DUALFFN"
         | "KATAGO_CUDA_NOGRAPH"
         | "KATAGO_CUDA_NOPIPELINE"
         | "KATAGO_CUDA_PADBATCH"

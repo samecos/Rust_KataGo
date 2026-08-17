@@ -183,6 +183,98 @@ pub struct CudaModel {
     mid: usize,
     num_heads: usize,
     head_dim: usize,
+    /// B2 dual-FFN(CUTLASS DualGemm)主机句柄;build 无 CUTLASS 时None。
+    #[cfg(katago_dualffn)]
+    dual_ffn: Option<DualFfnState>,
+}
+
+/// B2:CUTLASS DualGemm 的 FFI 句柄(内部状态非线程安全,经 Mutex 串行)。
+#[cfg(katago_dualffn)]
+pub struct DualFfnState(std::sync::Mutex<*mut std::ffi::c_void>);
+#[cfg(katago_dualffn)]
+unsafe impl Send for DualFfnState {}
+#[cfg(katago_dualffn)]
+unsafe impl Sync for DualFfnState {}
+#[cfg(katago_dualffn)]
+impl Drop for DualFfnState {
+    fn drop(&mut self) {
+        let h = self.0.lock().unwrap();
+        if !h.is_null() {
+            unsafe { dual_ffn_ffi::katago_dual_ffn_destroy(*h) };
+        }
+    }
+}
+
+#[cfg(katago_dualffn)]
+mod dual_ffn_ffi {
+    use std::ffi::c_void;
+    unsafe extern "C" {
+        pub fn katago_dual_ffn_create() -> *mut c_void;
+        pub fn katago_dual_ffn_destroy(h: *mut c_void);
+        pub fn katago_dual_ffn_exec(
+            h: *mut c_void,
+            input: *const c_void,
+            gate: *const c_void,
+            up: *const c_void,
+            output: *mut c_void,
+            tokens: i32,
+            stream: usize,
+        ) -> i32;
+    }
+}
+
+/// B2 开关(KATAGO_CUDA_DUALFFN=1):dual FFN + SwiGLU epilogue 一步出
+/// act1152,省 act2304 往返与独立 swiglu kernel。
+pub(crate) fn dual_ffn_enabled() -> bool {
+    crate::tactic_plan::tactic_var("KATAGO_CUDA_DUALFFN").as_deref() == Ok("1")
+}
+
+/// B2 执行入口:成功返回 true(act1152 已写好);tactic 关/不可用返回
+/// false(调用方走 hgemm_f16 + swiglu_dual 现有路径);执行错误返回 Err
+/// (fail-closed,与 tactic 路径约定一致)。
+#[cfg(katago_dualffn)]
+fn dual_ffn_run(
+    state: &DualFfnState,
+    rt: &CudaRuntime,
+    input: &CudaSlice<u16>,
+    dual_w: &WeightBuf,
+    out: &mut CudaSlice<u16>,
+    m: usize,
+) -> Result<bool, String> {
+    use cudarc::driver::{DevicePtr, DevicePtrMut};
+    if !dual_ffn_enabled() {
+        return Ok(false);
+    }
+    if dual_w.n != 2304 || dual_w.k != 384 || dual_w.kp != 384 {
+        return Err(format!(
+            "dual_ffn 权重形状不支持:n={} k={} kp={}(要求 2304/384/384)",
+            dual_w.n, dual_w.k, dual_w.kp
+        ));
+    }
+    let stream = active_stream(rt);
+    let (in_ptr, _g1) = input.device_ptr(&stream);
+    let (w_ptr, _g2) = dual_w.data.device_ptr(&stream);
+    let (out_ptr, _g3) = out.device_ptr_mut(&stream);
+    // packed [2304, 384] 行主序:前 1152 行 gate,后 1152 行 up(零拷贝切片)。
+    let gate_ptr = w_ptr;
+    let up_ptr = w_ptr + (1152 * 384 * 2) as u64;
+    let h = state.0.lock().unwrap();
+    let r = unsafe {
+        dual_ffn_ffi::katago_dual_ffn_exec(
+            *h,
+            in_ptr as *const std::ffi::c_void,
+            gate_ptr as *const std::ffi::c_void,
+            up_ptr as *const std::ffi::c_void,
+            out_ptr as *mut std::ffi::c_void,
+            m as i32,
+            stream.cu_stream() as usize,
+        )
+    };
+    if r == 0 {
+        Ok(true)
+    } else {
+        Err(format!("dual_ffn exec failed: {r}"))
+    }
 }
 
 impl CudaModel {
@@ -201,6 +293,15 @@ impl CudaModel {
             mid: graph.mid_channels,
             num_heads: graph.num_heads,
             head_dim: graph.head_dim,
+            #[cfg(katago_dualffn)]
+            dual_ffn: {
+                let h = unsafe { dual_ffn_ffi::katago_dual_ffn_create() };
+                if h.is_null() {
+                    None
+                } else {
+                    Some(DualFfnState(std::sync::Mutex::new(h)))
+                }
+            },
         })
     }
 
@@ -459,9 +560,22 @@ impl CudaModel {
                 LayerBuf::Ffn { dual, down, hidden } => {
                     let hidden = *hidden;
                     assert_eq!(hidden, 3 * mid, "FFN 隐层维度不符");
-                    // dual FFN：gate|up 单 GEMM（N=2304，f16 直出）→ dual SwiGLU
-                    hgemm_f16(rt, normed, dual, act2304, m)?;
-                    swiglu_dual(rt, act2304, act1152, m, hidden)?;
+                    // B2(KATAGO_CUDA_DUALFFN=1):CUTLASS DualGemm + SwiGLU
+                    // epilogue 一步出 act1152,省 act2304 往返 + swiglu kernel。
+                    // 数值与两 kernel 路径逐位一致(中间 half 舍入在 epilogue
+                    // 内复刻)。不可用/未启用时走现有路径。
+                    #[cfg(katago_dualffn)]
+                    let dual_done = match &self.dual_ffn {
+                        Some(st) => dual_ffn_run(st, rt, normed, dual, act1152, m)?,
+                        None => false,
+                    };
+                    #[cfg(not(katago_dualffn))]
+                    let dual_done = false;
+                    if !dual_done {
+                        // dual FFN:gate|up 单 GEMM(N=2304,f16 直出)→ dual SwiGLU
+                        hgemm_f16(rt, normed, dual, act2304, m)?;
+                        swiglu_dual(rt, act2304, act1152, m, hidden)?;
+                    }
                     // 前瞻：后一层是 GateSilu(384) 时融合（down 残差 GEMM
                     // epilogue 直接算 silu(affine)，省独立 gate kernel）。
                     if fuse_down

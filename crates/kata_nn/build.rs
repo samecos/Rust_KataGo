@@ -15,6 +15,7 @@ use std::process::Command;
 fn main() {
     // Register the custom cfg so that Rust doesn't warn about it.
     println!("cargo::rustc-check-cfg=cfg(trt_shim_available)");
+    println!("cargo::rustc-check-cfg=cfg(katago_dualffn)");
 
     // Compile the ONNX protobuf into Rust types. This is always done so that
     // the onnx_builder module has types to work with regardless of whether
@@ -29,8 +30,133 @@ fn main() {
     let is_cuda = env::var("CARGO_FEATURE_CUDA").is_ok();
     if is_cuda {
         compile_cuda_kernels();
+        compile_dual_ffn();
     }
 }
+
+/// B2:CUTLASS DualGemm(dual FFN + SwiGLU epilogue)的主机侧编译。
+/// 与 PTX 嵌入的 kernel 不同:CUTLASS device API 是主机模板代码,必须
+/// nvcc -c 编成对象文件再打进静态库链接。CUTLASS 根查找顺序:
+/// 环境变量 KATAGO_CUTLASS_ROOT → 仓库 third_party/cutlass → D:/code/cutlass。
+/// 找不到或编译失败:跳过(Rust 侧无 katago_dualffn cfg,tactic 回退现有路径)。
+fn compile_dual_ffn() {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let src = manifest_dir.join("cuda-host").join("dual_ffn_cutlass.cu");
+    if !src.exists() {
+        return;
+    }
+    let cutlass_root = env::var("KATAGO_CUTLASS_ROOT")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| {
+            let p = manifest_dir.join("../../third_party/cutlass");
+            p.exists().then_some(p)
+        })
+        .or_else(|| {
+            let p = PathBuf::from("D:/code/cutlass");
+            p.exists().then_some(p)
+        });
+    let Some(cutlass_root) = cutlass_root else {
+        println!("cargo:warning=CUTLASS not found (set KATAGO_CUTLASS_ROOT) — dual_ffn skipped");
+        return;
+    };
+    if !cutlass_root.join("include/cutlass/cutlass.h").exists()
+        || !cutlass_root.join("examples/45_dual_gemm/device/dual_gemm.h").exists()
+    {
+        println!(
+            "cargo:warning=CUTLASS root {} lacks headers — dual_ffn skipped",
+            cutlass_root.display()
+        );
+        return;
+    }
+    let Some(nvcc) = find_nvcc() else {
+        println!("cargo:warning=nvcc not found — dual_ffn skipped");
+        return;
+    };
+    let Some((cuda_root, is_windows)) = find_cuda_root() else {
+        println!("cargo:warning=CUDA root not found — dual_ffn skipped");
+        return;
+    };
+
+    // gencode 取自 configs/sm-targets.json(与 PTX 路径同表)。
+    let targets_json = manifest_dir.join("../../configs/sm-targets.json");
+    #[derive(serde::Deserialize)]
+    struct SmTarget {
+        compute_capability: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct SmTargets {
+        targets: Vec<SmTarget>,
+    }
+    let caps: Vec<String> = std::fs::read_to_string(&targets_json)
+        .ok()
+        .and_then(|t| serde_json::from_str::<SmTargets>(&t).ok())
+        .map(|t| t.targets.into_iter().map(|x| x.compute_capability).collect())
+        .unwrap_or_else(|| vec!["12.0".to_string()]);
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let obj = out_dir.join(if is_windows {
+        "dual_ffn_cutlass.obj"
+    } else {
+        "dual_ffn_cutlass.o"
+    });
+    let mut cmd = Command::new(&nvcc);
+    #[cfg(windows)]
+    {
+        if let Some(ccbin) = msvc_host_dir() {
+            cmd.arg("-ccbin").arg(ccbin);
+        }
+    }
+    cmd.arg("-c")
+        .arg(&src)
+        .arg("-o")
+        .arg(&obj)
+        .arg("-O3")
+        .arg("--std=c++17")
+        .arg("--expt-relaxed-constexpr")
+        .arg("-I")
+        .arg(cutlass_root.join("include"))
+        .arg("-I")
+        .arg(cutlass_root.join("examples/45_dual_gemm"));
+    for cap in &caps {
+        let digits: String = cap.chars().filter(|c| c.is_ascii_digit()).collect();
+        cmd.arg("-gencode")
+            .arg(format!("arch=compute_{digits},code=sm_{digits}"));
+    }
+    if is_windows {
+        cmd.arg("-Xcompiler")
+            .arg("/Zc:preprocessor /Zc:__cplusplus /EHsc /bigobj /std:c++17");
+    }
+    println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-env-changed=KATAGO_CUTLASS_ROOT");
+    match cmd.status() {
+        Ok(s) if s.success() => {}
+        other => {
+            println!("cargo:warning=nvcc -c failed for dual_ffn_cutlass: {other:?} — skipped");
+            return;
+        }
+    }
+
+    // 对象文件打进静态库(cc 负责 ar/lib.exe 与链接指令)。
+    let mut build = cc::Build::new();
+    build.object(&obj);
+    build.compile("katago_dual_ffn");
+
+    // cudart 静态链接(CUTLASS device API 的主机调用依赖)。
+    let lib_dir = if is_windows {
+        cuda_root.join("lib").join("x64")
+    } else {
+        cuda_root.join("lib64")
+    };
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    if is_windows {
+        println!("cargo:rustc-link-lib=static=cudart_static");
+    } else {
+        println!("cargo:rustc-link-lib=static=cudart");
+    }
+    println!("cargo:rustc-cfg=katago_dualffn");
+}
+
 
 /// Compile the TensorRT C++ shim and link CUDA/TensorRT.
 fn build_trt_shim() {

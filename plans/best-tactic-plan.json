@@ -13,7 +13,8 @@
   },
   "apply": {
     "tactic_overrides": {
-      "KATAGO_CUDA_CUBLASLT_RANK": "time"
+      "KATAGO_CUDA_CUBLASLT_RANK": "time",
+      "KATAGO_CUDA_DUALFFN": "1"
     }
   },
   "selection": {

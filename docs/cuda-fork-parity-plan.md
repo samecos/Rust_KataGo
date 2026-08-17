@@ -48,7 +48,7 @@
 | search benchmark t=1 | 296→**433** visits/s(cuBLASLt→pipeline) | cuda-optimization-plan.md |
 | search benchmark t=8 / t=16 | **1034 / 1274** visits/s | 同上 |
 | cap16 nnEvals/s(t=32,avgBatch≈15.9) | **~765** | B16 高并发复测 |
-| **nnbench eval B16(固定批,W=32)** | **871 → 915.4 nnEval/s**(C1 重排后,批周期 17.5ms) | M1 ABBA(2026-08-17) |
+| **nnbench eval B16(固定批,W=32)** | 871 → 915.4(C1)→ **1112.4 nnEval/s**(C1+B2,plan-only) | M1/M2 ABBA(2026-08-17) |
 | **nnbench kernel B16(纯前向)** | **18.48ms**(graph 批周期 18.37;H2D/D2H +0.8ms) | 同上 |
 | B16 单流上限(直测) | **871~894 行/s** | 同上(旧推算 12.5ms/1280 作废) |
 | fork 每流(推算) | 2836/2 ≈ **1418 行/s/流** | fork plan |
@@ -193,7 +193,7 @@ dispatch(攒满 target 才发射、GPU 空闲也发射,fork `maybeLaunchFillingB
 |---|---|---|---|
 | M0 | Phase 0 测量 + 决策表落档 | ✅ H1-H5 全部裁决(2026-08-17),数据入 cuda-optimization-plan.md | nnbench ✅ 已提交 |
 | M1 | C1 cuBLASLt top-N 计时重排 + C0 经典 cublas nvjet 试探 | ✅ C1 +2.55%(ABBA)+对拍 PASS,入 plan JSON;C0 证伪(2026-08-17) | M0 |
-| M2 | B3 FA4 attention tile | 逐项 ABBA + 对拍;入 plan JSON | M0 |
+| M2 | B3 FA4(❌ 证伪:两变体均负,FA2 已是 mma.sync 局部最优)+ B2 dual-FFN(✅ +29.8% @B16,对拍 PASS,入 plan) | 完成(2026-08-17) | M0 |
 | M3 | C2 tcgen05 主 GEMM 通路(CUTLASS 4.x sm120f);B2 dual-FFN(门槛:主循环 ≥ cuBLASLt ffn_up 0.130ms) | ABBA + 对拍 | M1 |
 | M4 | 冲击 per-SM 对齐线 2360;评估 E1/E2 与 A-lite(搜索语境) | nnbench eval B16 对照 fork 认证口径 | M1-M3 |
 
@@ -210,7 +210,7 @@ dispatch(攒满 target 才发射、GPU 空闲也发射,fork `maybeLaunchFillingB
 | H1-H5 假设 | ✅ 全部裁决 | §5 决策表;H1/H2/H3 证伪,H4 上修,H5 否决 |
 | M1(C0+C1) | ✅ 完成(2026-08-17) | C0 证伪(经典 cublas 同走 mma.sync);C1 top-N 计时重排落地:ABBA +2.55%(B16 892.6→915.4),对拍 PASS,已入 plan JSON |
 | 方案 A 拓扑组合 | ❌ 证伪/降级 A-lite | 双流×固定B16×W64=852.8 vs 单流 871(-2%);WDDM graph capture 互斥 |
-| 方案 B1-B4 | ⬜ 未开始 | B3 优先(H4 上修至 13~22%);B2 门槛 ffn_up 0.130ms |
+| 方案 B1-B4 | B2 ✅ 落地(+29.8%,plan 已启用);B3 ❌ 证伪(smem P 往返免费,寄存器打包成关键路径);B1/B4 待评估 | B2 门槛实测 0.1116ms > cuBLASLt;B3 数据见优化文档 M2 节 |
 | 方案 C tcgen05 | 🔶 C0 证伪/C1 已落地;C2(CUTLASS sm120f)待动工 | H3 证伪 cuBLASLt 走 tcgen05;探针 tests/probe_cublaslt_algos.rs 已入库 |
 | 方案 D cuDNN | ❌ 搁置 | H5:InitialConv 1.6% < 5% |
 | 方案 E 储备 | ⬜ 未开始 | E1 重模拟成本最低 |

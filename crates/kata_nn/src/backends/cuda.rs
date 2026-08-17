@@ -1324,10 +1324,17 @@ mod backend_impl {
                     let graph = if force_direct {
                         None
                     } else {
-                        // C1(KATAGO_CUDA_CUBLASLT_RANK=time):capture 前先直连
-                        // 跑一次——计时重排在非 capture 语境完成该 M 的算法选择
-                        // 并写入缓存,随后的 capture 才能把优胜 kernel 烙进 graph。
-                        if slot_idx == 0 && super::imp::cublaslt_rank_time() {
+                        // capture 前先直连跑一次的触发条件:
+                        // - C1(KATAGO_CUDA_CUBLASLT_RANK=time):计时重排在非
+                        //   capture 语境完成算法选择并写缓存,capture 把优胜
+                        //   kernel 烙进 graph;
+                        // - B2(KATAGO_CUDA_DUALFFN=1):DualGemm 首调用的
+                        //   initialize(cudaFuncSetAttribute 等)在 capture 外
+                        //   完成,capture 内只剩纯 kernel 发射路径。
+                        if slot_idx == 0
+                            && (super::imp::cublaslt_rank_time()
+                                || crate::backends::cuda_exec::dual_ffn_enabled())
+                        {
                             h.model
                                 .apply(&h.rt, stream, &mut ws, &in_spatial, &in_global)
                                 .map_err(|e| NeuralNetError(format!("pre-capture warm: {e}")))?;
