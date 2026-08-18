@@ -93,7 +93,7 @@ using ProjectionOutput = cutlass::epilogue::thread::LinearCombination<
 using SwiGLU = ExactRoundSiLUMul<Element, 8, Element, float>;
 using DualGemm = cutlass::gemm::device::DualGemm<
   Element, Layout, Element, LayoutB,
-  Layout, Element, Layout, Element,
+  LayoutB, Element, Layout, Element,
   cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
   cutlass::gemm::GemmShape<128, 64, 32>,
   cutlass::gemm::GemmShape<64, 32, 32>,
@@ -118,7 +118,8 @@ DualGemm::Arguments makeArguments(
     {reinterpret_cast<const Element*>(upWeights), LayoutB(kChannels)},
     nullC, nullD,
     {reinterpret_cast<Element*>(output), Layout(kFfn)},
-    {1.0f, 0.0f}, {1.0f, 0.0f}, {}, 1
+    // ScaleType::Nothing 的 Params 仅含 alpha(单参构造),beta 不参与。
+    {1.0f}, {1.0f}, {}, 1
   };
 }
 

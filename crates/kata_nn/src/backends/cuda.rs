@@ -1344,10 +1344,16 @@ mod backend_impl {
                         }
                         h.rt.device.synchronize().map_err(|e| NeuralNetError(format!("pre-capture sync: {e}")))?;
                         set_capturing(true);
-                        let cap_result = (|| -> Result<cudarc::driver::CudaGraph, NeuralNetError> {
-                            stream.begin_capture(
-                                cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
-                            ).map_err(|e| NeuralNetError(format!("begin_capture: {e}")))?;
+                let cap_result = (|| -> Result<cudarc::driver::CudaGraph, NeuralNetError> {
+                    stream.begin_capture(
+                        // RELAXED(2026-08-18):GLOBAL 模式下其他流任何并发活动都
+                        // 使 capture 失效——serve=2 双流时双方 capture 互相打挂
+                        // (Linux 亦然)。RELAXED 允许他流并发;本后端每 handle
+                        // 单流、apply 内无跨流依赖,捕获内容不变,安全。
+                        // 若 RELAXED 仍失效(驱动差异)则自动回退 nograph(下方
+                        // match 分支),行为与旧版一致。
+                        cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED,
+                    ).map_err(|e| NeuralNetError(format!("begin_capture: {e}")))?;
                             h.model
                                 .apply(&h.rt, stream, &mut ws, &in_spatial, &in_global)
                                 .map_err(|e| NeuralNetError(format!("CUDA forward (capture) failed: {e}")))?;

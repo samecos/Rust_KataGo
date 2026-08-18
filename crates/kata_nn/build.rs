@@ -129,11 +129,25 @@ fn compile_dual_ffn() {
     }
     println!("cargo:rerun-if-changed={}", src.display());
     println!("cargo:rerun-if-env-changed=KATAGO_CUTLASS_ROOT");
+    println!("cargo:rerun-if-env-changed=KATAGO_ALLOW_BROKEN_CUDA_HOST");
     match cmd.status() {
         Ok(s) if s.success() => {}
         other => {
-            println!("cargo:warning=nvcc -c failed for dual_ffn_cutlass: {other:?} — skipped");
-            return;
+            // CUTLASS 在位但源码编译失败 = 提交了坏代码,必须 fail-loud。
+            // (2026-08-17 事故:M2 提交了编译不过的 dual_ffn_cutlass.cu,
+            //  此处静默跳过导致 katago_dualffn cfg 缺失、DUALFFN tactic
+            //  空转,所有后续构建性能回退且无告警。)
+            // 显式逃生门:KATAGO_ALLOW_BROKEN_CUDA_HOST=1(无 CUTLASS 环境
+            // 下的降级开发场景仍可构建——那种场景在上面 root 检查已跳过)。
+            if env::var("KATAGO_ALLOW_BROKEN_CUDA_HOST").as_deref() == Ok("1") {
+                println!("cargo:warning=nvcc -c failed for dual_ffn_cutlass: {other:?} — skipped (KATAGO_ALLOW_BROKEN_CUDA_HOST=1)");
+                return;
+            }
+            panic!(
+                "nvcc -c failed for dual_ffn_cutlass (CUTLASS root {}): {other:?} — \
+                 修复 cuda-host 源码,或设 KATAGO_ALLOW_BROKEN_CUDA_HOST=1 显式降级",
+                cutlass_root.display()
+            );
         }
     }
 
@@ -143,16 +157,19 @@ fn compile_dual_ffn() {
     build.compile("katago_dual_ffn");
 
     // cudart 静态链接(CUTLASS device API 的主机调用依赖)。
+    // 两平台静态库同名:Windows cudart_static.lib / Linux libcudart_static.a
+    // (Linux 若写 "cudart" 会找不存在的 libcudart.a,链接失败)。
     let lib_dir = if is_windows {
         cuda_root.join("lib").join("x64")
     } else {
         cuda_root.join("lib64")
     };
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    if is_windows {
-        println!("cargo:rustc-link-lib=static=cudart_static");
-    } else {
-        println!("cargo:rustc-link-lib=static=cudart");
+    println!("cargo:rustc-link-lib=static=cudart_static");
+    // dual_ffn 的宿主对象是 C++(static-local guard/new),Linux 链接需要
+    // libstdc++(Windows 侧 MSVC 运行时由 cudart_static 附带,无需显式)。
+    if !is_windows {
+        println!("cargo:rustc-link-lib=dylib=stdc++");
     }
     println!("cargo:rustc-cfg=katago_dualffn");
 }

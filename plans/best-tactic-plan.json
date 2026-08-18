@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "cuda-tactic-plan",
-  "plan_id": "sm120-nvidia-geforce-rtx-5070--autotune-20260816-075041",
+  "plan_id": "sm120-nvidia-geforce-rtx-5070--autotune-20260816-075041-r1",
   "generated_utc": "2026-08-15T23:50:41.946912+00:00",
   "target": {
     "architecture": "sm_120",
@@ -13,7 +13,6 @@
   },
   "apply": {
     "tactic_overrides": {
-      "KATAGO_CUDA_CUBLASLT_RANK": "time",
       "KATAGO_CUDA_DUALFFN": "1"
     }
   },

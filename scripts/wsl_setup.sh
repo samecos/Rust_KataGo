@@ -22,7 +22,14 @@ if ! command -v nvcc >/dev/null 2>&1; then
   # 只装 nvcc + 运行时库(不装驱动/完整 toolkit 省时)
   apt-get install -y -qq cuda-nvcc-13-2 cuda-cudart-13-2 || apt-get install -y -qq cuda-nvcc cuda-cudart
 fi
+nvcc --version | tail -2 || true
+# nvcc 装在 /usr/local/cuda/bin(不在默认 PATH);写入 profile 供登录 shell 使用。
+if ! grep -q 'usr/local/cuda/bin' /root/.profile 2>/dev/null; then
+  echo 'export PATH=/usr/local/cuda/bin:$PATH' >> /root/.profile
+fi
+export PATH="/usr/local/cuda/bin:$PATH"
 nvcc --version | tail -2
 
 echo "=== all done ==="
-which cargo nvcc
+which cargo
+command -v nvcc
