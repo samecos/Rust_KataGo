@@ -78,9 +78,14 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   TensorRT 兜底,plan JSON fail-closed
 - tactic 开关(KATAGO_CUDA_* 环境变量)一律经 `tactic_plan::tactic_var()`
   读取(优先级 plan > env > 默认;直接 env::var 会绕过认证 plan);
-  默认值变更必须 autotune ABBA + 对拍双证据。当前 plan 已启用
-  `KATAGO_CUDA_CUBLASLT_RANK=time`(cuBLASLt top-8 计时重排,M1:+2.55%)与
-  `KATAGO_CUDA_DUALFFN=1`(CUTLASS DualGemm + SwiGLU epilogue,M2:+29.8%)
+  默认值变更必须 autotune ABBA + 对拍双证据。当前 plan(r1)仅启用
+  `KATAGO_CUDA_DUALFFN=1`(CUTLASS DualGemm + SwiGLU epilogue;M2 落地,
+  2026-08-17 修复提交断裂后实测 +26.5% eval B16 / +28.0% 搜索 t=32);
+  `KATAGO_CUDA_CUBLASLT_RANK=time` 曾于 M1 采纳(+2.55%),2026-08-17
+  复审下架(B2 接管 ffn_up 后边际归零,搜索口径净负 -4%)
+- cuda-host 源码编译失败 = 构建失败(fail-loud,CUTLASS 缺失仍静默跳过;
+  逃生门 KATAGO_ALLOW_BROKEN_CUDA_HOST=1)——M2 曾提交编译不过的
+  dual_ffn_cutlass.cu 被 build.rs 静默跳过,DUALFFN 空转数小时无人察觉
 - 依赖真实模型的测试用 `KATAGO_TEST_MODEL_DIR` 环境变量定位模型,缺失时自动跳过
 - 新后端实现需实现 `kata_nn::backend::Backend` trait 并接入 `kata_program::setup`
   的 backend 选择

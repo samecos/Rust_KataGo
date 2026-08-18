@@ -47,16 +47,21 @@
 |---|---|---|
 | search benchmark t=1 | 296→**433** visits/s(cuBLASLt→pipeline) | cuda-optimization-plan.md |
 | search benchmark t=8 / t=16 | **1034 / 1274** visits/s | 同上 |
-| cap16 nnEvals/s(t=32,avgBatch≈15.9) | **~765** | B16 高并发复测 |
-| **nnbench eval B16(固定批,W=32)** | 871 → 915.4(C1)→ **1112.4 nnEval/s**(C1+B2,plan-only) | M1/M2 ABBA(2026-08-17) |
-| **nnbench kernel B16(纯前向)** | **18.48ms**(graph 批周期 18.37;H2D/D2H +0.8ms) | 同上 |
-| B16 单流上限(直测) | **871~894 行/s** | 同上(旧推算 12.5ms/1280 作废) |
+| cap16 nnEvals/s(t=32,avgBatch≈15.9) | 历史 ~765(坏构建期)/ **919.7**(2026-08-17 修复后 r1 plan) | 优化文档「M3 追加」 |
+| **nnbench eval B16(固定批,W=32)** | 871 →(M1/M2 记录 915.4/1112.4,提交断裂作废)→ **991.5**(修复后 r1,当日环境 -10%) | 优化文档「M3 追加」 |
+| **nnbench kernel B16(纯前向)** | 18.48ms 基线;B2 后 15.08ms(记录值);kernel 模式在 WDDM 深队列下有提交路径污染,以 direct 配对为准 | 同上 |
+| B16 单流上限(直测) | 871~894 行/s(M2 前) | 同上 |
+| **WSL(fork 基线一致环境,2026-08-17)** | **eval B16 单流 1015.7 / 搜索 t=32 962.3**(plan r1);对齐线达成 43%,**per-SM 86%(真实差距 ~14%)** | 优化文档「M3 追加 2」 |
+| **双流复活(2026-08-18,WSL+Windows)** | **serve=2+NOGRAPH+W64 = 1112(+9.5%)**;搜索语境维持 serve=1 | 优化文档「M4 前哨」 |
 | fork 每流(推算) | 2836/2 ≈ **1418 行/s/流** | fork plan |
 
 > M0 全量数据与 H1-H5 裁决见 cuda-optimization-plan.md「M0 Phase 0 测量」。
 > 关键反转:B16 kernel 已计算饱和(util 98%,B8→B32 线性),生产栈在固定 B
 > 口径下已达 kernel 上限 97%;**剩余杠杆在 kernel(GEMM 代际/融合),不在
 > 调度拓扑**——双流实测 852.8 vs 单流 871(-2%),证伪。
+> **2026-08-17 再修订:C2 tcgen05 硬件证伪(ptxas 三源互证,见优化文档
+> 「M3-pre」)——SM120 无 tcgen05/TMEM,FP16 GEMM 无代际杠杆;剩余杠杆
+> 重排为 E1(FP8 精度门)/B4/A-lite/WSL(E4)。**
 
 ## 3. 差距分解(2026-08-17 M0 后修订)
 
@@ -74,6 +79,14 @@ M0 直测后的三组数字:
 **结论(修订):最大剩余杠杆是 kernel——C(tcgen05 GEMM 通路,占 75-85%
 前向时间、全在 mma.sync)> B3(FA4,attn core 13-22%)> B2(dual-FFN 融合,
 FFN 62%);方案 A 降级为 A-lite(仅搜索语境凑批)。**
+
+> **2026-08-17 再修订:C 主线(tcgen05)❌ 硬件证伪**——SM120 物理上无
+> tcgen05/TMEM(ptxas + CUTLASS 4.7 + PTX ISA 9.3 三源互证,优化文档 M3-pre)。
+> B3 亦已于 M2 证伪。kernel 剩余空间 = FP8 mma.sync(E1,精度门先行)与
+> 融合微优化(B4);~~fork per-SM 差(20~26%)重归因于时钟/L2/带宽/融合度,
+> 非指令代际~~(2026-08-17 再修订:DUALFFN 断裂修复 + WSL 复测后,
+> **真实 per-SM 差 ~14%**——旧估 20-26% 中有 ~6-12pt 是 DUALFFN 空转
+> 的损失,见优化文档「M3 追加 2」。),
 
 ## 4. 关键警示(不要重蹈的坑)
 
@@ -97,6 +110,7 @@ FFN 62%);方案 A 降级为 A-lite(仅搜索语境凑批)。**
 | H1: T(B16) kernel ≈12.5ms | ❌ 证伪:实测 18.48ms(graph 批周期 18.37),单流上限 871~894 行/s | 调度空间远小于旧估;kernel 差距比旧估大 |
 | H2: 每批 ~8ms 非 kernel 开销 | ❌ 证伪(固定 B 口径):eval = kernel 上限 97% | 方案 A 主体失去依据,降级 A-lite(搜索语境 12%) |
 | H3: cuBLASLt 已用 tcgen05 | ❌ 未走:全池 algoId=21 遗留 tile/stages(mma.sync),3 形状×8 候选无 nvjet | **方案 C 升级为主 GEMM 通路替换,收益上限大开** |
+| H6: sm_120f 可解锁 tcgen05(C2 通路存在) | ❌ **硬件证伪**(2026-08-17):ptxas 对 tcgen05.alloc/mma 在 sm_120a/f 均报 not supported(sm_100f 对照通过);CUTLASS 4.7.0 无 SM120 tcgen05(dense builder 仅 F8F6F4 mma.sync);PTX ISA 9.3 Target ISA Notes 确认 sm_120 族排除 | **方案 C 主线永久关闭**;FP16 GEMM 停留 mma.sync 屋顶;杠杆重排 E1/B4/A-lite/WSL |
 | H4: attention ~14% | ⬆ 上修:FA2 core 13~22%(全段 47% 含 GEMM) | B3(FA4)排期价值上升 |
 | H5: 初始卷积 >5% | ❌ 1.6% | 方案 D 搁置 |
 
@@ -107,17 +121,30 @@ FFN 62%);方案 A 降级为 A-lite(仅搜索语境凑批)。**
 
 ## 6. 方案清单
 
-### 方案 A:完整复刻 fork 认证拓扑(**M0 后降级**:固定 B 口径调度开销仅 ~3%,双流实测 -2% 证伪)
+### 方案 A:双流拓扑(**2026-08-18 部分复活**:饱和供数语境 +9.5%;搜索语境维持证伪)
 
-**降级后的剩余范围(A-lite)**:仅搜索语境的凑批/窗口策略(搜索 t=32 口径
-765 vs nnbench 871 的 12% 差距);双流 × 固定 B16 × padding 组合已实测无收益
-(852.8 vs 871;WDDM graph capture 互斥),**不再追求完整复刻**。
+**复活条件(§4 重审条款兑现——原证伪系 DUALFFN 断裂的慢 kernel 上所测)**:
+`numNNServerThreadsPerModel=2 + KATAGO_CUDA_NOGRAPH=1 + 供数 W≥4×batch` →
+nnbench eval B16 W64 = **1112**(WSL ±0.5%)/1104.9(Windows),vs 单流默认
+1015.7 = **+9.5%**。机制 = 填 host 间隙(单流批周期 31.4ms vs kernel
+15.5ms),非 GPU 并行(kernel 已 SM 饱和,流间扩展仅 1.095× vs fork 2.0×)。
+失败模式(全部实测):供数不足(W32=746)、PADBATCH 组合(259,永久证伪)、
+graph 组合(GLOBAL 互斥=1014/RELAXED=1027,均劣于 NOGRAPH)、搜索语境
+(t=32 858/-11%,t=48 **123/灾难**——批碎片+CPU 超订阅)。
+代码附带改动:capture 模式 GLOBAL→RELAXED(serve=1 无变化,对拍 PASS)。
+**使用边界:高并发饱和服务(分析引擎多查询)用双流+NOGRAPH;GTP 对局
+保持 serve=1 默认。**数据见 cuda-optimization-plan.md「M4 前哨」。
 
-<details><summary>原方案 A 内容(存档)</summary>
+<details><summary>原方案 A 存档(M0 降级版 + 初版)</summary>
 
-**内容**:固定物理 B16 + 尾批复制 padding + 双槽双流 + batch-aware
-dispatch(攒满 target 才发射、GPU 空闲也发射,fork `maybeLaunchFillingBatch`
-语义已在 serve_pipelined 中部分存在)。
+**降级后的剩余范围(A-lite)**:仅搜索语境的凑批/窗口策略(修复后搜索
+919.7-966 vs nnbench 991-1019,剩余 ~5-7%);~~双流 × 固定 B16 × padding
+组合已实测无收益(852.8 vs 871;WDDM graph capture 互斥),不再追求完整
+复刻~~(2026-08-18 上方复活节推翻此结论的适用前提——彼时 kernel 慢 25%)。
+
+**原方案 A 内容(初版)**:固定物理 B16 + 尾批复制 padding + 双槽双流 +
+batch-aware dispatch(攒满 target 才发射、GPU 空闲也发射,fork
+`maybeLaunchFillingBatch` 语义已在 serve_pipelined 中部分存在)。
 
 - 组件全部现成:`KATAGO_CUDA_PADBATCH=1`、serve 拓扑参数、事件流水线双槽;
   缺的是**按 fork 语义组装成组合并整体 ABBA**(组合从未测过,见 §3-3)。
@@ -142,32 +169,41 @@ dispatch(攒满 target 才发射、GPU 空闲也发射,fork `maybeLaunchFillingB
 | B1 | wide QKV packed GEMM | `wide_qkv-m128-n128-k64-s2-cute-atom4x2-packed`,M=B×361、N=1152,packed 行 `[Q384\|K384\|V384]` | 3 GEMM→1;packed 布局是 FA4 前提 |
 | B2 | dual FFN + SwiGLU epilogue | `dual_ffn-m128-n64-k32-s2-mb3-tanh-half2`(LeftSiLUAndMul) | 省 2304 宽缓冲整趟往返 + 独立 SwiGLU kernel |
 | B3 | FA2→FA4 tile | M128×N64 s1、128 线程、noncausal 无掩码 | attention ~14% 前向(H4 待证),上限 ~7%;**不做 both16**(已证:Hopper 起 FP32/FP16 累加同速,both16 只降精度) |
-| B4 | linear2/outproj beta=1 原位残差 | CUTLASS `GemmShape<128,128,32>` warp<64,64,32> 3 stages,C==D | 已部分有(hgemm_residual);CUTLASS 版作候选对照 |
+| B4 | linear2/outproj beta=1 原位残差 | CUTLASS `GemmShape<128,128,32>` warp<64,64,32> 3 stages,C==D | 已部分有(hgemm_residual);~~CUTLASS 版作候选对照~~ **❌ 门槛证伪(2026-08-17)**:微基准(scripts/b4_residual_probe)全残差形状 CUTLASS 128x128/128x64/128x256 均不赢 cuBLASLt top-8(outproj 0.0251 vs 0.0250 持平;linup +0.9% 噪声;ffn_down -2.6%;B1/B2 慢 19-72%),且现行 hgemm_residual 本就是 cuBLASLt beta=1 原位——fork 战术在我们栈上无对应收益空间,关闭 |
 
 - **前置门槛**:每个融合 kernel 的 GEMM 主循环微基准 ≥ cuBLASLt 同形状,
   否则免谈(FUSION=none 教训);逐项 ABBA + 对拍。
 - B16 下 trunk 缓冲 8.9MB、mid 4.4MB,每省一趟往返 ≈10~20µs × 12 block,
   累计预期数个百分点到 10%+。
 
-### 方案 C:tcgen05(sm_120f)——"超越"的唯一确定 kernel 杠杆(**M0 后升为最高优先级**)
+### 方案 C:tcgen05(sm_120f)——❌ **硬件证伪,永久关闭**(2026-08-17)
+
+**证伪结论(H6)**:SM120(消费级 Blackwell)物理上无 tcgen05/tensor-memory,
+"GEMM 代际差"杠杆不存在。三源互证:① ptxas(CUDA 13.2)对 tcgen05 指令在
+sm_120a/f 均报 not supported(sm_100f 对照通过);② CUTLASS 4.7.0 的 SM120
+支持全部为 TMA + f8f6f4 mma.sync,config.hpp 不为 SM120 定义任何 TCGEN05 宏;
+③ PTX ISA 9.3 tcgen05.mma Target ISA Notes 仅列 sm_100/101/103/110 族。
+完整证据链与工具链留档见 cuda-optimization-plan.md「M3-pre」节,
+探针源码在 scripts/c2_tcgen05_probe/。
+
+**衍生事实(E1 可用)**:sm_120f 解锁窄精度 mma.sync(kind::f8f6f4);CUTLASS
+4.7.0 已克隆至 D:/code/cutlass4;SM120 FP8 GEMM 模板 sm_120f device 编译通过
+(25.8s/TU);Windows/MSVC host 发射受 C2719 阻塞(SM90+ TMA 通病,路线:
+WSL / clang-cl / driver-API launcher)。FP8 精度门未过前不动工。
+
+<details><summary>原方案 C 内容(存档)</summary>
 
 - **M0 裁决(H3 证伪)**:cuBLASLt 13.3 在 sm120 对我们全部 FP16 形状只给
   algoId=21 遗留 tile/stages(mma.sync s16816 类),3 形状×8 候选池无任何
   nvjet/tcgen05 痕迹;GEMM 占前向 75~85% 且已在 mma.sync 屋顶(78~92 TF)。
   → C 按"主 GEMM 通路替换"分支动工,上限 = 代际差。
-- **C0(零工程试探,动工第一步)**:经典 cuBLAS(cublasGemmEx/hgemm)在
-  CUDA 12.8+ 的 sm120 上对部分 FP16 形状会派发 nvjet(tcgen05)kernel——
-  加一个 cublas feature 微基准即可验证,若放出 nvjet 则 C 的收益不经
-  CUTLASS 工程即可先吃一部分。
-- **C1(cuBLASLt top-N 计时重排,M0 彩蛋,独立于 C 主线)**:启发式首选并非
-  最优(qkv #1 -26%、ffn_down #2 -3%);load 时对每形状 top-8 候选计时要选,
-  预期前向 +3~5%。注册 tactic,ABBA + 对拍。
-- **C2 主线**:CUTLASS 4.x sm120 tcgen05 GEMM 模板替换主通路(编译经
-  `configs/sm-targets.json` 加 `sm_120f` target,失败回退 sm_120)。
-- 注意 SM120 时效资料(cuda-optimization-plan.md §SM120):tcgen05 需
-  **sm_120f 家族特性**编译;cta_group::2 有 255 寄存器天花板,tile 取
-  cta_group::1 128×N 安全区;参考 CUTLASS 4.x sm120 GEMM 模板与
-  gau-nernst 的 tcgen05 逐指令教程。
+- **C0(零工程试探)**:经典 cuBLAS(cublasGemmEx/hgemm)在 CUDA 12.8+ 的
+  sm120 上对部分 FP16 形状会派发 nvjet(tcgen05)kernel——M1 已实测证伪:
+  经典 cublas 同走 mma.sync,与 Lt 逐位同速。
+- **C1(cuBLASLt top-N 计时重排,M0 彩蛋)**:已落地(M1,+2.55%,入 plan JSON)。
+- ~~**C2 主线**:CUTLASS 4.x sm120 tcgen05 GEMM 模板替换主通路~~——硬件证伪。
+
+</details>
 
 ### 方案 D:初始 3×3 卷积 cuDNN frontend(fork eng45-tile0-stages2)
 
@@ -176,26 +212,30 @@ dispatch(攒满 target 才发射、GPU 空闲也发射,fork `maybeLaunchFillingB
 
 ### 方案 E:超越 fork 的储备项(大工程,暂不动工,按序评估)
 
-1. **FP8 官方 PTQ scope 重模拟**:KataGo 官方 2026-08(commit ff27077)只
-   量化 attention/SwiGLU 权重投影、heads 保持 FP32——比我们已模拟的 fp8w
-   scope 更窄,用 `scripts/sim_quant.py` 按官方精确 scope 重跑;微基准已有
-   M=5776 fp8 down-proj -58%、qkv -38%。精度过门才谈 kernel 工程。
+1. **FP8 官方 PTQ scope 重模拟**:✅ 完成(2026-08-17,M3)——**精度门不过,
+   FP8 kernel 工程封存**。官方精确语义(per-out-ch 权重+静态 per-tensor
+   激活,scope 含 linear2)在 b11fix 硬失败(KL 4.3e-2、value 2.5);FFN-only
+   scope 最佳(KL 2.4e-3)仍超门(top-1 近平局翻转+score 2.2×)。全部损害
+   集中在注意力投影,FFN 三类几乎免费(隔离实验)。数据与重开条件见
+   cuda-optimization-plan.md「E1」节。
 2. **每批 ~8ms host 开销消减**(依赖 H2 分解):特征编码 GPU 化、pinned
    half 预转换(fork `enablePinnedHalfInputs` 语义)、解码路径裁剪。
 3. **持久化 megakernel**:12 trunk block 融合为少数常驻 kernel,activation
    驻留 48MB L2(B16 双缓冲够放);研究型,最后考虑。
-4. **WSL 部署**:白捡 +7~12%(t=8 +12%),非 kernel 但验收数字算数;
-   环境已备好(scripts/wsl_setup.sh)。
+4. **WSL 部署**:✅ 已验证(2026-08-17,scripts/wsl_bench.sh 一键复现)——
+   搜索 t=32 +4.6% / eval B16 +2.4%(vs 同日 Windows WDDM);Linux 口径
+   配对方差 ±0.05%,为 fork 基线一致的首选测量环境;cuda feature 的
+   WSL 首建 bug 已修(cudart_static 命名 + stdc++ 链接)。
 
 ## 7. 执行顺序与里程碑(M0 后重排:kernel 优先,拓扑降级)
 
 | 里程碑 | 内容 | 验收 | 依赖 |
 |---|---|---|---|
 | M0 | Phase 0 测量 + 决策表落档 | ✅ H1-H5 全部裁决(2026-08-17),数据入 cuda-optimization-plan.md | nnbench ✅ 已提交 |
-| M1 | C1 cuBLASLt top-N 计时重排 + C0 经典 cublas nvjet 试探 | ✅ C1 +2.55%(ABBA)+对拍 PASS,入 plan JSON;C0 证伪(2026-08-17) | M0 |
-| M2 | B3 FA4(❌ 证伪:两变体均负,FA2 已是 mma.sync 局部最优)+ B2 dual-FFN(✅ +29.8% @B16,对拍 PASS,入 plan) | 完成(2026-08-17) | M0 |
-| M3 | C2 tcgen05 主 GEMM 通路(CUTLASS 4.x sm120f);B2 dual-FFN(门槛:主循环 ≥ cuBLASLt ffn_up 0.130ms) | ABBA + 对拍 | M1 |
-| M4 | 冲击 per-SM 对齐线 2360;评估 E1/E2 与 A-lite(搜索语境) | nnbench eval B16 对照 fork 认证口径 | M1-M3 |
+| M1 | C1 cuBLASLt top-N 计时重排 + C0 经典 cublas nvjet 试探 | C0 证伪(2026-08-17);C1 当时 ABBA +2.55% 采纳,**2026-08-17 晚复审下架**(B2 后边际归零 + 搜索口径净负 -4.3%/-4.4%,见优化文档「M3 追加」) | M0 |
+| M2 | B3 FA4(❌ 证伪:两变体均负,FA2 已是 mma.sync 局部最优)+ B2 dual-FFN(当日 ABBA +29.8%,**但提交源码编译断裂从未生效——2026-08-17 晚修复后重验证 +26.5% eval / +28.0% 搜索,对拍 PASS**) | 修复完成(见优化文档「M3 追加」) | M0 |
+| M3 | ~~C2 tcgen05 主 GEMM 通路~~ ❌ 硬件证伪关闭(2026-08-17);B4 ❌ 门槛证伪(CUTLASS 残差 GEMM 全形状不赢 cuBLASLt top-8);E1 ❌ 精度门不过(官方语义硬失败,FFN-only 仍超门);**M3 收官:三项全证伪**。剩余:A-lite(搜索凑批)、WSL(E4) | ABBA + 对拍(未及——全部在门槛/证伪阶段关闭) | M1 |
+| M4 | 冲击 per-SM 对齐线 2360;评估 E1/E2 与 A-lite(搜索语境) | 🔶 进行中(2026-08-18):E1 ❌ 精度门;双流复活 +9.5%(饱和口径);**诚实结论:对齐线在本机不可达**(kernel 饱和吞吐 per-SM 为 fork 47%,而 kernel 侧杠杆已全数证伪)——转向 A-lite(~5-7%)与实用配置 | M1-M3 |
 
 每个里程碑完成标准:对拍 PASS + ABBA 留痕 + plan JSON 更新 + 本文档 §8
 看板更新。**任何一步慢于基线即回退并在 cuda-optimization-plan.md 记证伪。**
@@ -208,12 +248,12 @@ dispatch(攒满 target 才发射、GPU 空闲也发射,fork `maybeLaunchFillingB
 | nnbench 工具 | ✅ 已提交已实测(含 workers=2×当前 batch 修复) | crates/katago/src/cmd/nnbench.rs |
 | M0 Phase 0 测量 | ✅ 完成(2026-08-17) | cuda-optimization-plan.md「M0 Phase 0 测量」 |
 | H1-H5 假设 | ✅ 全部裁决 | §5 决策表;H1/H2/H3 证伪,H4 上修,H5 否决 |
-| M1(C0+C1) | ✅ 完成(2026-08-17) | C0 证伪(经典 cublas 同走 mma.sync);C1 top-N 计时重排落地:ABBA +2.55%(B16 892.6→915.4),对拍 PASS,已入 plan JSON |
-| 方案 A 拓扑组合 | ❌ 证伪/降级 A-lite | 双流×固定B16×W64=852.8 vs 单流 871(-2%);WDDM graph capture 互斥 |
-| 方案 B1-B4 | B2 ✅ 落地(+29.8%,plan 已启用);B3 ❌ 证伪(smem P 往返免费,寄存器打包成关键路径);B1/B4 待评估 | B2 门槛实测 0.1116ms > cuBLASLt;B3 数据见优化文档 M2 节 |
-| 方案 C tcgen05 | 🔶 C0 证伪/C1 已落地;C2(CUTLASS sm120f)待动工 | H3 证伪 cuBLASLt 走 tcgen05;探针 tests/probe_cublaslt_algos.rs 已入库 |
+| M1(C0+C1) | C0 证伪;**C1 已落地又于 2026-08-17 晚复审下架**(B2 后边际归零+搜索口径净负);下架后 plan=r1 仅 DUALFFN | 数据见优化文档「M3 追加」 |
+| 方案 A 拓扑组合 | 🔶 **部分复活(2026-08-18)**:饱和供数双流 +9.5%(serve=2+NOGRAPH+W≥4b,WSL 1112/Windows 1105);搜索语境维持证伪(t=48 灾难 123);PADBATCH 组合永久证伪(259) | 原 -2% 证伪系 DUALFFN 断裂慢 kernel;数据见优化文档「M4 前哨」 |
+| 方案 B1-B4 | B2 ✅ 落地(**2026-08-17 晚修复提交断裂后真正生效**,修复后 +26.5% eval/+28.0% 搜索,plan r1 已启用);B3 ❌ 证伪;B4 ❌ 门槛证伪;B1 待评估 | B2 门槛实测 0.1116ms > cuBLASLt;修复细节见优化文档 M3 追加节 |
+| 方案 C tcgen05 | C0 证伪/C1 落地(M1);**C2 ❌ 硬件证伪(2026-08-17)** | ptxas+CUTLASS 4.7+PTX ISA 9.3 三源互证,见优化文档 M3-pre;FP8/sm_120f 工具链留档(D:/code/cutlass4,device ✅,MSVC host C2719 待解) |
 | 方案 D cuDNN | ❌ 搁置 | H5:InitialConv 1.6% < 5% |
-| 方案 E 储备 | ⬜ 未开始 | E1 重模拟成本最低 |
+| 方案 E 储备 | E1 ✅ 已裁决(2026-08-17):精度门不过,FP8 封存(数据见优化文档 E1 节);E2/E3 未动;**E4 WSL ✅ 已验证**(搜索 +4.6%/eval +2.4%,scripts/wsl_bench.sh) | DUALFFN 修复后 per-SM 差距 ~14%(原估 20-26% 含断裂损失);确定杠杆:WSL 部署 + A-lite(剩余 ~7%) |
 
 状态图例:⬜ 未开始 / 🔶 进行中 / ✅ 已落地 / ❌ 已证伪(须附 ABBA 数据)
 

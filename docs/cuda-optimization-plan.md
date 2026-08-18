@@ -212,13 +212,16 @@
 - **FP8/INT8 直接全量化**:围棋网络 policy/value 对量化敏感。
 
 **FP8/INT8 的可行路径**(若未来要做):
-- **KataGo 官方 2026-08 PTQ 策略**(commit ff27077):只量化 attention/SwiGLU
+- ~~**KataGo 官方 2026-08 PTQ 策略**(commit ff27077):只量化 attention/SwiGLu
   的 **weight projection**,attention 的 QKᵀ/AV、softmax、RMSNorm、**所有
-  policy/value head 保持 FP32**。
+  policy/value head 保持 FP32**。~~(2026-08-17 勘误:官方 scope 实为
+  q/k/v/out/gate/up/**linear2 全部七类投影**+激活也量化(静态 per-tensor);
+  完整语义与本仓库重模拟结果见下方「M3:E1」节——FP8 精度门不过已封存。)
 - SM120 支持 FP8 `mma.sync.m16n8k32`(E4M3/E5M2,FP32 累加)+ MX block-scale,
   社区实测 FP8 ~2× FP16 吞吐。
 - **但工程量大**:量化图需接到自研 kernel/CUTLASS,且精度需逐层验证。
   **结论:现阶段 FP16 + cuBLASLt 已是最佳性价比;FP8 留作后续大工程。**
+  (E1 裁决后:不是"留作",是精度门不过、封存。)
 
 ### 混合精度实测终局(2026-08-15,三段实验闭环)
 
@@ -370,9 +373,9 @@ imma m16n8k32 变体,epilogue 内反量化直出 f16):
 
 - **架构确认**：RTX 5070 Ti = GB205，compute capability **12.0（sm_120）**，与 RTX 5080/5090 同为 Blackwell 消费级；与数据中心 sm_100（B200）不同，sm_100 cubin 不可互相加载。
 - **工具链门槛**：sm_120 需 **CUDA 12.9+**（nvcc/nvrtc）；更早版本报 "no kernel image is available for execution on the device"。本项目 build.rs 用本机 nvcc（实测可编译 sm_120 PTX）。
-- **张量核代数**：5th Gen Tensor Cores，支持 FP4/FP8/FP16/BF16/TF32；**tcgen05.mma 是 sm_100（sm_100f）指令集**，消费级 sm_120 需以 **sm_120f 家族特性**编译才能在 PTX 里用 tcgen05/tensor-memory 指令；普通 `-arch=sm_120`（非 f 变体）编不出 tcgen05。
-- **tcgen05 寄存器天花板**：Blackwell 最大矩阵指令（tcgen05.mma.cta_group::2）每线程需 256 个寄存器，硬件每线程上限 255（[The Software Frontier, 2026-08-03](https://www.thesoftwarefrontier.com/p/how-blackwells-tensor-memory-actually)）。即 cta_group::2 无法在单个 kernel 里完成 mma——fork 的 tile 尺寸设计必须避开（单 cta_group::1 tile 128×N 是安全区）。
-- **实现参考**：CUTLASS 4.x 已支持 sm_120（消费级 Blackwell）的 tcgen05 GEMM 模板；[tcgen05 for dummies（gau-nernst, 2025-12-21）](https://gau-nernst.github.io/tcgen05/) 有 sm_100 的逐指令级讲解（tmem 分配、tcgen05.mma 描述符、ld/st、commit/mbarrier），消费级差异主要在 cluster/cta_group 与 tmem 尺寸。
+- **张量核代数**：5th Gen Tensor Cores，支持 FP4/FP8/FP16/BF16/TF32。**（2026-08-17 勘误：本行原称"tcgen05 是 sm_100 指令集、消费级 sm_120 以 sm_120f 家族特性编译即可用 tcgen05/TMEM"——ptxas 实证错误**：tcgen05.alloc/dealloc/mma 在 sm_120a 与 sm_120f 均报 `not supported on .target`，仅 sm_100/101/103/110 族支持；CUTLASS 4.7.0 config.hpp 同样不为 SM120 定义任何 TCGEN05 宏。sm_120f 实际解锁的是**窄精度 mma.sync**（kind::f8f6f4，已实证 plain sm_120 拒、sm_120f 收），不是 tcgen05。证据链见「M3-pre C2 证伪」节；需求汇总 §2.5 的「SM120 硬件事实」一直正确。）
+- ~~tcgen05 寄存器天花板~~（对象不存在，条目作废：SM120 无 tcgen05/TMEM，cta_group 讨论仅适用数据中心 sm_100 族）。
+- **实现参考**：（2026-08-17 勘误：原称"CUTLASS 4.x 已支持 sm_120 的 tcgen05 GEMM 模板"——错误，4.7.0 的 SM120 GEMM 全部为 TMA + f8f6f4 mma.sync，无 tcgen05；gau-nernst 教程明确限定 sm100。）FP8/窄精度 mma.sync 路径参考 CUTLASS 4.7.0 `sm120_mma_builder.inl` 与 `examples/79_blackwell_geforce_gemm`。
 - **本项目定位**：基线手写 PTX（hgemm m16n8k16 / 共享内存归约 attention）为**正确性优先**；M4 的 tcgen05 路径按 fork 认证 plan（FA4 tile M128×N64 s1 both16）实施，编译开关经 `configs/sm-targets.json` 的 `arch` 字段（如 `sm_120f`）选择，失败回退基线。
 
 
@@ -525,3 +528,309 @@ FP16 形状拿不到 nvjet/tcgen05 的免费午餐**。tcgen05 只剩 CUTLASS 4.
 - 新 tactic 键:KATAGO_CUDA_DUALFFN(0|1,白名单+值域已入 tactic_plan.rs)。
 - capture 安全:capture 前预热条件泛化为 RANK=time 或 DUALFFN=1 均触发
   (DualGemm 首调用 initialize 在 capture 外完成)。
+
+## M3-pre:C2 tcgen05 硬件证伪(2026-08-17,ptxas 裁决)
+
+### 结论
+
+**SM120(消费级 Blackwell,含 RTX 5070 Ti/5080/5090)没有 tcgen05 / tensor-memory,
+C2(CUTLASS 4.x tcgen05 主 GEMM 通路)在硬件层证伪,永久关闭。** FP16 张量核在
+SM120 的终点就是 mma.sync(cuBLASLt 已在此路径,78~92 TF);"GEMM 代际差"杠杆在
+本机不存在。需求汇总 §2.5「SM120 硬件事实」一直正确,本文档「SM120 时效资料」
+的 tcgen05 条目系错误(已勘误)。
+
+### 证据(三独立来源互证)
+
+1. **ptxas 实证**(scripts/c2_tcgen05_probe/tcgen05_probe.cu,CUDA 13.2 ptxas):
+   - `nvcc -cubin -arch=sm_120f`:tcgen05.alloc/dealloc/mma 全部报
+     `Instruction ... not supported on .target 'sm_120f'`;
+   - `-arch=sm_120a`:同样全拒(9 处 not supported);
+   - `-arch=sm_100f`:同文件编译通过(探针良构,对照成立)。
+2. **CUTLASS 4.7.0**(D:/code/cutlass4,tag v4.7.0):
+   - `include/cute/arch/config.hpp`:`CUTE_ARCH_TCGEN05_*` 宏仅为
+     SM100A/F、SM101A/F、SM103A/F、SM110A/F 定义;SM120A/F 仅获
+     TMA_SM90 + LDSM/STSM_SM100A + f8f6f4/MX mma.sync,无 TMEM、无 tcgen05;
+   - SM120 dense GEMM collective builder(`sm120_mma_builder.inl`)
+     static_assert 仅支持 F8F6F4 窄精度输入(TMA + `mma.sync.kind::f8f6f4`,
+     非 tcgen05);`cute/arch/mma_sm120.hpp` 全部为 f8f6f4 mma.sync 原子,
+     无任何 F16 tcgen05 op。
+3. **PTX ISA 9.3**(docs.nvidia.com/cuda/parallel-thread-execution):
+   tcgen05.mma Target ISA Notes 仅列 sm_100a / sm_101a(PTX 9.0 起更名
+   sm_110a)及 sm_100f / sm_101f(→sm_110f)同族;sm_120 族(120/120a/120f/
+   121)不在任何 tcgen05 指令支持列表。gau-nernst 教程亦明确 "sm100,
+   not to be confused with consumer Blackwell sm120"。
+
+### 早前 web 调研的错误来源
+
+「sm_120f 家族特性编译即可用 tcgen05」系误读——sm_120f 解锁的是**窄精度
+mma.sync**(kind::f8f6f4,已实证:sm_120f 可编、plain sm_120 报
+`Feature '.kind::f8f6f4' not supported`),不是 tcgen05。
+
+### 对路线的影响
+
+- **FP16 GEMM 无代际杠杆**:剩余 kernel 空间 = 微优化/融合(B4 等)、
+  FP8 mma.sync(精度门,E1;速度已有微基准 M=5776 qkv -38%/down-proj -58%)。
+- fork per-SM 差(20~26%)需重归因:双方同为 mma.sync,差距更可能来自时钟/
+  L2(5080 64MB vs 5070Ti 48MB)/带宽(960 vs 896GB/s)与融合度,而非指令代际。
+- "超越 fork"确定杠杆改列:WSL(E4,+7~12%)、E1(FP8 精度重模拟→过门才谈
+  kernel)、持久化 megakernel(E3,研究型)、A-lite(搜索语境凑批)。
+
+### 工具链事实(为 E1/未来窄精度工程留档)
+
+- CUTLASS 4.7.0 已克隆至 **D:/code/cutlass4**(与 3.9.2 并存;build.rs 现有
+  KATAGO_CUTLASS_ROOT 仍指 3.9.2 服务 DualGemm,4.x 引入时再分键)。
+- **sm_120f device 编译 ✅**:SM120 FP8 GEMM 全模板(TMA + f8f6f4 mma.sync +
+  Sm120 epilogue,tile 128x64x64 s6 cooperative)单 TU `nvcc -cubin` 25.8s 通过
+  (scripts/c2_tcgen05_probe/sm120_fp8_gemm_bench.cu,含 cublas FP16 对照计时与
+  数值自检,尚待可发射环境跑)。
+- **Windows/MSVC host 发射 ❌**:cudafe stub 中 alignas(128) 内核参数按值传递
+  触发 MSVC C2719(x64 ABI 栈对齐 16B 上限)——SM90+ TMA kernel 在 MSVC 的通病。
+  可行路线:① WSL 构建(环境已备,E4 顺带)② clang-cl 作 -ccbin(本机未装)
+  ③ 自写 driver-API launcher(cubin 可编已证;Params 主机构造 + cuLaunchKernel,
+  工程量大)。sm-targets.json 未加 sm_120f(C2 证伪后无紧迫性;FP8 工程启动时
+  再加,注意 build.rs 的 gencode 生成只认数字需同步扩展)。
+
+## M3:B4 门槛证伪(2026-08-17,微基准)
+
+### B4(beta=1 原位残差 GEMM,CUTLASS 候选对照)——证伪关闭
+
+- **认识修正**:现行 `hgemm_residual` 本就是 cuBLASLt beta=1 **原位**(C==D,
+  f32 残差),fork 的 B4 战术(GEMM epilogue 原位残差)在我们栈上没有对应
+  收益空间——B2 的 +29.8% 来自融合省内存往返,DualGemm 主循环仅快 ~0.005ms/层。
+- **门槛微基准**(scripts/b4_residual_probe/residual_bench.cu,CUTLASS 3.9.2
+  Sm80 classic,A/B half、C=D f32 原位、fork 瓦片 128x128x32 s3 + 对照变体;
+  cuBLASLt 侧逐位复刻生产路径含 top-8 计时 = RANK=time 语义;数值自检
+  PASS 且与 Lt 逐位一致):
+  | 形状 | Lt top-8 best | CUTLASS 最优 | 裁决 |
+  |---|---|---|---|
+  | outproj M=5776 N=384 K=384 | 0.0250ms | 0.0251(128x64) | 持平 |
+  | linear-up M=5776 N=768 K=384 | 0.0442 | 0.0438(128x128) | +0.9% 噪声级 |
+  | ffn-down M=5776 N=384 K=2304 | 0.1158 | 0.1188(128x64) | 慢 2.6% |
+  | outproj B1/B2(M=361/722) | 0.0143/0.0084 | 0.0170/0.0145 | 慢 19%/72% |
+- **结论**:门槛(主循环 ≥ cuBLASLt 同形状)不通过,B4 不集成。cuBLASLt
+  在本机 FP16 残差形状上没有可被经典 CUTLASS Sm80 瓦片超越的余量。
+
+## M3 追加:DUALFFN 提交断裂修复 + RANK=time 复审下架(2026-08-17 晚)
+
+### 事故:M2 提交了编译不过的 dual_ffn_cutlass.cu
+
+- **现象**:A-lite 开工复测搜索口径,发现 plan 相对 no-plan 回退 -7.6%
+  (669.6 vs 725.1);进一步 eval B16 复测 +29.8% 消失(785.7 vs 780.9);
+  而 direct 模式 no-plan 与 M0 记录逐位吻合(19.33 vs 19.262ms)——GPU 没变,
+  是 DUALFFN 路径失效。
+- **根因**:35fc20c 提交的 `dual_ffn_cutlass.cu` 编译不过(两处,均为 20:33
+  的提交前清理编辑引入):
+  1. `DualGemm` 模板第 5 实参 `LayoutB1` 误写为 `Layout`(RowMajor),
+     B1(up 权重,ColumnMajor)张量引用不匹配;
+  2. `ScaleType::Nothing` 的 `LinearCombination::Params` 仅单参构造(只有
+     alpha),`{1.0f, 0.0f}` 双参不匹配。
+  build.rs 对 nvcc 失败**静默跳过** → `katago_dualffn` cfg 缺失 →
+  `dual_ffn` 字段 None → DUALFFN=1 tactic 空转(无声回退 hgemm_f16+
+  swiglu_dual)。M2 的 +29.8% 与对拍 PASS 全部来自 20:25 的提交前好二进制;
+  20:26 后所有构建(含本会话重建)都是坏的。
+- **修复**:两行(模板实参 `LayoutB` + 单参 `{1.0f}`),重建后
+  `cargo:rustc-cfg=katago_dualffn` 恢复。
+- **加固**:build.rs 改 fail-loud——CUTLASS 在位但编译失败即 panic
+  (逃生门 `KATAGO_ALLOW_BROKEN_CUDA_HOST=1`;CUTLASS 缺失仍静默跳过,
+  可移植性不变)。
+- **教训**:①"静默降级"战术链路的致命弱点是降级本身无声——plan 已采纳的
+  tactic 必须有构建期可验证的存在性检查;②提交前必须用**重建后的二进制**
+  复验 ABBA 终值(本次 +29.8% 的验证二进制与提交源码不同体)。
+
+### 修复后重验证(2026-08-17 晚;环境整体比 M2 时段慢 ~10%——no-plan
+### eval B16 783.6 vs M2 期 848~871,WDDM 桌面活动所致,配对 A/B 有效)
+
+- **对拍**:DUALFFN=1(含/不含 RANK=time)dump_nn_io_cuda 串行 +
+  compare_nn_output **RESULT: PASS**(16/16 top-1,全 gate OK)——修复后
+  的提交代码首次真正过门。
+- **eval B16(生产栈,W32,i200)**:no-plan 783.6 / RANK-only 789.1 /
+  DUALFFN-only 989.3 / RANK+DUALFFN 984.8。
+- **搜索 t=32 cap16(-n 30,visits 800)**:no-plan 718.3 / RANK-only
+  687.2(**-4.3%**)/ DUALFFN-only 917.9(**+27.8%**)/ RANK+DUALFFN 878.1
+  (+22.2%)。
+
+### RANK=time 复审下架(裁决:从 plan 移除)
+
+- M1 采纳依据(+2.55% eval B16)是 **B2 之前**的口径;B2 接管 ffn_up 后
+  RANK 的边际收益归零(eval 口径 dual-only 989.3 ≥ full 984.8,+0.7% 噪声级),
+  搜索口径净负(单独 -4.3%,组合 878 vs 918 = -4.4%)。
+- 搜索口径回退机制未深究(疑:计时优选的 algo 对变尺寸批 replay 的
+  L2/interleave 鲁棒性差——计时语境是同形状 back-to-back)。
+- **行动**:`plans/best-tactic-plan.json` 修订为 r1(仅
+  `KATAGO_CUDA_DUALFFN=1`,plan_id 加 `-r1` 溯源;此为手工修订,ABBA
+  证据=本节数据,非 autotune 产物)。
+- **r1 验证**:eval B16 **991.5(+26.5% vs no-plan)**;搜索 t=32
+  **919.7(+28.0%)**——双口径同时最优。
+
+### 对 A-lite 的影响
+
+- 搜索口径 919.7 vs 同环境 nnbench eval 991.5 → **剩余差距 ~7.3%**
+  (历史口径 12%)。DUALFFN 修复后搜索侧的 kernel 已跟上,剩余为凑批/
+  CPU 编码竞争的搜索侧空间。
+- 测量方法论警示(今日踩坑记录):eval/搜索口径 run 间方差可达 ~5-11%
+  (WDDM 桌面活动),单次绝对值不可信,一律配对 A/B + 多轮;kernel 模式
+  (异步深队列)在 WDDM 下受提交路径污染,同尺寸 direct < kernel 时即为
+  伪影信号。另:**direct 模式不安装 plan**(direct_sweep 直连
+  CudaModel,不经 create_compute_context)——direct 口径只反映默认
+  tactic,测 plan 须走 eval/search。
+
+## M3 追加 2:WSL 环境验证(fork 基线一致口径,2026-08-17 晚)
+
+**目的**:消除 Windows WDDM 桌面噪声 + 对齐 fork 的 Linux 测量环境。
+
+### Linux 首建修 bug(cuda feature 首次在 WSL 构建,build.rs 两处)
+
+1. `rustc-link-lib=static=cudart`(Linux)找不到 libcudart.a——静态库名
+   两平台同为 `cudart_static`(Linux 是 libcudart_static.a),已统一。
+2. dual_ffn 宿主对象是 C++,Linux 链接缺 `stdc++`(__cxa_guard 等)——
+   !windows 分支补 `dylib=stdc++`。
+3. WSL 侧:nvcc 13.2(与 Windows 同版本)装于 /usr/local/cuda;
+   CUTLASS 头拷至 WSL 原生盘(/root/cutlass,9p 直读太慢);
+   CARGO_TARGET_DIR=/root/rk-target(与 Windows target 隔离)。
+   一键复现:`scripts/wsl_bench.sh`(构建 + ABAB 基准);
+   `scripts/wsl_setup.sh`(环境安装,已修 nvcc PATH)。
+   **cfg 验证:`rustc-cfg=katago_dualffn` 在 WSL 构建同样发出(fail-loud
+   生效,Linux 侧双保险)。**
+
+### 结果(WSL Ubuntu-24.04,RTX 5070 Ti 透传,plan r1 vs no-plan,各两轮)
+
+| 口径 | no-plan | plan r1 | Δ |
+|---|---|---|---|
+| nnbench eval B16 W32 | 810.8 / 814.6 | **1012.4 / 1018.9** | **+24.8%** |
+| 搜索 t=32 cap16(-n 30) | 729.6 / 726.9 | **962.5 / 962.1** | **+32.2%** |
+
+- 两轮配对极稳(搜索 arm 内 ±0.05%)——Linux 无 WDDM 噪声,单轮即可信。
+- **WSL vs Windows(同日 plan r1)**:搜索 962.3 vs 919.7(**+4.6%**),
+  eval 1015.7 vs 991.5(+2.4%)——E4 的 WSL 增益实测坐实(此前记录
+  t=8 +12%)。direct 模式(同步逐轮)WSL 反而慢 ~7%(20.69 vs 19.33ms,
+  dxg 同步开销;流水线重叠后无影响)。
+
+### fork 对齐线更新(DUALFFN 真正生效后)
+
+- fork 认证:RTX 5080(84 SM)2836 nnEval/s = 双流每流 1418
+  (模型 b11c768h12nbt3tflrs-fson-silu,b11/768-trunk 族,与 b11fix 维度
+  同族,行/秒可比)。
+- 本机 WSL eval B16 单流 1015.7:raw 71.6% / **per-SM 86%**
+  (1015.7/70=14.51 vs 1418/84=16.88 行/s/SM)——M0 期估的 20-26%
+  per-SM 差实际含 DUALFFN 断裂损失,修复后真实差距 **~14%**。
+  对齐线(2360 = 2836×70/84)当前达成 43%(eval 口径)。
+
+## M4 前哨:方案 A 双流复活(2026-08-18,WSL+Windows 双验证)
+
+**触发**:parity plan §4 重审条款——双流证伪是在 DUALFFN 断裂的慢 kernel
+上做的(kernel 变快后结论需重审);且 M0 的"capture 互斥"是 WDDM 语境,
+fork 双流本就跑在 Linux。WSL 环境方差 ±0.05%,单轮可信。
+
+### 矩阵(eval B16,plan r1;WSL 为主,Windows 抽样确认)
+
+| 配置 | WSL nnEval/s | Windows | 备注 |
+|---|---|---|---|
+| serve=1 graph W32(现行默认) | 1012-1019 | 1011.1 | 基线 |
+| **serve=2 NOGRAPH W64** | **1109-1117(±0.5%)** | **1104.9** | **新最优,+9.5%** |
+| serve=2 graph(GLOBAL) W64 | 1014 | — | capture 互斥回退 nograph+churn,收益归零 |
+| serve=2 graph(RELAXED) W64 | 1020-1034 | — | capture 成功但比 NOGRAPH 慢 ~8% |
+| serve=1 NOGRAPH W64 | 1020(avgBatch 21.3) | — | 供数归因:W64 本身不帮单流 |
+| serve=2 NOGRAPH W32 | 746(avgBatch 8.0) | — | 饿死:双流需供数 ≥4×batch |
+| serve=2 NOGRAPH PADBATCH W64 | 259 | — | padding×双流 = 灾难,永久证伪 |
+| serve=3 NOGRAPH W96 | 1056 | — | 无增益 |
+| serve=2 NOGRAPH W96/W128 | 1047 / 72 | — | W96 批过冲 18.4;W128 worker 超订阅崩溃(伪影) |
+
+**搜索语境(结论:保持 serve=1)**:t=32 serve=2 = 858 vs 962(-11%,批碎片
+avgBatch 9.2);**t=48 serve=2 = 123 vs 973(灾难性**——48 搜索线程 + 2
+serve 的 CPU 超订阅/锁风暴)。搜索 t=48 serve=1 = 973(口径新高)。
+
+### 条件与机制
+
+- **双流收益 = 填 host 间隙,不是 GPU 并行**:单流 eval 批周期 31.4ms vs
+  kernel ~15.5ms(host 间隙 ~50%);双流后 70.1 批/s vs 串行上限 66.2 →
+  GPU 重叠仅 ~6%(kernel SM 饱和)。fork 流间扩展 2.0×(其单流 host-bound,
+  GPU 饱和吞吐 = 2836),我们 1.095×(kernel 已饱和)。
+- **NOGRAPH 必须**:跨线程 capture 互斥 Linux 同样存在(GLOBAL 模式他流
+  并发活动即失效);fork 本就不用 graph(其否决项)。
+- 代码改动:`begin_capture` GLOBAL → **RELAXED**(每 handle 单流、apply 内
+  无跨流依赖,捕获内容不变;serve=2 的 capture 不再互斥打挂)。serve=1
+  数字无变化(1018.8/966.4/972.3 复核),对拍 PASS(16/16)。RELAXED 下
+  serve=2 可带 graph 但比 NOGRAPH 慢——双流推荐配置仍是 NOGRAPH。
+
+### fork 对齐含义(诚实口径)
+
+- 单流对单流:1015.7 vs 1418 → per-SM 86%(差 14%,带宽 7%+L2/时钟)。
+- 双流对双流:1112 vs 2836 → per-SM **47%**。fork 双流吃满 GPU(2836/84
+  = 33.8 行/s/SM),我们 kernel 饱和上限 ~15.9 行/s/SM——**差距主体在
+  kernel 吞吐**,而 kernel 侧选项已全数证伪(tcgen05 硬件无/FP8 精度不过/
+  CUTLASS 不赢 cuBLASLt/FA4 已局部最优)。SM120 mma.sync 屋顶下,该差距
+  无已知确定路径;对齐线 2360 在本机不可达,除非 fork 数字含口径差
+  (其模型 b11c768h12nbt3tflrs 与 b11fix 同族但头结构细节未逐项核对)。
+
+### 使用指南(高并发服务场景)
+
+分析引擎多查询/批量评估等饱和供数场景(W ≥ 4×batch):
+```
+--override-config numNNServerThreadsPerModel=2
+环境 KATAGO_CUDA_NOGRAPH=1
+```
+GTP 对局/单查询(搜索语境):保持默认 serve=1(双流在搜索是负收益甚至
+灾难)。复现脚本:scripts/wsl_dualtest*.sh、wsl_relaxedtest.sh。
+
+## M3:E1 FP8 官方 PTQ scope 重模拟(2026-08-17,精度门裁决:不过)
+
+### 官方 ff27077 精确语义(网络核实)
+
+commit ff27077(PR #219,python/katago/quantization.py)默认 `--scope transformer`:
+- **量化对象**(按名 allowlist):`q_proj/k_proj/v_proj/out_proj/ffn_linear1/
+  ffn_linear_gate/ffn_linear2`——**ffn_linear2(FFN 下投影)在默认 scope 内**
+  (旧文档"官方只量化 attention/SwiGLu、不含 linear2"的描述有误,已勘)。
+  保持 FP32:QK/AV 激活 matmul、Softmax、RMSNorm、输入茎、外层 bottleneck
+  投影、trunk tip、全部头。b11fix 上该 scope = 全部 231 个 trunk MatMul
+  ((384,384)×132 q/k/v/out +(384,1152)×66 gate/up +(1152,384)×33 down;
+  bottleneck 768↔384 在图中是其他算子,天然排除)。
+- **方案**:权重 E4M3 **per-output-channel**(zero-point=0);激活同样量化,
+  **静态 per-tensor** scale(max 校准);权重-only 显式拒绝。
+- 官方验收口径是 TensorRT 强类型 + 对局强度,不是我们的逐位对拍门。
+
+### 旧模拟的两处失真(本次修正)
+
+1. **量化轴错误**:旧 `quantize_weights_perchannel` 对 [K,N] initializer 按
+   行(axis=-1)量化 = per-input-channel;官方是 per-output-channel(列)。
+2. **激活粒度错误**:旧 fp8full 用 per-token 动态 amax;官方是静态
+   per-tensor(max 校准)。
+   sim_quant.py 已重写支持:per-out-channel 权重、两遍法静态 per-tensor
+   激活(校准 pass 插 amax 探针,scale 构建期烧入)、FFN-only scope。
+
+### 结果(16 位置,vs FP32 ORT 基线;历史 fp8w=14/16 KL 8.6e-3 "勉强")
+
+| 变体 | top1 | KL | value_max | score_max | 裁决 |
+|---|---|---|---|---|---|
+| fp8_official(官方精确语义,全 scope) | 14/16 | **4.3e-2** | **2.54** | 0.250 | ❌ 硬失败 |
+| fp8w_off(仅轴修正,全 scope) | 15/16 | 4.5e-2 | 2.30 | 0.255 | ❌ |
+| **fp8_ffn_official**(FFN-only 官方语义) | 14/16 | **2.4e-3** | 0.321 | 0.0225 | ❌ 仍未过门 |
+| fp8w_ffn_perK(FFN-only 权重-only,不可部署*) | 15/16 | 8.1e-4 | 0.449 | 0.0148 | 参考 |
+
+*f8f6f4 mma 双操作数都须 fp8,权重-only 无 kernel 通路,纯模拟参照。
+
+### 隔离实验的关键发现(scripts/e1_axis_isolate.py)
+
+| 量化类(单独量化该类) | per-K | per-N |
+|---|---|---|
+| (384,384) 注意力投影 ×132 | KL 6.6e-3 | **KL 4.4e-2(6.7×)** |
+| (384,1152) gate/up ×66 | 4.8e-4 | 5.1e-4 |
+| (1152,384) down ×33 | 2.6e-4 | 2.7e-4 |
+
+- **FP8 的全部损害集中在注意力投影**;FFN 三类几乎免费(2~5e-4)。
+- **per-output-channel 在注意力类上反而差 6.7×**(Frobenius 误差两轴相同
+  0.0275;无归零、无次正规差异、行幅度均匀——机制不明,开放观察)。FFN
+  类两轴无差。
+- 因此造出 FFN-only 中间方案:KL 2.4e-3(比历史 fp8w 好 3.6×),top-1 翻转
+  仅 pos0/pos2(margin 0.005/0.007,近平局),winprob_d≤0.027、score_d≤0.0225
+  ——最接近门槛的 FP8 成绩,但 top-1 100% 在近平局 margin 下对任何 FP8
+  噪声都不可达(pos2 在 KL 8e-4 时即翻),score 仍超 misc 门 2.2×。
+
+### 裁决与影响
+
+- **E1 精度门不过,FP8 kernel 工程封存**。阻塞是精度不是速度(FFN 占前向
+  61.6%,fp8 微基准 down-proj -58%/qkv -38%,潜在收益 ~15-20%)。
+- 重开条件(任一):(a) 对拍门接受近平局(margin<0.01)top-1 翻转等价 +
+  score 门放宽至 ~2.5e-2;(b) 更细激活粒度(per-token 动态,可融合进
+  DualGemm 前的量化 kernel)且门放宽——模拟预测仍翻 pos2。
+- C2 证伪(M3-pre)后 FP8 曾是"超越"路线的最大储备;如今也关闭,超越
+  fork 的剩余确定杠杆只有 WSL(E4,+7~12%)与 A-lite(搜索语境)。

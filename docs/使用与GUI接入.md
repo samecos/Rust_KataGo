@@ -28,6 +28,19 @@ nnMaxBatchSize = 16
 | 批量自对弈/纯吞吐 | 48 | ~800 nnEvals/s 峰值 |
 | 后台挂着（低占用） | 4 | 549 nnEvals/s，占用低 |
 
+**高并发饱和服务（2026-08-18 新增）**：分析引擎多查询/批量评估等供数
+持续 ≥4×batch 的场景，双 NN server + 无图直发再 +9.5%：
+
+```
+--override-config numNNServerThreadsPerModel=2   # + 环境变量 KATAGO_CUDA_NOGRAPH=1
+```
+
+（eval B16 W64：1112 vs 单流 1016。注意仅限饱和供数——GTP 对局等搜索
+语境**不要**用：双流在搜索是负收益甚至灾难性回退。）
+
+**WSL 部署**：同硬件 Linux 口径比 Windows 再 +2~5%（搜索 +4.6%），测量
+也稳定得多；环境一键脚本 `scripts/wsl_setup.sh`，基准 `scripts/wsl_bench.sh`。
+
 ## 2. 启动命令
 
 ```
