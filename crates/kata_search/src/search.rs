@@ -1067,7 +1067,7 @@ impl<'a> Search<'a> {
                             let mut upper_bound_visits_left = if has_tc {
                                 f64::from_bits(
                                     upper_bound_visits_left_due_to_time
-                                        .load(AtomicOrdering::Acquire) as u64,
+                                    .load(AtomicOrdering::Acquire) as u64,
                                 )
                             } else {
                                 1e30
@@ -7759,32 +7759,63 @@ impl<'a> Search<'a> {
     }
 
     fn recursively_recompute_stats(&mut self, node: &mut SearchNode) {
-        fn recurse<'a>(
-            search: &mut Search<'a>,
-            node: &mut SearchNode,
-            visited: &mut std::collections::HashSet<*mut SearchNode>,
-        ) {
-            let node_ptr = node as *mut SearchNode;
-            if !visited.insert(node_ptr) {
-                return;
-            }
-            let is_root = search
-                .root_node
-                .as_deref()
-                .map_or(false, |root| std::ptr::eq(root, &*node));
-            let children = node.get_children();
-            let count = children.iterate_and_count_children();
-            let mut found_any_children = false;
-            for i in 0..count {
-                let child_ptr = children.get(i).get_raw_ptr();
-                if !child_ptr.is_null() {
-                    found_any_children = true;
-                    unsafe {
-                        recurse(search, &mut *child_ptr, visited);
-                    }
+        struct Frame {
+            node: *mut SearchNode,
+            next_child: usize,
+        }
+
+        let root_ptr = self
+            .root_node
+            .as_deref()
+            .map_or(std::ptr::null_mut(), |root| {
+                root as *const SearchNode as *mut SearchNode
+            });
+        let root_frame = Frame {
+            node: node as *mut SearchNode,
+            next_child: 0,
+        };
+        let root_frame_ptr = root_frame.node;
+        let mut stack = vec![root_frame];
+        let mut on_path = std::collections::HashSet::new();
+        let mut completed = std::collections::HashSet::new();
+        on_path.insert(root_frame_ptr);
+
+        while let Some(mut frame) = stack.pop() {
+            let node_ptr = frame.node;
+            let children = unsafe { (*node_ptr).get_children() };
+            let children_capacity = children.get_capacity();
+            let mut descended = false;
+
+            while frame.next_child < children_capacity {
+                let child_index = frame.next_child;
+                frame.next_child += 1;
+                let child_ptr = children.get(child_index).get_raw_ptr();
+                if child_ptr.is_null() {
+                    frame.next_child = children_capacity;
+                    break;
                 }
+                if completed.contains(&child_ptr) || on_path.contains(&child_ptr) {
+                    continue;
+                }
+
+                on_path.insert(child_ptr);
+                stack.push(frame);
+                stack.push(Frame {
+                    node: child_ptr,
+                    next_child: 0,
+                });
+                descended = true;
+                break;
             }
 
+            if descended {
+                continue;
+            }
+
+            let is_root = node_ptr == root_ptr;
+            let found_any_children =
+                children_capacity > 0 && !children.get(0).get_raw_ptr().is_null();
+            let node = unsafe { &mut *node_ptr };
             if !found_any_children {
                 let num_visits = node.stats.visits.load(Ordering::Acquire);
                 let weight_sum = node.stats.weight_sum.load(Ordering::Acquire);
@@ -7798,11 +7829,11 @@ impl<'a> Search<'a> {
                         node.stats.no_result_value_avg.load(Ordering::Acquire);
                     let score_mean_avg = node.stats.score_mean_avg.load(Ordering::Acquire);
                     let score_mean_sq_avg = node.stats.score_mean_sq_avg.load(Ordering::Acquire);
-                    let mut new_utility = search
+                    let mut new_utility = self
                         .get_result_utility(win_loss_value_avg, no_result_value_avg)
-                        + search.get_score_utility(score_mean_avg, score_mean_sq_avg);
+                        + self.get_score_utility(score_mean_avg, score_mean_sq_avg);
                     new_utility +=
-                        search.get_pattern_bonus(node.pattern_bonus_hash, get_opp(node.next_pla));
+                        self.get_pattern_bonus(node.pattern_bonus_hash, get_opp(node.next_pla));
                     let new_utility_sq = new_utility * new_utility;
 
                     while node.stats_lock.swap(true, Ordering::Acquire) {}
@@ -7813,13 +7844,13 @@ impl<'a> Search<'a> {
                     node.stats_lock.store(false, Ordering::Release);
                 }
             } else {
-                let mut dummy_thread = SearchThread::new(-1, search);
-                search.recompute_node_stats(node, &mut dummy_thread, 0, is_root);
+                let mut dummy_thread = SearchThread::new(-1, self);
+                self.recompute_node_stats(node, &mut dummy_thread, 0, is_root);
             }
-        }
 
-        let mut visited = std::collections::HashSet::new();
-        recurse(self, node, &mut visited);
+            on_path.remove(&node_ptr);
+            completed.insert(node_ptr);
+        }
     }
 
     fn recursively_record_eval_cache(&mut self, node: &mut SearchNode) {
@@ -9774,6 +9805,64 @@ mod tests {
             Box::into_raw(Box::new(Arc::new(nn_output))),
             Ordering::Release,
         );
+    }
+
+    #[test]
+    fn test_recompute_stats_handles_deep_tree_without_native_recursion() {
+        const DEPTH: usize = 50_000;
+        let mut search = search_with_dummy();
+        search.root_pla = P_BLACK;
+
+        fn make_node(next_pla: Player, internal: bool) -> Box<SearchNode> {
+            let mut node = SearchNode::new(next_pla, false, 0, Hash128::default());
+            if internal {
+                node.initialize_children();
+                node.state.store(STATE_EXPANDED0, Ordering::Release);
+            }
+            node.stats.visits.store(1, Ordering::Release);
+            node.stats.weight_sum.store(1.0, Ordering::Release);
+            node.stats.weight_sq_sum.store(1.0, Ordering::Release);
+            let mut nn_output = NNOutput::default();
+            nn_output.nn_x_len = 19;
+            nn_output.nn_y_len = 19;
+            store_output(&node, nn_output);
+            Box::new(node)
+        }
+
+        let mut root = make_node(P_BLACK, true);
+        let mut nodes = Vec::with_capacity(DEPTH - 1);
+        for i in 0..DEPTH - 1 {
+            let next_pla = if i % 2 == 0 { P_WHITE } else { P_BLACK };
+            let internal = i + 2 < DEPTH;
+            nodes.push(Box::into_raw(make_node(next_pla, internal)));
+        }
+
+        let loc = location::get_loc(0, 0, search.root_board.x_size);
+        let mut parent: *mut SearchNode = &mut *root;
+        for &child in &nodes {
+            unsafe {
+                let children = (*parent).get_children();
+                children.get(0).store(child);
+                children.get(0).set_move_loc(loc);
+                children.get(0).set_edge_visits(1);
+            }
+            parent = child;
+        }
+
+        search.root_node = Some(root);
+        let root_ptr = search.root_node.as_deref_mut().unwrap() as *mut SearchNode;
+        unsafe {
+            search.recursively_recompute_stats(&mut *root_ptr);
+        }
+        let root = search.root_node.as_deref().unwrap();
+        assert!(root.stats.weight_sum.load(Ordering::Acquire) > 0.0);
+
+        search.root_node = None;
+        for ptr in nodes {
+            unsafe {
+                drop(Box::from_raw(ptr));
+            }
+        }
     }
 
     #[test]
