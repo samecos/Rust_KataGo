@@ -834,3 +834,42 @@ commit ff27077(PR #219,python/katago/quantization.py)默认 `--scope transformer
   DualGemm 前的量化 kernel)且门放宽——模拟预测仍翻 pos2。
 - C2 证伪(M3-pre)后 FP8 曾是"超越"路线的最大储备;如今也关闭,超越
   fork 的剩余确定杠杆只有 WSL(E4,+7~12%)与 A-lite(搜索语境)。
+
+## M4 追加:host/A-lite 复审与布尔 tactic 语义修复(2026-08-19)
+
+### 本轮候选裁决(全部未采纳)
+
+统一口径:Windows WDDM、plan r1、B16/W32；候选低于 1% 门槛即回退。
+
+| 候选 | 配对结果 | 裁决 |
+|---|---|---|
+| pipeline 空闲首批等待 50/100/200us | B16 nnEvals/s 1037/1032/1039/1028（0us 基线 1037）；不限制 B16 时 200us 把 avgBatch 15.4→25.9，却使 934→890 | ❌ 等待只把批推过 B16 甜点，吞吐不增 |
+| 每轮只 finish 一个完成批、优先补发下一批 | ABBA 基线几何均值 1056.3，候选 1041.9（-1.4%） | ❌ |
+| 输入直接编码到 pinned + 输出直接从 pinned 解码 | ABBA 1083.7→1076.1（-0.7%） | ❌ Windows pinned 写入更慢 |
+| 仅输出 pinned 零拷贝 | ABBA 1082.8→1082.9（持平） | ❌ 未过 1% |
+| pageable input/output staging Vec 按槽复用 | ABBA 1093.1→1091.3（-0.2%） | ❌ allocator 不是剩余瓶颈 |
+
+结论:A-lite 的简单等待/finish 公平性和 host staging 均已收口；搜索与固定
+B16 的剩余差距不是可由这些微调兑现的稳定收益。所有实验代码均回退。
+
+### 落地修复:显式 `0` 不再误开启 tactic
+
+发现所有以 `.is_ok()` 读取的布尔 tactic 把环境/plan 中的显式 `"0"` 也视为
+开启，破坏了 plan 的负覆盖语义。受影响项:
+`NOGRAPH/NOPIPELINE/PADBATCH/SPLITK/T32/T64N32`。新增统一
+`tactic_plan::tactic_enabled()`（仅值 `1` 为 true）并替换全部读取点；
+`DUALFFN/CUBLASLT` 原本按值判断，不受影响。
+
+- 实机故障复现:同时显式设置上述 tactic=`0`，旧二进制仍误启慢路径，
+  eval B16 **409.4 nnEval/s**；修复后 **1096.8 nnEval/s（2.68x）**。
+- 默认 r1 plan 只写 `DUALFFN=1`，因此默认生产性能不变；收益体现在完整认证
+  plan、autotune 显式负覆盖和手工诊断配置终于按契约工作。
+- 单测:plan 安装 `PADBATCH=0` 后 `tactic_enabled` 为 false；tactic plan
+  6/6 PASS。
+- 数值门:16 位置 ORT FP32 整图对拍 **RESULT: PASS**，policy top-1 16/16。
+- 追加修复 CUDA graph flag UB：cudarc 0.19.9 将 instantiate bitflags 生成为
+  不含 0 的 Rust enum，原生产/测试路径 `transmute(0u32)` 属未定义行为，
+  debug 冒烟会直接 abort。统一改用合法的 `USE_NODE_PRIORITY`（本 graph
+  未设置节点优先级，语义等价默认）。完整 CUDA 冒烟 **9/9 PASS**、3 ignored，
+  graph launch+sync 10-27us（WDDM 微基准波动）；生产 B16 ABBA 旧/新 1079.1/1078.5（-0.06%，
+  持平），作为安全性修复保留。

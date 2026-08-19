@@ -235,7 +235,7 @@ WSL / clang-cl / driver-API launcher)。FP8 精度门未过前不动工。
 | M1 | C1 cuBLASLt top-N 计时重排 + C0 经典 cublas nvjet 试探 | C0 证伪(2026-08-17);C1 当时 ABBA +2.55% 采纳,**2026-08-17 晚复审下架**(B2 后边际归零 + 搜索口径净负 -4.3%/-4.4%,见优化文档「M3 追加」) | M0 |
 | M2 | B3 FA4(❌ 证伪:两变体均负,FA2 已是 mma.sync 局部最优)+ B2 dual-FFN(当日 ABBA +29.8%,**但提交源码编译断裂从未生效——2026-08-17 晚修复后重验证 +26.5% eval / +28.0% 搜索,对拍 PASS**) | 修复完成(见优化文档「M3 追加」) | M0 |
 | M3 | ~~C2 tcgen05 主 GEMM 通路~~ ❌ 硬件证伪关闭(2026-08-17);B4 ❌ 门槛证伪(CUTLASS 残差 GEMM 全形状不赢 cuBLASLt top-8);E1 ❌ 精度门不过(官方语义硬失败,FFN-only 仍超门);**M3 收官:三项全证伪**。剩余:A-lite(搜索凑批)、WSL(E4) | ABBA + 对拍(未及——全部在门槛/证伪阶段关闭) | M1 |
-| M4 | 冲击 per-SM 对齐线 2360;评估 E1/E2 与 A-lite(搜索语境) | 🔶 进行中(2026-08-18):E1 ❌ 精度门;双流复活 +9.5%(饱和口径);**诚实结论:对齐线在本机不可达**(kernel 饱和吞吐 per-SM 为 fork 47%,而 kernel 侧杠杆已全数证伪)——转向 A-lite(~5-7%)与实用配置 | M1-M3 |
+| M4 | 冲击 per-SM 对齐线 2360;评估 E1/E2 与 A-lite(搜索语境) | 🔶 进行中(2026-08-19):E1 ❌ 精度门;双流复活 +9.5%(饱和口径);A-lite 空闲窗口/finish 公平性/host staging 均 ABBA 证伪;落地布尔 tactic 显式 `0` 语义修复(错误组合 409.4→1096.8,对拍 PASS)及 CUDA graph 零 flag UB 修复(冒烟 9/9,性能持平)。**诚实结论:对齐线在本机不可达**(kernel 饱和吞吐 per-SM 为 fork 47%,而 kernel 侧杠杆已全数证伪) | M1-M3 |
 
 每个里程碑完成标准:对拍 PASS + ABBA 留痕 + plan JSON 更新 + 本文档 §8
 看板更新。**任何一步慢于基线即回退并在 cuda-optimization-plan.md 记证伪。**
@@ -250,10 +250,10 @@ WSL / clang-cl / driver-API launcher)。FP8 精度门未过前不动工。
 | H1-H5 假设 | ✅ 全部裁决 | §5 决策表;H1/H2/H3 证伪,H4 上修,H5 否决 |
 | M1(C0+C1) | C0 证伪;**C1 已落地又于 2026-08-17 晚复审下架**(B2 后边际归零+搜索口径净负);下架后 plan=r1 仅 DUALFFN | 数据见优化文档「M3 追加」 |
 | 方案 A 拓扑组合 | 🔶 **部分复活(2026-08-18)**:饱和供数双流 +9.5%(serve=2+NOGRAPH+W≥4b,WSL 1112/Windows 1105);搜索语境维持证伪(t=48 灾难 123);PADBATCH 组合永久证伪(259) | 原 -2% 证伪系 DUALFFN 断裂慢 kernel;数据见优化文档「M4 前哨」 |
-| 方案 B1-B4 | B2 ✅ 落地(**2026-08-17 晚修复提交断裂后真正生效**,修复后 +26.5% eval/+28.0% 搜索,plan r1 已启用);B3 ❌ 证伪;B4 ❌ 门槛证伪;B1 待评估 | B2 门槛实测 0.1116ms > cuBLASLt;修复细节见优化文档 M3 追加节 |
+| 方案 B1-B4 | B1 ✅ 等价完成(现行已是单次 wide QKV packed GEMM，3→1 收益已吃到；只剩 CUTLASS 主循环替换，而同族 B1/B2 形状门槛慢 19-72%);B2 ✅ 落地(**2026-08-17 晚修复提交断裂后真正生效**,修复后 +26.5% eval/+28.0% 搜索,plan r1 已启用);B3 ❌ 证伪;B4 ❌ 门槛证伪 | B2 门槛实测 0.1116ms > cuBLASLt;修复细节见优化文档 M3 追加节 |
 | 方案 C tcgen05 | C0 证伪/C1 落地(M1);**C2 ❌ 硬件证伪(2026-08-17)** | ptxas+CUTLASS 4.7+PTX ISA 9.3 三源互证,见优化文档 M3-pre;FP8/sm_120f 工具链留档(D:/code/cutlass4,device ✅,MSVC host C2719 待解) |
 | 方案 D cuDNN | ❌ 搁置 | H5:InitialConv 1.6% < 5% |
-| 方案 E 储备 | E1 ✅ 已裁决(2026-08-17):精度门不过,FP8 封存(数据见优化文档 E1 节);E2/E3 未动;**E4 WSL ✅ 已验证**(搜索 +4.6%/eval +2.4%,scripts/wsl_bench.sh) | DUALFFN 修复后 per-SM 差距 ~14%(原估 20-26% 含断裂损失);确定杠杆:WSL 部署 + A-lite(剩余 ~7%) |
+| 方案 E 储备 | E1 ✅ 已裁决(2026-08-17):精度门不过,FP8 封存;E2 host staging/直接 pinned/输出零拷贝 ❌ ABBA 无收益(2026-08-19);E3 未动;**E4 WSL ✅ 已验证**(搜索 +4.6%/eval +2.4%,scripts/wsl_bench.sh) | DUALFFN 修复后 per-SM 差距 ~14%;确定杠杆仅剩 WSL 部署，简单 A-lite 已收口 |
 
 状态图例:⬜ 未开始 / 🔶 进行中 / ✅ 已落地 / ❌ 已证伪(须附 ABBA 数据)
 

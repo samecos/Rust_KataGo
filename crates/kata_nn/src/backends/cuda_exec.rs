@@ -391,7 +391,7 @@ impl CudaModel {
         }
         // split-K 状态：Some(beta) 表示上一个 GEMM 是 split-K partial，
         // 待下一个 RmsNorm 融合求和。KATAGO_CUDA_SPLITK=1 启用。
-        let splitk_on = crate::tactic_plan::tactic_var("KATAGO_CUDA_SPLITK").is_ok();
+        let splitk_on = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_SPLITK");
         let mut pending_splitk_beta: Option<f32> = None;
         let mut li = 0usize;
         while li < self.layers.len() {
@@ -1088,8 +1088,8 @@ fn hgemm(
 ) -> Result<(), String> {
     // tile 选择：N≤512 且 M 小 → t32(grid 是 t64 的 4 倍,解 N=384 的 starved);
     // M<1024 → t64;大 → v2(128)。
-    let use_t32 = crate::tactic_plan::tactic_var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
-    let use_t64n32 = crate::tactic_plan::tactic_var("KATAGO_CUDA_T64N32").is_ok() && m < 1024 && b.n <= 512;
+    let use_t32 = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T32") && m < 1024 && b.n <= 512;
+    let use_t64n32 = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T64N32") && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_kernel")?
     } else if use_t64n32 {
@@ -1147,7 +1147,7 @@ fn hgemm_f16(
             return Ok(());
         }
     }
-    let use_t32 = crate::tactic_plan::tactic_var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
+    let use_t32 = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T32") && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_f16out_kernel")?
     } else if m < 1024 {
@@ -1190,8 +1190,8 @@ fn hgemm_residual(
     c: &mut CudaSlice<f32>,
     m: usize,
 ) -> Result<(), String> {
-    let use_t32 = crate::tactic_plan::tactic_var("KATAGO_CUDA_T32").is_ok() && m < 1024 && b.n <= 512;
-    let use_t64n32 = crate::tactic_plan::tactic_var("KATAGO_CUDA_T64N32").is_ok() && m < 1024 && b.n <= 512;
+    let use_t32 = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T32") && m < 1024 && b.n <= 512;
+    let use_t64n32 = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T64N32") && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_kernel")?
     } else if use_t64n32 {

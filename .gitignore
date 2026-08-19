@@ -18,3 +18,6 @@ _probe/
 *.bin.gz
 *.txt.gz
 *.bin
+
+# 其他临时文件
+.VSCodeCounter/

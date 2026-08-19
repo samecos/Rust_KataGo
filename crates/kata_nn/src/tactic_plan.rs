@@ -92,6 +92,19 @@ pub fn tactic_var(key: &str) -> Result<String, std::env::VarError> {
     std::env::var(key)
 }
 
+/// Read a boolean tactic using its validated `0|1` value.
+///
+/// Checking only whether the variable exists makes an explicit `0` enable the
+/// tactic, which breaks plan-driven negative overrides.
+pub fn tactic_enabled(key: &str) -> bool {
+    let value = tactic_var(key).ok();
+    bool_value_enabled(value.as_deref())
+}
+
+fn bool_value_enabled(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 /// 当前已安装 plan 的 id（日志/诊断用）。
 pub fn installed_plan_id() -> Option<&'static str> {
     INSTALLED.get().map(|i| i.plan_id.as_str())
@@ -235,6 +248,13 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn boolean_tactic_requires_one() {
+        assert!(bool_value_enabled(Some("1")));
+        assert!(!bool_value_enabled(Some("0")));
+        assert!(!bool_value_enabled(None));
+    }
+
     fn device() -> DeviceFingerprint {
         DeviceFingerprint {
             gpu_name: "NVIDIA GeForce RTX 5070 Ti".into(),
@@ -317,12 +337,15 @@ mod tests {
     fn installs_idempotent_and_conflict_detection() {
         let dir = std::env::temp_dir().join("kata_tactic_plan_test_5");
         std::fs::create_dir_all(&dir).unwrap();
-        let body = plan_json(r#"{ "KATAGO_CUDA_FUSION": "all", "KATAGO_CUDA_CUBLASLT": "1" }"#);
+        let body = plan_json(
+            r#"{ "KATAGO_CUDA_FUSION": "all", "KATAGO_CUDA_CUBLASLT": "1", "KATAGO_CUDA_PADBATCH": "0" }"#,
+        );
         let p = write_plan(&dir, "ok.json", &body);
         load_and_install(&p, &device(), &"aa".repeat(32)).unwrap();
         // 同 plan 重装（多模型场景）幂等成功。
         load_and_install(&p, &device(), &"aa".repeat(32)).unwrap();
         assert_eq!(tactic_var("KATAGO_CUDA_FUSION").unwrap(), "all");
+        assert!(!tactic_enabled("KATAGO_CUDA_PADBATCH"));
         // plan_id 相同但覆盖不同 → 冲突拒绝。
         let p2 = write_plan(&dir, "conflict.json", &plan_json(r#"{ "KATAGO_CUDA_FUSION": "none" }"#));
         let err = load_and_install(&p2, &device(), &"aa".repeat(32)).unwrap_err();

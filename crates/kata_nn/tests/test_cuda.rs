@@ -216,7 +216,7 @@ fn cuda_graph_minimal_capture() {
     stream.memcpy_htod(&a_h, &mut a).expect("htod a");
     stream.memcpy_htod(&b_h, &mut b).expect("htod b");
 
-    use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
+    use cudarc::driver::sys::CUstreamCaptureMode;
     stream.synchronize().expect("presync");
     rt.device.synchronize().expect("dev presync");
     stream
@@ -233,8 +233,10 @@ fn cuda_graph_minimal_capture() {
             .launch(cfg)
     }
     .expect("launch");
-    let flags: CUgraphInstantiate_flags = unsafe { std::mem::transmute(0u32) };
-    let graph = stream.end_capture(flags).expect("end").expect("graph");
+    let graph = stream
+        .end_capture(kata_nn::backends::cuda::graph_instantiate_flags())
+        .expect("end")
+        .expect("graph");
     graph.upload().expect("upload");
     graph.launch().expect("graph launch");
     stream.synchronize().expect("sync");
@@ -264,7 +266,7 @@ fn cuda_graph_launch_sync_latency() {
     let mut a: cudarc::driver::CudaSlice<f32> = unsafe { stream.alloc(n) }.expect("a");
     let mut b: cudarc::driver::CudaSlice<f32> = unsafe { stream.alloc(n) }.expect("b");
     let mut out: cudarc::driver::CudaSlice<f32> = stream.alloc_zeros(n).expect("out");
-    use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
+    use cudarc::driver::sys::CUstreamCaptureMode;
     stream.synchronize().expect("presync");
     stream
         .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL)
@@ -280,8 +282,10 @@ fn cuda_graph_launch_sync_latency() {
             .launch(cfg)
     }
     .expect("launch");
-    let flags: CUgraphInstantiate_flags = unsafe { std::mem::transmute(0u32) };
-    let graph = stream.end_capture(flags).expect("end").expect("graph");
+    let graph = stream
+        .end_capture(kata_nn::backends::cuda::graph_instantiate_flags())
+        .expect("end")
+        .expect("graph");
     graph.upload().expect("upload");
     // 热身
     for _ in 0..10 {
@@ -628,8 +632,10 @@ fn cuda_graph_node_overhead() {
                 stream.launch_builder(&f).arg(&d_a).arg(&d_b).arg(&mut d_out).arg(&(n as i32)).launch(cfg)
             }.unwrap();
         }
-        let flags: cudarc::driver::sys::CUgraphInstantiate_flags = unsafe { std::mem::transmute(0u32) };
-        let graph = stream.end_capture(flags).unwrap().unwrap();
+        let graph = stream
+            .end_capture(kata_nn::backends::cuda::graph_instantiate_flags())
+            .unwrap()
+            .unwrap();
         graph.upload().unwrap();
         let cap_time = t1.elapsed();
         // 重放(先跑一次热身)

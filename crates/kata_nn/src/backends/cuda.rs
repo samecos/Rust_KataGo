@@ -18,6 +18,14 @@ mod imp {
     // 由 build.rs 生成的 PTX 表：`(target_id, compute_capability, [(kernel_name, ptx_bytes)])`。
     include!(concat!(env!("OUT_DIR"), "/cuda_kernels.rs"));
 
+    /// cudarc 0.19 models graph instantiate bitflags as an enum without a zero
+    /// variant. `transmute(0)` is undefined behavior and aborts debug builds.
+    /// Using node priority is equivalent to defaults when nodes have no explicit
+    /// priority attributes, while remaining a valid CUDA flag value.
+    pub fn graph_instantiate_flags() -> cudarc::driver::sys::CUgraphInstantiate_flags {
+        cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY
+    }
+
     /// 按设备 compute capability 选择编译入的最优 SM 目标。
     fn select_target(dev: &Arc<CudaContext>) -> Result<(&'static str, &'static [(&'static str, &'static [u8])]), String> {
         let major = dev
@@ -1081,14 +1089,14 @@ impl CudaRuntime {
 }
 
 #[cfg(feature = "cuda")]
-pub use imp::{f16_to_f32_bits, f32_to_f16_bits, CudaRuntime};
+pub use imp::{f16_to_f32_bits, f32_to_f16_bits, graph_instantiate_flags, CudaRuntime};
 
 // ---------------------------------------------------------------------------
 // Backend trait 对接：把 cuda_exec 的整图执行器接入 NN 求值器
 // ---------------------------------------------------------------------------
 #[cfg(feature = "cuda")]
 mod backend_impl {
-    use super::imp::CudaRuntime;
+    use super::imp::{graph_instantiate_flags, CudaRuntime};
     use crate::backend::{
         Backend, ComputeContext, ComputeHandle, Enabled, InputBuffers, LoadedModel, NNOutput,
         NNResultBuf, NeuralNetError,
@@ -1277,7 +1285,7 @@ mod backend_impl {
             let g = g.get_or_insert_with(|| CudaGraphState {
                 by_size: std::collections::HashMap::new(),
             });
-            let force_direct = crate::tactic_plan::tactic_var("KATAGO_CUDA_NOGRAPH").is_ok();
+            let force_direct = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_NOGRAPH");
             // per-size 缓存：新尺寸才创建（capture 期间全局互斥 + 设备清场）。
             // 已有尺寸直接复用，零重捕获；旧尺寸状态永久保留，在途批不失效。
             if !g.by_size.contains_key(&phys_batch) {
@@ -1357,10 +1365,8 @@ mod backend_impl {
                             h.model
                                 .apply(&h.rt, stream, &mut ws, &in_spatial, &in_global)
                                 .map_err(|e| NeuralNetError(format!("CUDA forward (capture) failed: {e}")))?;
-                            let flags: cudarc::driver::sys::CUgraphInstantiate_flags =
-                                unsafe { std::mem::transmute(0u32) };
                             stream
-                                .end_capture(flags)
+                                .end_capture(graph_instantiate_flags())
                                 .map_err(|e| NeuralNetError(format!("end_capture: {e}")))?
                                 .ok_or_else(|| NeuralNetError("capture produced no graph".to_string()))
                         })();
@@ -1368,9 +1374,7 @@ mod backend_impl {
                         match cap_result {
                             Ok(g) => Some(g),
                             Err(e) => {
-                                let flags: cudarc::driver::sys::CUgraphInstantiate_flags =
-                                    unsafe { std::mem::transmute(0u32) };
-                                let _ = stream.end_capture(flags);
+                                let _ = stream.end_capture(graph_instantiate_flags());
                                 eprintln!("WARNING: CUDA graph capture failed ({e}); falling back to direct launch path");
                                 None
                             }
@@ -1674,7 +1678,7 @@ mod backend_impl {
                 nn_y_len: c.nn_y_len,
                 max_batch_size,
                 inputs_use_nhwc,
-                pad_to_max: crate::tactic_plan::tactic_var("KATAGO_CUDA_PADBATCH").is_ok(),
+                pad_to_max: crate::tactic_plan::tactic_enabled("KATAGO_CUDA_PADBATCH"),
             }))
         }
 
@@ -1726,7 +1730,7 @@ mod backend_impl {
 
         fn supports_async_pipeline(&self) -> bool {
             // KATAGO_CUDA_NOPIPELINE=1：回退同步 serve 循环（ABBA 对照/调试）。
-            crate::tactic_plan::tactic_var("KATAGO_CUDA_NOPIPELINE").is_err()
+            !crate::tactic_plan::tactic_enabled("KATAGO_CUDA_NOPIPELINE")
         }
 
         fn submit_output(
