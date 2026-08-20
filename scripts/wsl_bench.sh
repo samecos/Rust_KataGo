@@ -2,12 +2,13 @@
 # WSL 下的构建 + fork 基线一致性基准(消除 Windows WDDM 桌面噪声)。
 # 用法(Windows 侧): wsl -d Ubuntu-24.04 -- bash -c "tr -d '\r' < /mnt/d/code/Rust_KataGo/scripts/wsl_bench.sh > /tmp/wb.sh && bash /tmp/wb.sh"
 set -e
-export CUDA_HOME=/usr/local/cuda
-export PATH="/root/.cargo/bin:/usr/local/cuda/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-export KATAGO_CUTLASS_ROOT=/root/cutlass
-export CARGO_TARGET_DIR=/root/rk-target
+export CUDA_HOME=/usr/local/cuda-13.3
+export PATH="/root/.cargo/bin:/usr/local/cuda-13.3/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export LD_LIBRARY_PATH="/usr/local/cuda-13.3/lib64:/usr/lib/wsl/lib"
+export KATAGO_CUTLASS_ROOT=/mnt/d/code/cutlass
+export CARGO_TARGET_DIR=/mnt/d/code/Rust_KataGo/target/cudarocmopt-wsl
 REPO=/mnt/d/code/Rust_KataGo
-BIN=/root/rk-target/release/katago-rs
+BIN=$CARGO_TARGET_DIR/release/katago-rs
 MODEL=/mnt/d/code/b11fix.onnx
 
 echo "=== env ==="
@@ -40,20 +41,20 @@ run_search() { # $1 = extra override
   fi
 }
 
-PLAN="$REPO/plans/best-tactic-plan.json"
+PLAN="$REPO/plans/best-tactic-plan-sm120-q64-wsl.json"
 
-echo "=== eval B16 ABAB(plan r1 vs no-plan)==="
+echo "=== eval B16 ABAB(q64 schema2 plan vs no-plan)==="
 for round in 1 2; do
   echo "--- round $r ---"
   echo -n "A no-plan : "; run_eval ""
-  echo -n "B plan r1 : "; run_eval "$PLAN"
+  echo -n "B q64 plan : "; run_eval "$PLAN"
 done
 
 echo "=== search t=32 cap16 ABAB ==="
 for round in 1 2; do
   echo "--- round $r ---"
   echo -n "A no-plan : "; run_search ""
-  echo -n "B plan r1 : "; run_search "$PLAN"
+  echo -n "B q64 plan : "; run_search "$PLAN"
 done
 
 echo "=== direct T(B)(注意:direct 模式不安装 plan——此曲线为默认 tactic)==="

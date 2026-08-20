@@ -2,9 +2,9 @@
 # 方案 A(双流拓扑)复测——DUALFFN 修复后 kernel 提速 ~25%,按 parity plan §4
 # 的"证伪结论需重审"条款重测;fork 可比配置 = serve=2 + NOGRAPH(fork 不用
 # CUDA Graph)。WSL(Ubuntu-24.04)下运行,配对方差 ±0.05%。
-BIN=/root/rk-target/release/katago-rs
+BIN=/mnt/d/code/Rust_KataGo/target/cudarocmopt-wsl/release/katago-rs
 MODEL=/mnt/d/code/b11fix.onnx
-PLAN=/mnt/d/code/Rust_KataGo/plans/best-tactic-plan.json
+PLAN=/mnt/d/code/Rust_KataGo/plans/best-tactic-plan-sm120-q64-wsl.json
 OV="nnBackend=cudabackend,cudaTacticPlan=$PLAN"
 
 r() { # $1=serve $2=workers

@@ -1,6 +1,6 @@
 # Rust_KataGo 使用与 GUI 接入说明
 
-> 2026-08-16。适用二进制：`target/release/katago-rs.exe`（`--features cuda`，release）。
+> 2026-08-19。适用二进制：`target/release/katago-rs.exe`（`--features cuda`，release）。
 > 模型：`D:/code/b11fix.onnx`。硬件：RTX 5070 Ti（SM120，70 SM）。
 
 ## 1. 优化配置（推荐起点）
@@ -13,10 +13,11 @@ cudaTacticPlan = D:/code/Rust_KataGo/plans/best-tactic-plan.json
 nnMaxBatchSize = 16
 ```
 
-- `cudaTacticPlan` 加载 2026-08-16 autotune 认证的 tactic plan（8 决策组
-  ABBA 全量裁决）。fail-closed：换 GPU/换模型/换机器时启动即报错，此时
-  重跑 `python scripts/autotune.py --threads both` 重新认证，或临时删掉
-  该行退回代码默认值（两者当前等价）。
+- `cudaTacticPlan` 加载 2026-08-19 schema-2 认证 plan（q64 attention + DualFFN，
+  Windows/WSL 各有独立 build fingerprint）。fail-closed：换 GPU/模型/机器、
+  重编 CUDA/CUTLASS 或跨平台复用时启动即报错；此时重跑
+  `python scripts/autotune.py --threads both` 重新认证，或临时删掉该行退回
+  代码默认 tactic（q128，性能不同）。
 - `nnMaxBatchSize=16`：实测 B16 之后每行成本转劣，线程再多也别放大。
 - 不带 `cudaTacticPlan` 也完全可用：所有 tactic 默认值就是认证结果。
 

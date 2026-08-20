@@ -12,7 +12,9 @@ struct FingerprintArgs {
 
 #[cfg(feature = "cuda")]
 pub fn cuda_fingerprint(args: &[String]) -> i32 {
-    let args = FingerprintArgs::parse_from(std::iter::once("cuda-fingerprint").chain(args.iter().map(|s| s.as_str())));
+    let args = FingerprintArgs::parse_from(
+        std::iter::once("cuda-fingerprint").chain(args.iter().map(|s| s.as_str())),
+    );
     let fp = match kata_nn::backends::cuda::current_device_fingerprint(None) {
         Ok(f) => f,
         Err(e) => {
@@ -26,6 +28,7 @@ pub fn cuda_fingerprint(args: &[String]) -> i32 {
         "compute_capability": fp.compute_capability,
         "sm_count": fp.sm_count,
         "l2_cache_bytes": fp.l2_cache_bytes,
+        "backend_build": kata_nn::backends::cuda::backend_build_fingerprint(),
     });
     if let Some(m) = &args.model {
         match kata_nn::tactic_plan::sha256_file(std::path::Path::new(m)) {

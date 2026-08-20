@@ -437,7 +437,7 @@ pub fn shape_fn(
             if x.len() != 4 || w.len() != 4 {
                 return Err("Conv 仅支持 NCHW".to_string());
             }
-            let pads = attrs.ints_of("pads").unwrap_or(&[]);
+            let pads = attrs.ints_of("pads").unwrap_or(&[0, 0, 0, 0]);
             let strides = attrs.ints_of("strides").unwrap_or(&[1, 1]);
             let dils = attrs.ints_of("dilations").unwrap_or(&[1, 1]);
             let (ph, pw) = (pads[0], pads[2]);
@@ -453,6 +453,12 @@ pub fn shape_fn(
                 return Err(format!("{op} 需要 1 个输入"));
             }
             one(shapes[0].to_vec())
+        }
+        "Pow" => {
+            if shapes.len() != 2 {
+                return Err("Pow 需要 2 个输入".to_string());
+            }
+            one(broadcast_shape(&shapes[0], &shapes[1])?)
         }
         "Add" | "Sub" | "Mul" | "Div" | "Equal" => {
             if shapes.len() != 2 {
@@ -490,6 +496,22 @@ pub fn shape_fn(
                 .get(&input_names[1])
                 .ok_or_else(|| format!("Reshape 的 shape 输入 '{}' 必须是常量", input_names[1]))?;
             let target: Vec<i64> = shape_t.i64_data().to_vec();
+            // ONNX Reshape uses 0 to copy the input dimension at the same index
+            // unless allowzero=1. KataGo's dumponnx emits this for board-to-
+            // sequence reshapes such as [B,1,19,19] -> [0,1,1,361].
+            let copy_zero = attrs.int_scalar("allowzero").unwrap_or(0) == 0;
+            let target_dim = |index: usize, value: i64| -> Result<SymDim, String> {
+                if value == 0 && copy_zero {
+                    shapes[0].get(index).copied().ok_or_else(|| {
+                        format!(
+                            "Reshape 目标中的 0 超出输入 rank: {:?} -> {:?}",
+                            shapes[0], target
+                        )
+                    })
+                } else {
+                    Ok(SymDim::k(value))
+                }
+            };
             let total = linear_product(&shapes[0]).map_err(|e| {
                 format!(
                     "Reshape(数据输入 '{}' 形状 {:?}, 目标 {target:?}): {e}",
@@ -498,7 +520,11 @@ pub fn shape_fn(
             })?;
             let n_infer = target.iter().filter(|&&d| d == -1).count();
             if n_infer == 0 {
-                let dims: Vec<SymDim> = target.iter().map(|&d| SymDim::k(d)).collect();
+                let dims: Vec<SymDim> = target
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &d)| target_dim(i, d))
+                    .collect::<Result<_, _>>()?;
                 let (ke, kc) = linear_product(&dims)?;
                 if ke != total.0 || kc != total.1 {
                     return Err(format!(
@@ -513,9 +539,10 @@ pub fn shape_fn(
             if n_infer == 1 {
                 let known: Vec<SymDim> = target
                     .iter()
-                    .filter(|&&d| d != -1)
-                    .map(|&d| SymDim::k(d))
-                    .collect();
+                    .enumerate()
+                    .filter(|&(_, &d)| d != -1)
+                    .map(|(i, &d)| target_dim(i, d))
+                    .collect::<Result<_, _>>()?;
                 let (ke, kc) = linear_product(&known)?;
                 if kc == 0 || total.1 % kc != 0 || total.0 < ke {
                     return Err(format!(
@@ -530,11 +557,11 @@ pub fn shape_fn(
                     SymDim::k(q)
                 };
                 let mut out = Vec::with_capacity(target.len());
-                for &d in &target {
+                for (i, &d) in target.iter().enumerate() {
                     if d == -1 {
                         out.push(infer);
                     } else {
-                        out.push(SymDim::k(d));
+                        out.push(target_dim(i, d)?);
                     }
                 }
                 return one(out);
@@ -548,8 +575,14 @@ pub fn shape_fn(
                         shapes[0], target
                     ));
                 }
-                let known: i64 = target.iter().filter(|&&d| d != -1).product();
-                if known == 0 || total.1 % known != 0 {
+                let known_dims: Vec<SymDim> = target
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &d)| d != -1)
+                    .map(|(i, &d)| target_dim(i, d))
+                    .collect::<Result<_, _>>()?;
+                let (known_e, known) = linear_product(&known_dims)?;
+                if known_e != 0 || known == 0 || total.1 % known != 0 {
                     return Err(format!(
                         "Reshape 无法推断 -1 维: {:?} -> {:?}",
                         shapes[0], target
@@ -558,7 +591,7 @@ pub fn shape_fn(
                 let infer = SymDim::k(total.1 / known);
                 let mut out = Vec::with_capacity(target.len());
                 let mut seen_batch = false;
-                for &d in &target {
+                for (i, &d) in target.iter().enumerate() {
                     if d == -1 {
                         if !seen_batch {
                             out.push(SymDim::batch());
@@ -567,7 +600,7 @@ pub fn shape_fn(
                             out.push(infer);
                         }
                     } else {
-                        out.push(SymDim::k(d));
+                        out.push(target_dim(i, d)?);
                     }
                 }
                 return one(out);
@@ -902,6 +935,13 @@ pub fn fold_op(
             Ok(Some(vec![t]))
         }
         "Sqrt" => Ok(Some(vec![elemwise(inputs[0], f32::sqrt)])),
+        "Pow" => {
+            let exponent = inputs
+                .get(1)
+                .and_then(|t| t.f32_scalar())
+                .ok_or_else(|| err_op(op, "仅支持标量 FLOAT exponent"))?;
+            Ok(Some(vec![elemwise(inputs[0], |v| v.powf(exponent))]))
+        }
         "Reciprocal" => Ok(Some(vec![elemwise(inputs[0], |v| 1.0 / v)])),
         "Sigmoid" => Ok(Some(vec![elemwise(inputs[0], |v| {
             let e = (-v).exp();

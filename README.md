@@ -91,9 +91,13 @@ plan 会校验 GPU 指纹、模型 SHA-256 和 tactic 组合；不匹配时故�
 python scripts/autotune.py --threads both
 ```
 
-仓库中的 [`configs/gtp_cuda.cfg`](configs/gtp_cuda.cfg) 和 `plans/best-tactic-plan.json` 是 RTX 5070 Ti 开发机的认证配置，前者包含该 checkout 的绝对 plan 路径。直接复用前先修改或删除 `cudaTacticPlan`。`scripts/autotune.py` 目前同样在文件顶部指定模型路径，运行前需要改为目标模型。
+仓库中的 [`configs/gtp_cuda.cfg`](configs/gtp_cuda.cfg) 和 `plans/best-tactic-plan.json` 是当前 Windows RTX 5070 Ti/b11fix 的 schema-2 认证配置（q64 attention + DualFFN），前者包含该 checkout 的绝对 plan 路径。WSL 使用对应的 `plans/best-tactic-plan-sm120-q64-wsl.json`；Windows/WSL 的 CUDA build fingerprint 不同，不能交叉复用。直接复用前先修改或删除 `cudaTacticPlan`。`scripts/autotune.py` 目前同样在文件顶部指定模型路径，运行前需要改为目标模型。
 
-不指定 `cudaTacticPlan` 时不会自动运行 autotune，而是使用代码内置的默认 tactic；这条路径仍可运行，但性能应在目标 GPU/模型上重新测量。
+不指定 `cudaTacticPlan` 时不会自动运行 autotune，而是使用代码内置的默认 tactic（当前 attention 默认仍为 q128）；生产 q64 必须使用与本机 build fingerprint 匹配的认证 plan。
+
+CUDA GTP 初始化默认会对 B1 和 `nnMaxBatchSize` 各执行一次真实 graph warmup，以消除
+首请求的 lazy graph 编译延迟。若需测量冷启动，可临时加入 `cudaDisableWarmup = true`；
+warmup 失败会在 server ready 前显式报错。
 
 ### TensorRT 后端（兜底）
 

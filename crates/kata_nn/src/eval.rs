@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use parking_lot::{Condvar, Mutex as AsyncMutex};
 
@@ -1455,6 +1456,99 @@ impl NnEvaluator {
         self.backend = Some(backend);
     }
 
+    /// Build the smallest valid inputs and execute each backend-selected lazy
+    /// physical batch once. CUDA uses this to create the B1 and max-batch graph
+    /// states before the server reports ready; other backends return no batches.
+    fn warmup_compute_handle(
+        &self,
+        backend: &dyn Backend,
+        handle: &mut dyn ComputeHandle,
+        input_buffers: &dyn InputBuffers,
+    ) -> Result<(), StringError> {
+        if self.disable_warmup || self.debug_skip_neural_net {
+            return Ok(());
+        }
+        if self.loaded_model.is_none() {
+            return Ok(());
+        }
+        // The CUDA executor is intentionally fixed to the production 19x19
+        // model. GTP constructs a temporary 2x2 evaluator before boardsize is
+        // known; never warm that placeholder handle.
+        if self.shared.nn_x_len != 19 || self.shared.nn_y_len != 19 {
+            return Ok(());
+        }
+        let batches = backend.warmup_batches(self.max_batch_size);
+        if batches.is_empty() {
+            return Ok(());
+        }
+        if std::env::var("KATAGO_CUDA_TEST_FORCE_WARMUP_FAIL").as_deref() == Ok("1") {
+            return Err(StringError::new(
+                "CUDA handle warmup forced to fail by test hook".to_string(),
+            ));
+        }
+
+        let board = Board::new(self.shared.nn_x_len, self.shared.nn_y_len);
+        let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+        let params = MiscNNInputParams::default();
+        let started = Instant::now();
+        let previous_warmup = backend.set_is_warmup(handle, true);
+        let result = (|| {
+            for batch in batches.iter().copied() {
+                let mut inputs = Vec::with_capacity(batch as usize);
+                for _ in 0..batch {
+                    let mut input = NNResultBuf::new();
+                    Self::fill_nn_input(
+                        &board,
+                        &history,
+                        P_BLACK,
+                        &params,
+                        self.shared.nn_x_len,
+                        self.shared.nn_y_len,
+                        self.inputs_use_nhwc,
+                        self.inputs_version,
+                        self.model_version,
+                        &mut input,
+                    );
+                    input.board_x_size_for_server = self.shared.nn_x_len;
+                    input.board_y_size_for_server = self.shared.nn_y_len;
+                    input.symmetry = 0;
+                    inputs.push(input);
+                }
+                let mut outputs = (0..batch)
+                    .map(|_| NNOutput::default())
+                    .collect::<Vec<_>>();
+                let mut input_refs = inputs.iter_mut().collect::<Vec<_>>();
+                let mut output_refs = outputs.iter_mut().collect::<Vec<_>>();
+                backend
+                    .get_output(
+                        handle,
+                        input_buffers,
+                        batch,
+                        &mut input_refs,
+                        &mut output_refs,
+                    )
+                    .map_err(|error| {
+                        StringError::new(format!(
+                            "CUDA handle warmup failed for batch {batch}: {error}"
+                        ))
+                    })?;
+            }
+            Ok(())
+        })();
+        backend.set_is_warmup(handle, previous_warmup);
+        result?;
+        self.logger.write(&format!(
+            "CUDA handle warmup batches={} completed in {:.1} ms",
+            batches
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
+        Ok(())
+    }
+
     /// Load the configured model file using the currently set backend.
     ///
     /// Mirrors part of the model-loading path in
@@ -1509,20 +1603,20 @@ impl NnEvaluator {
                 0,
             )
             .map_err(|e| StringError::new(format!("Could not create compute handle: {e}")))?;
-        let input_buffers = backend
+        let input_buffers = Arc::new(backend
             .create_input_buffers(
                 &*model,
                 self.max_batch_size,
                 self.shared.nn_x_len,
                 self.shared.nn_y_len,
             )
-            .map_err(|e| StringError::new(format!("Could not create input buffers: {e}")))?;
+            .map_err(|e| StringError::new(format!("Could not create input buffers: {e}")))?);
 
         self.compute_context = Some(compute_context);
         self.compute_handle = Some(compute_handle);
         // Store the input buffers in SharedState so server threads can use
         // them when processing batches.
-        *self.shared.input_buffers.lock().unwrap() = Some(Arc::new(input_buffers));
+        *self.shared.input_buffers.lock().unwrap() = Some(Arc::clone(&input_buffers));
         self.loaded_model = Some(model);
 
         // Also store a clone of the backend and one compute handle per
@@ -1541,7 +1635,7 @@ impl NnEvaluator {
                     .get(thread_idx)
                     .copied()
                     .unwrap_or(-1);
-                let h = backend
+                let mut h = backend
                     .create_compute_handle(
                         self.compute_context.as_deref().unwrap(),
                         self.loaded_model.as_deref().unwrap(),
@@ -1557,6 +1651,7 @@ impl NnEvaluator {
                             "Could not create server compute handle for thread {thread_idx}: {e}"
                         ))
                     })?;
+                self.warmup_compute_handle(&**backend, &mut *h, &**input_buffers)?;
                 handles.push(h);
             }
             *self.shared.compute_handles.lock().unwrap() = handles;

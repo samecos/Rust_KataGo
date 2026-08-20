@@ -1,8 +1,8 @@
 #!/bin/bash
 # 搜索语境高线程下双流能否翻正:t=48 serve=1 vs serve=2(NOGRAPH)。
-BIN=/root/rk-target/release/katago-rs
+BIN=/mnt/d/code/Rust_KataGo/target/cudarocmopt-wsl/release/katago-rs
 MODEL=/mnt/d/code/b11fix.onnx
-PLAN=/mnt/d/code/Rust_KataGo/plans/best-tactic-plan.json
+PLAN=/mnt/d/code/Rust_KataGo/plans/best-tactic-plan-sm120-q64-wsl.json
 OV="nnBackend=cudabackend,cudaTacticPlan=$PLAN"
 
 rs() { # $1=serve $2=threads

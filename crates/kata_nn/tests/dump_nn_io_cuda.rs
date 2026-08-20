@@ -61,7 +61,9 @@ fn write_f32(path: &std::path::Path, data: &[f32]) {
 fn cuda_multi_stream_concurrency() {
     use cudarc::driver::CudaStream;
     use std::sync::Arc;
-    let Some((rt, model)) = try_load() else { return };
+    let Some((rt, model)) = try_load() else {
+        return;
+    };
     let rt = Arc::new(rt);
     let model = Arc::new(model);
     let (spatial, global) = make_position(0);
@@ -144,7 +146,9 @@ fn cuda_multi_stream_concurrency() {
 /// 逐层 smoke：加载真实模型跑一个局面，检查输出形状/有限性/量级。
 #[test]
 fn cuda_model_smoke() {
-    let Some((rt, model)) = try_load() else { return };
+    let Some((rt, model)) = try_load() else {
+        return;
+    };
     eprintln!("CUDA 层数: {}", model.num_layers());
 
     // 与 dump 一致的确定性局面（pos 0：空盘）。
@@ -182,15 +186,20 @@ fn cuda_model_smoke() {
         .unwrap();
     assert!(max_idx < 361, "空盘 policy top-1 是 pass");
     let mean = out.policy[..361].iter().sum::<f32>() / 361.0;
-    assert!(*max_v > mean + 2.0, "空盘 policy 过于平坦: max={max_v:.3} mean={mean:.3}");
+    assert!(
+        *max_v > mean + 2.0,
+        "空盘 policy 过于平坦: max={max_v:.3} mean={mean:.3}"
+    );
     eprintln!("smoke OK: top-1 idx={max_idx} val={max_v:.3}");
 }
 
 #[test]
 fn dump_nn_io_cuda() {
-    let Some((rt, model)) = try_load() else { return };
-    let dump_dir = std::env::var("KATAGO_DUMP_DIR")
-        .unwrap_or_else(|_| "target/nn_io_dump_cuda".to_string());
+    let Some((rt, model)) = try_load() else {
+        return;
+    };
+    let dump_dir =
+        std::env::var("KATAGO_DUMP_DIR").unwrap_or_else(|_| "target/nn_io_dump_cuda".to_string());
     let num_positions: usize = std::env::var("KATAGO_DUMP_POSITIONS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -206,7 +215,10 @@ fn dump_nn_io_cuda() {
         write_f32(&dump_dir.join(format!("pos{i}_spatial.bin")), &spatial);
         write_f32(&dump_dir.join(format!("pos{i}_global.bin")), &global);
         // 通道 0（基策略）的 362 logits，与 TRT dump（optimism=0）口径一致。
-        write_f32(&dump_dir.join(format!("pos{i}_policy.bin")), &out.policy[..362]);
+        write_f32(
+            &dump_dir.join(format!("pos{i}_policy.bin")),
+            &out.policy[..362],
+        );
         write_f32(&dump_dir.join(format!("pos{i}_value.bin")), &out.value);
         write_f32(
             &dump_dir.join(format!("pos{i}_misc.bin")),
@@ -219,14 +231,24 @@ fn dump_nn_io_cuda() {
                 out.moremisc[1],
             ],
         );
-        write_f32(&dump_dir.join(format!("pos{i}_ownership.bin")), &out.ownership);
+        write_f32(
+            &dump_dir.join(format!("pos{i}_ownership.bin")),
+            &out.ownership,
+        );
     }
 
     let model = model_path();
-    let meta = format!(
-        "{{\"model\":\"{model}\",\"n\":{num_positions},\"spatial_elts\":{},\"global_elts\":19,\"policy_elts\":362,\"value_elts\":3,\"misc_elts\":6,\"ownership_elts\":361}}",
-        22 * 19 * 19
-    );
+    let meta = serde_json::to_string_pretty(&serde_json::json!({
+        "model": model,
+        "n": num_positions,
+        "spatial_elts": 22 * 19 * 19,
+        "global_elts": 19,
+        "policy_elts": 362,
+        "value_elts": 3,
+        "misc_elts": 6,
+        "ownership_elts": 361,
+    }))
+    .expect("serialize meta");
     std::fs::write(dump_dir.join("meta.json"), meta).expect("write meta");
     println!("dumped {num_positions} positions to {}", dump_dir.display());
 }
@@ -273,7 +295,12 @@ fn make_position(i: usize) -> (Vec<f32>, Vec<f32>) {
     (spatial, global)
 }
 
-fn run_one(rt: &CudaRuntime, model: &CudaModel, spatial: &[f32], global: &[f32]) -> CudaOutputsHost {
+fn run_one(
+    rt: &CudaRuntime,
+    model: &CudaModel,
+    spatial: &[f32],
+    global: &[f32],
+) -> CudaOutputsHost {
     use cudarc::driver::CudaSlice;
     let stream = rt.device.default_stream();
     run_one_stream(rt, model, &stream, spatial, global)
@@ -288,8 +315,8 @@ fn run_one_stream(
     global: &[f32],
 ) -> CudaOutputsHost {
     use cudarc::driver::CudaSlice;
-    let mut ws = kata_nn::backends::cuda_exec::CudaWorkspace::new(stream, model, 1)
-        .expect("workspace");
+    let mut ws =
+        kata_nn::backends::cuda_exec::CudaWorkspace::new(stream, model, 1).expect("workspace");
     let mut d_spatial: CudaSlice<f32> =
         unsafe { stream.alloc(spatial.len()) }.expect("alloc spatial");
     let mut d_global: CudaSlice<f32> = unsafe { stream.alloc(global.len()) }.expect("alloc global");

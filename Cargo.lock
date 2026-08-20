@@ -1078,6 +1078,7 @@ dependencies = [
  "kata_program",
  "kata_search",
  "log",
+ "serde",
  "serde_json",
  "tempfile",
 ]

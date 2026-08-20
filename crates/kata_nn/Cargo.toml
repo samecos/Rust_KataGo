@@ -31,10 +31,12 @@ cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-bui
 
 [build-dependencies]
 cc = "1"
+hex = { workspace = true }
 prost-build = "0.13"
 protoc-bin-vendored = "3"
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 kata_data = { path = "../kata_data" }

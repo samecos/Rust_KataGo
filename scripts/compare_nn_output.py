@@ -2,6 +2,7 @@
 """Compare Rust KataGo TRT backend outputs against ONNX Runtime FP32 reference.
 
 Usage: .venv/Scripts/python.exe scripts/compare_nn_output.py [dump_dir] [--workers N]
+       [--model path]  # override a WSL path recorded in meta.json on Windows
 Exit code 0 = all gates passed.
 """
 import argparse
@@ -71,11 +72,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dump_dir", nargs="?", default="target/nn_io_dump")
     ap.add_argument("--workers", type=int, default=0)
+    ap.add_argument(
+        "--model",
+        default=None,
+        help="override the model path recorded in dump meta.json (useful for WSL dumps)",
+    )
     args = ap.parse_args()
 
     dump_dir = args.dump_dir
     meta = json.load(open(os.path.join(dump_dir, "meta.json"), encoding="utf-8"))
-    model = meta["model"]
+    model = args.model or meta["model"]
     n = meta["n"]
 
     workers = args.workers or min(16, max(1, os.cpu_count() or 1))

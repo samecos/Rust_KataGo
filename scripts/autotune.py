@@ -66,6 +66,10 @@ DECISION_GROUPS = [
         "name": "attention",
         "candidates": [
             {},
+            # q64 is the certified production incumbent; explicitly measure
+            # q128 as the rollback challenger on every future autotune run.
+            {"KATAGO_CUDA_ATTN_TILE": "q128"},
+            {"KATAGO_CUDA_ATTN_TILE": "q64"},
             {"KATAGO_CUDA_ATTN": "v3"},
         ],
     },
@@ -190,6 +194,8 @@ def get_fingerprint() -> dict:
     if out.returncode != 0:
         sys.exit(f"cuda-fingerprint failed: {out.stdout}{out.stderr}")
     fp = json.loads(out.stdout)
+    if "backend_build" not in fp:
+        sys.exit("cuda-fingerprint output lacks backend_build; rebuild katago-rs with the CUDA feature")
     return fp
 
 
@@ -228,7 +234,13 @@ def main() -> int:
           f"sm={fp['sm_count']} l2={fp['l2_cache_bytes']}", flush=True)
     print(f"model sha256: {fp['model_sha256']}", flush=True)
 
-    incumbent: dict[str, str] = {}
+    # Start from the authenticated production plan.  This prevents a partial
+    # --groups run (or a future script edit) from silently dropping DualFFN or
+    # reverting q64 to an unmeasured empty configuration.
+    incumbent: dict[str, str] = {
+        "KATAGO_CUDA_DUALFFN": "1",
+        "KATAGO_CUDA_ATTN_TILE": "q64",
+    }
     history = {
         "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "threads": thread_list,
@@ -275,10 +287,11 @@ def main() -> int:
     )
     PLAN_OUT.parent.mkdir(parents=True, exist_ok=True)
     plan = {
-        "schema": 1,
+        "schema": 2,
         "kind": "cuda-tactic-plan",
         "plan_id": plan_id,
         "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "backend_build": fp["backend_build"],
         "target": {
             "architecture": fp.get("architecture", ""),
             "gpu_name": fp["gpu_name"],

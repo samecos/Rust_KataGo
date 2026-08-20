@@ -236,6 +236,12 @@ pub trait Backend: Send + Sync {
     /// the previous value.
     fn set_is_warmup(&self, handle: &mut dyn ComputeHandle, is_warmup: bool) -> bool;
 
+    /// Physical batch sizes to execute on a newly-created handle before it
+    /// serves requests. Backends without lazy per-shape state return empty.
+    fn warmup_batches(&self, _max_batch_size: i32) -> Vec<i32> {
+        Vec::new()
+    }
+
     /// Create input buffers for batched neural-net evaluation.
     fn create_input_buffers(
         &self,

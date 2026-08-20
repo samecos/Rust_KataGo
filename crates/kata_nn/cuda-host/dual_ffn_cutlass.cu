@@ -22,6 +22,7 @@
 #include <memory>
 #include <new>
 #include <unordered_map>
+#include <vector>
 
 #include "cutlass/cutlass.h"
 #include "cutlass/array.h"
@@ -89,11 +90,11 @@ public:
 };
 
 using ProjectionOutput = cutlass::epilogue::thread::LinearCombination<
-  Element, 8, Element, float, cutlass::epilogue::thread::ScaleType::Nothing>;
+  Element, 8, float, float, cutlass::epilogue::thread::ScaleType::Nothing>;
 using SwiGLU = ExactRoundSiLUMul<Element, 8, Element, float>;
 using DualGemm = cutlass::gemm::device::DualGemm<
   Element, Layout, Element, LayoutB,
-  LayoutB, Element, Layout, Element,
+  LayoutB, Element, Layout, float,
   cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
   cutlass::gemm::GemmShape<128, 64, 32>,
   cutlass::gemm::GemmShape<64, 32, 32>,
@@ -156,8 +157,7 @@ extern "C" int katago_dual_ffn_exec(
   uintptr_t stream
 ) {
   if (opaque == nullptr || input == nullptr || gateWeights == nullptr ||
-      upWeights == nullptr || output == nullptr || tokens <= 0 ||
-      tokens % 361 != 0)
+      upWeights == nullptr || output == nullptr || tokens <= 0)
     return 1;
   Handle* handle = static_cast<Handle*>(opaque);
   auto& slot = handle->byTokens[tokens];
@@ -170,6 +170,8 @@ extern "C" int katago_dual_ffn_exec(
     status = slot->op.can_implement(args);
     if (status != cutlass::Status::kSuccess)
       return statusCode(status);
+    if (DualGemm::get_workspace_size(args) != 0)
+      return 50;
     status = slot->op.initialize(args, nullptr, reinterpret_cast<cudaStream_t>(stream));
     if (status != cutlass::Status::kSuccess)
       return statusCode(status);
@@ -184,4 +186,74 @@ extern "C" int katago_dual_ffn_exec(
     return statusCode(status);
   cudaError_t cudaStatus = cudaPeekAtLastError();
   return cudaStatus == cudaSuccess ? 0 : 200 + static_cast<int>(cudaStatus);
+}
+
+// Capability probe for the exact production kernel. This deliberately runs a
+// real M=16,N=1152,K=384 DualGemm rather than a trivial CUDA kernel, so it
+// verifies CUTLASS initialization, dynamic shared-memory opt-in, launch, and
+// the exact SwiGLU epilogue. Zero inputs/weights must overwrite a nonzero
+// sentinel output with exactly zero.
+extern "C" int katago_dual_ffn_probe() {
+  int device = 0;
+  int major = 0;
+  if (cudaGetDevice(&device) != cudaSuccess)
+    return 301;
+  if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device) != cudaSuccess)
+    return 302;
+  if (major < 8)
+    return 303;
+
+  constexpr int M = 16;
+  constexpr size_t inputElts = static_cast<size_t>(M) * kChannels;
+  constexpr size_t weightElts = static_cast<size_t>(kFfn) * kChannels;
+  constexpr size_t outputElts = static_cast<size_t>(M) * kFfn;
+  constexpr size_t totalElts = inputElts + 2 * weightElts + outputElts;
+
+  half* buffer = nullptr;
+  if (cudaMalloc(&buffer, totalElts * sizeof(half)) != cudaSuccess)
+    return 304;
+  half* input = buffer;
+  half* gate = input + inputElts;
+  half* up = gate + weightElts;
+  half* output = up + weightElts;
+
+  int result = 0;
+  if (cudaMemset(buffer, 0, (inputElts + 2 * weightElts) * sizeof(half)) != cudaSuccess)
+    result = 305;
+  if (result == 0 && cudaMemset(output, 0xFF, outputElts * sizeof(half)) != cudaSuccess)
+    result = 306;
+
+  if (result == 0) {
+    void* handle = katago_dual_ffn_create();
+    if (handle == nullptr)
+      result = 307;
+    else {
+      const int execResult = katago_dual_ffn_exec(
+          handle, input, gate, up, output, M, reinterpret_cast<uintptr_t>(nullptr));
+      katago_dual_ffn_destroy(handle);
+      if (execResult != 0)
+        result = 400 + execResult;
+    }
+  }
+  if (result == 0 && cudaDeviceSynchronize() != cudaSuccess)
+    result = 308;
+
+  std::vector<half> hostOutput;
+  if (result == 0) {
+    hostOutput.resize(outputElts);
+    if (cudaMemcpy(hostOutput.data(), output, outputElts * sizeof(half), cudaMemcpyDeviceToHost) != cudaSuccess)
+      result = 309;
+  }
+  if (result == 0) {
+    for (half value : hostOutput) {
+      if (__half2float(value) != 0.0f) {
+        result = 310;
+        break;
+      }
+    }
+  }
+
+  (void)cudaFree(buffer);
+  (void)cudaGetLastError();
+  return result;
 }

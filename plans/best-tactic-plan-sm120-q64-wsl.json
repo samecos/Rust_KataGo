@@ -1,13 +1,13 @@
 {
   "schema": 2,
   "kind": "cuda-tactic-plan",
-  "plan_id": "sm120-nvidia-geforce-rtx-5070-ti-q64-windows-20260819-r1",
+  "plan_id": "sm120-nvidia-geforce-rtx-5070-ti-q64-wsl-20260819-r1",
   "generated_utc": "2026-08-19T00:00:00Z",
   "backend_build": {
-    "kernel_build_id": "sha256:a71cd75003e5f06325f38432d1e6f9f716955c275375c135126ebc67fb3aacf1",
+    "kernel_build_id": "sha256:577e5d952c440b28512c51ee7dac55cee047e3be7d8cba6dd82e188645a1a042",
     "cuda_compiler": "13.3.73",
     "cutlass_version": "3.9.2",
-    "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e",
+    "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e+dirty.921f2f82c217241bad23658efd85f2dcf44d4da57fde959c3b471426e1c77969",
     "compiled_sm": ["120", "89"],
     "capabilities": {
       "dual_ffn": true,

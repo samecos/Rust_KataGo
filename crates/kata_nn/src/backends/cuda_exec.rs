@@ -33,11 +33,13 @@
 //! 调试开关：`KATAGO_CUDA_DEBUG_LAYER=<i>` 逐层 dump、`KATAGO_CUDA_PROFILE=1`
 //! 逐层耗时、`KATAGO_CUDA_DUMP_INPUT=<dir>` 输入 dump（见 cuda.rs）。
 
-use crate::backends::cuda::{f16_to_f32_bits, f32_to_f16_bits, CudaRuntime};
+use crate::backends::cuda::{CudaRuntime, f16_to_f32_bits, f32_to_f16_bits};
 use crate::onnx_parser::{Layer, LayerGraph, Tensor, TensorData};
 use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// cudarc 0.19 的流方法定义在 `Arc<CudaStream>` 上（`self: &Arc<Self>`）。
 type StreamRef = Arc<CudaStream>;
@@ -188,9 +190,13 @@ pub struct CudaModel {
     dual_ffn: Option<DualFfnState>,
 }
 
-/// B2:CUTLASS DualGemm 的 FFI 句柄(内部状态非线程安全,经 Mutex 串行)。
+/// B2:CUTLASS DualGemm 的 FFI 句柄。CUTLASS 的内部状态绑定 CUDA
+/// stream，因此共享模型为每个活跃 stream 保留独立 host handle。
 #[cfg(katago_dualffn)]
-pub struct DualFfnState(std::sync::Mutex<*mut std::ffi::c_void>);
+pub struct DualFfnState {
+    handles: std::sync::Mutex<HashMap<usize, *mut std::ffi::c_void>>,
+    launch_reported: std::sync::atomic::AtomicBool,
+}
 #[cfg(katago_dualffn)]
 unsafe impl Send for DualFfnState {}
 #[cfg(katago_dualffn)]
@@ -198,9 +204,11 @@ unsafe impl Sync for DualFfnState {}
 #[cfg(katago_dualffn)]
 impl Drop for DualFfnState {
     fn drop(&mut self) {
-        let h = self.0.lock().unwrap();
-        if !h.is_null() {
-            unsafe { dual_ffn_ffi::katago_dual_ffn_destroy(*h) };
+        let handles = self.handles.lock().unwrap();
+        for &h in handles.values() {
+            if !h.is_null() {
+                unsafe { dual_ffn_ffi::katago_dual_ffn_destroy(h) };
+            }
         }
     }
 }
@@ -220,13 +228,81 @@ mod dual_ffn_ffi {
             tokens: i32,
             stream: usize,
         ) -> i32;
+        pub fn katago_dual_ffn_probe() -> i32;
     }
+}
+
+/// Execute the production CUTLASS DualGemm once per process. This is called
+/// only after a certified plan is installed and before serve handles spawn.
+#[cfg(katago_dualffn)]
+pub(crate) fn dual_ffn_probe_once() -> Result<(), String> {
+    if std::env::var("KATAGO_CUDA_TEST_FORCE_DUALFFN_PROBE_FAIL").as_deref() == Ok("1") {
+        return Err("DualFFN production capability probe forced to fail by test hook".to_string());
+    }
+    static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
+    PROBE
+        .get_or_init(|| {
+            let code = unsafe { dual_ffn_ffi::katago_dual_ffn_probe() };
+            if code == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "DualFFN production capability probe failed (code {code})"
+                ))
+            }
+        })
+        .clone()
+}
+
+#[cfg(not(katago_dualffn))]
+pub(crate) fn dual_ffn_probe_once() -> Result<(), String> {
+    Err("DualFFN requested but this backend was built without CUTLASS DualFFN".to_string())
 }
 
 /// B2 开关(KATAGO_CUDA_DUALFFN=1):dual FFN + SwiGLU epilogue 一步出
 /// act1152,省 act2304 往返与独立 swiglu kernel。
 pub(crate) fn dual_ffn_enabled() -> bool {
     crate::tactic_plan::tactic_var("KATAGO_CUDA_DUALFFN").as_deref() == Ok("1")
+        && DUAL_FFN_RUNTIME_STATE.load(Ordering::Relaxed) != DUAL_FFN_DISABLED
+}
+
+const DUAL_FFN_UNKNOWN: u8 = 0;
+const DUAL_FFN_READY: u8 = 1;
+const DUAL_FFN_DISABLED: u8 = 2;
+static DUAL_FFN_RUNTIME_STATE: AtomicU8 = AtomicU8::new(DUAL_FFN_UNKNOWN);
+static DUAL_FFN_UNFUSED_REPORT: OnceLock<()> = OnceLock::new();
+static ATTENTION_FA2_REPORT: OnceLock<()> = OnceLock::new();
+static ATTENTION_FA2_Q64_REPORT: OnceLock<()> = OnceLock::new();
+static ATTENTION_Q64_FALLBACK_REPORT: OnceLock<()> = OnceLock::new();
+static ATTENTION_V3_REPORT: OnceLock<()> = OnceLock::new();
+
+#[inline]
+fn q64_effective(requested: bool, compiled: bool) -> bool {
+    requested && compiled
+}
+
+#[cfg(test)]
+mod tactic_tests {
+    use super::q64_effective;
+
+    #[test]
+    fn q64_requires_compiled_capability() {
+        assert!(q64_effective(true, true));
+        assert!(!q64_effective(true, false));
+        assert!(!q64_effective(false, true));
+        assert!(!q64_effective(false, false));
+    }
+}
+
+pub(crate) fn set_dual_ffn_runtime_ready(ready: bool) {
+    DUAL_FFN_RUNTIME_STATE.store(
+        if ready {
+            DUAL_FFN_READY
+        } else {
+            DUAL_FFN_DISABLED
+        },
+        Ordering::Relaxed,
+    );
 }
 
 /// B2 执行入口:成功返回 true(act1152 已写好);tactic 关/不可用返回
@@ -258,10 +334,19 @@ fn dual_ffn_run(
     // packed [2304, 384] 行主序:前 1152 行 gate,后 1152 行 up(零拷贝切片)。
     let gate_ptr = w_ptr;
     let up_ptr = w_ptr + (1152 * 384 * 2) as u64;
-    let h = state.0.lock().unwrap();
+    let stream_key = stream.cu_stream() as usize;
+    let handle = {
+        let mut handles = state.handles.lock().unwrap();
+        *handles
+            .entry(stream_key)
+            .or_insert_with(|| unsafe { dual_ffn_ffi::katago_dual_ffn_create() })
+    };
+    if handle.is_null() {
+        return Err("dual_ffn handle creation failed".to_string());
+    }
     let r = unsafe {
         dual_ffn_ffi::katago_dual_ffn_exec(
-            *h,
+            handle,
             in_ptr as *const std::ffi::c_void,
             gate_ptr as *const std::ffi::c_void,
             up_ptr as *const std::ffi::c_void,
@@ -271,6 +356,15 @@ fn dual_ffn_run(
         )
     };
     if r == 0 {
+        if !state
+            .launch_reported
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            eprintln!(
+                "[cuda-tactic] name=dual_ffn launch=fused effective=1 tokens={} weights=2304x384",
+                m
+            );
+        }
         Ok(true)
     } else {
         Err(format!("dual_ffn exec failed: {r}"))
@@ -280,7 +374,11 @@ fn dual_ffn_run(
 impl CudaModel {
     /// 把层图全部权重上传设备（f32 → f16，GEMM K pad 16）。
     /// 在 `stream` 上执行（调用方负责与其他流间的同步）。
-    pub fn load(graph: &LayerGraph, rt: &CudaRuntime, stream: &Arc<CudaStream>) -> Result<Self, String> {
+    pub fn load(
+        graph: &LayerGraph,
+        rt: &CudaRuntime,
+        stream: &Arc<CudaStream>,
+    ) -> Result<Self, String> {
         let stream = stream.clone();
         let mut layers = Vec::with_capacity(graph.layers.len());
         for layer in &graph.layers {
@@ -295,11 +393,18 @@ impl CudaModel {
             head_dim: graph.head_dim,
             #[cfg(katago_dualffn)]
             dual_ffn: {
+                // Keep the load stream's handle as the readiness probe and
+                // lazily add handles for any later per-thread streams.
                 let h = unsafe { dual_ffn_ffi::katago_dual_ffn_create() };
                 if h.is_null() {
                     None
                 } else {
-                    Some(DualFfnState(std::sync::Mutex::new(h)))
+                    let mut handles = HashMap::new();
+                    handles.insert(stream.cu_stream() as usize, h);
+                    Some(DualFfnState {
+                        handles: std::sync::Mutex::new(handles),
+                        launch_reported: std::sync::atomic::AtomicBool::new(false),
+                    })
                 }
             },
         })
@@ -307,6 +412,16 @@ impl CudaModel {
 
     pub fn num_layers(&self) -> usize {
         self.layers.len()
+    }
+
+    #[cfg(katago_dualffn)]
+    pub(crate) fn dual_ffn_handle_ready(&self) -> bool {
+        self.dual_ffn.is_some()
+    }
+
+    #[cfg(not(katago_dualffn))]
+    pub(crate) fn dual_ffn_handle_ready(&self) -> bool {
+        false
     }
 
     /// 前向推理：`spatial` [B,22,19,19] NCHW f32、`global` [B,19] f32。
@@ -330,7 +445,11 @@ impl CudaModel {
         let d = self.head_dim;
         let trunk = self.trunk;
         let mid = self.mid;
-        assert_eq!((mid, h, d, s), (384, 12, 32, 361), "执行器仅支持 b11 19 路架构");
+        assert_eq!(
+            (mid, h, d, s),
+            (384, 12, 32, 361),
+            "执行器仅支持 b11 19 路架构"
+        );
         let stream = active_stream(rt);
 
         // --- 工作区（预分配复用；batch 由 ws 决定） ------------------------
@@ -421,20 +540,41 @@ impl CudaModel {
             let fuse_up = fusion_mode == "all" || fusion_mode == "up";
             let fuse_down = fusion_mode == "all" || fusion_mode == "down";
             let skip_next = match lb {
-                LayerBuf::InitialConv { w, gw, g, gate_scale, gate_bias } => {
+                LayerBuf::InitialConv {
+                    w,
+                    gw,
+                    g,
+                    gate_scale,
+                    gate_bias,
+                } => {
                     // raw 768 流（块残差加的是 gate 前的值）+ 异位门控 SiLU
                     // 融合：conv_bias_gate epilogue 同时写 f32 残差与 f16 gated。
                     hgemm(rt, cols, w, gemm_out, m)?;
                     conv_bias_gate(
-                        rt, gemm_out, global, gw, act768, gated768,
-                        &gate_scale.data, &gate_bias.data, batch, s, trunk, *g,
+                        rt,
+                        gemm_out,
+                        global,
+                        gw,
+                        act768,
+                        gated768,
+                        &gate_scale.data,
+                        &gate_bias.data,
+                        batch,
+                        s,
+                        trunk,
+                        *g,
                     )?;
                     false
                 }
                 // 1x1 线性。本模型两种：768→384 下投影（写 act384）与
                 // 384→768 上投影（残差加回 act768，IR 的块残差 Add）。
                 // match_linear 恒产 bias=None/act=None/residual=false。
-                LayerBuf::Linear { w, bias, act_silu, residual_add } => {
+                LayerBuf::Linear {
+                    w,
+                    bias,
+                    act_silu,
+                    residual_add,
+                } => {
                     assert!(
                         bias.is_none() && !act_silu && !residual_add,
                         "Linear 的 bias/act/residual 组合本执行器未实现（IR 恒为 None/false/false）"
@@ -453,8 +593,11 @@ impl CudaModel {
                         // 前瞻：后一层是 GateSilu(768) 时融合（up 残差 GEMM
                         // epilogue 同时写 f32 残差与 f16 gated 流）。
                         if fuse_up
-                            && let Some(LayerBuf::GateSilu { scale, bias, channels }) =
-                                self.layers.get(li + 1)
+                            && let Some(LayerBuf::GateSilu {
+                                scale,
+                                bias,
+                                channels,
+                            }) = self.layers.get(li + 1)
                         {
                             if *channels == trunk {
                                 // act384f16 已由块尾 Ffn down 的 gatesilu
@@ -488,20 +631,41 @@ impl CudaModel {
                         return Err(format!("Linear 形状不支持: k={} n={}", w.k, w.n));
                     }
                 }
-                LayerBuf::RmsNorm { scale, eps, channels } => {
+                LayerBuf::RmsNorm {
+                    scale,
+                    eps,
+                    channels,
+                } => {
                     assert_eq!(*channels, mid, "RMSNorm 仅出现在 384 维流");
                     if let Some(beta) = pending_splitk_beta.take() {
                         // split-K partial 求和 + 残差 + RMSNorm 融合
                         rms_norm_splitk(
-                            rt, act384, c_partial, &scale.data, normed, beta,
-                            *eps, *channels, m, 2,
+                            rt,
+                            act384,
+                            c_partial,
+                            &scale.data,
+                            normed,
+                            beta,
+                            *eps,
+                            *channels,
+                            m,
+                            2,
                         )?;
                     } else {
                         rms_norm_f32(rt, act384, normed, &scale.data, *eps, *channels, m)?;
                     }
                     false
                 }
-                LayerBuf::Attention { qkv, out, cos, sin, qk_scale, h: lh, d: ld, s: ls } => {
+                LayerBuf::Attention {
+                    qkv,
+                    out,
+                    cos,
+                    sin,
+                    qk_scale,
+                    h: lh,
+                    d: ld,
+                    s: ls,
+                } => {
                     let (lh, ld, ls) = (*lh, *ld, *ls);
                     assert_eq!((lh, ld, ls), (h, d, s), "attention 结构参数不符");
                     let sub_profile = profiling;
@@ -527,20 +691,83 @@ impl CudaModel {
                     // FA2：qkv GEMM f16 packed([M,1152] 复用 act1152)→
                     // attention 内部加载时做 RoPE（省独立 rope kernel）。
                     // v3 回退：f32 GEMM + 独立 rope 拆分 qbuf/kbuf/vbuf。
-                    let use_v3 = crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3");
+                    let use_v3 =
+                        crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3");
                     if use_v3 {
                         timed!("qkv", hgemm(rt, normed, qkv, gemm_out, m));
                         timed!(
                             "rope",
-                            qkv_rope(
-                                rt, gemm_out, cos, sin, qbuf, kbuf, vbuf, batch, lh, ls,
+                            qkv_rope(rt, gemm_out, cos, sin, qbuf, kbuf, vbuf, batch, lh, ls, ld,)
+                        );
+                        timed!(
+                            "attn",
+                            attention_row(
+                                rt,
+                                qbuf,
+                                kbuf,
+                                vbuf,
+                                normed,
+                                ls,
                                 ld,
+                                batch * lh,
+                                scale,
+                                lh
                             )
                         );
-                        timed!("attn", attention_row(rt, qbuf, kbuf, vbuf, normed, ls, ld, batch * lh, scale, lh));
+                        ATTENTION_V3_REPORT.get_or_init(|| {
+                            eprintln!(
+                                "[cuda-tactic] name=attention requested=v3 launch=v3 effective=v3"
+                            );
+                        });
                     } else {
+                        let q64_requested = crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN_TILE")
+                            .as_deref()
+                            == Ok("q64");
+                        let q64_compiled = crate::backends::cuda::attention_q64_available();
+                        let use_q64 = if q64_requested && !q64_compiled {
+                            // A diagnostic env override may be used with a
+                            // binary built without the optional q64 PTX. A
+                            // certified plan cannot reach this branch because
+                            // plan validation rejects the missing capability.
+                            ATTENTION_Q64_FALLBACK_REPORT.get_or_init(|| {
+                                eprintln!(
+                                    "WARNING: [cuda-tactic] name=attention requested=q64 compiled=0 effective=q128 fallback=q128"
+                                );
+                            });
+                            false
+                        } else {
+                            q64_effective(q64_requested, q64_compiled)
+                        };
                         timed!("qkv", hgemm_f16(rt, normed, qkv, act1152, m));
-                        timed!("attn", attention_fa2(rt, act1152, cos, sin, normed, ls, ld, batch * lh, scale, lh));
+                        timed!(
+                            "attn",
+                            attention_fa2(
+                                rt,
+                                act1152,
+                                cos,
+                                sin,
+                                normed,
+                                ls,
+                                ld,
+                                batch * lh,
+                                scale,
+                                lh,
+                                use_q64,
+                            )
+                        );
+                        if use_q64 {
+                            ATTENTION_FA2_Q64_REPORT.get_or_init(|| {
+                                eprintln!(
+                                    "[cuda-tactic] name=attention requested=fa2 launch=fa2 effective=fa2 tile=q64"
+                                );
+                            });
+                        } else {
+                            ATTENTION_FA2_REPORT.get_or_init(|| {
+                                eprintln!(
+                                    "[cuda-tactic] name=attention requested=fa2 launch=fa2 effective=fa2 tile=q128"
+                                );
+                            });
+                        }
                     }
                     // 输出投影 beta=1 残差进 act384。split-K partial（reduce
                     // 由后续 RmsNorm 融合）。KATAGO_CUDA_SPLITK=1 启用。
@@ -552,8 +779,14 @@ impl CudaModel {
                     }
                     if sub_profile {
                         let total: f32 = sub_times.iter().map(|t| t.1.max(0.0)).sum();
-                        eprintln!("[cuda-profile] attention l{li} total {total:.3} ms: {}",
-                            sub_times.iter().map(|(n, t)| format!("{n}={t:.3}")).collect::<Vec<_>>().join(" "));
+                        eprintln!(
+                            "[cuda-profile] attention l{li} total {total:.3} ms: {}",
+                            sub_times
+                                .iter()
+                                .map(|(n, t)| format!("{n}={t:.3}"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
                     }
                     false
                 }
@@ -572,6 +805,9 @@ impl CudaModel {
                     #[cfg(not(katago_dualffn))]
                     let dual_done = false;
                     if !dual_done {
+                        DUAL_FFN_UNFUSED_REPORT.get_or_init(|| {
+                            eprintln!("[cuda-tactic] name=dual_ffn launch=unfused effective=0");
+                        });
                         // dual FFN:gate|up 单 GEMM(N=2304,f16 直出)→ dual SwiGLU
                         hgemm_f16(rt, normed, dual, act2304, m)?;
                         swiglu_dual(rt, act2304, act1152, m, hidden)?;
@@ -579,15 +815,24 @@ impl CudaModel {
                     // 前瞻：后一层是 GateSilu(384) 时融合（down 残差 GEMM
                     // epilogue 直接算 silu(affine)，省独立 gate kernel）。
                     if fuse_down
-                        && let Some(LayerBuf::GateSilu { scale, bias, channels }) =
-                            self.layers.get(li + 1)
+                        && let Some(LayerBuf::GateSilu {
+                            scale,
+                            bias,
+                            channels,
+                        }) = self.layers.get(li + 1)
                     {
                         if *channels == mid {
                             // down 残差 + GateSilu384 融合，epilogue 同时写
                             // act384f16（供 up GEMM 直接读，省 f32_to_f16）
                             hgemm_residual_gatesilu_f32(
-                                rt, act1152, down, act384, act384f16,
-                                &scale.data, &bias.data, m,
+                                rt,
+                                act1152,
+                                down,
+                                act384,
+                                act384f16,
+                                &scale.data,
+                                &bias.data,
+                                m,
                             )?;
                             true
                         } else {
@@ -599,7 +844,11 @@ impl CudaModel {
                         false
                     }
                 }
-                LayerBuf::GateSilu { scale, bias, channels } => {
+                LayerBuf::GateSilu {
+                    scale,
+                    bias,
+                    channels,
+                } => {
                     // 384 维（块尾）与 768 维（块边界）两种门。
                     // 通常已被上一层的融合前瞻消费；独立路径保留兜底。
                     if *channels == mid {
@@ -619,11 +868,24 @@ impl CudaModel {
                     }
                     false
                 }
-                LayerBuf::TrunkFinal { mean, std, gamma, beta, channels } => {
+                LayerBuf::TrunkFinal {
+                    mean,
+                    std,
+                    gamma,
+                    beta,
+                    channels,
+                } => {
                     assert_eq!(*channels, trunk, "TrunkFinal 仅支持 768 维");
                     bn_silu(
-                        rt, act768, &mean.data, &std.data, &gamma.data, &beta.data,
-                        gated768, m * trunk, *channels,
+                        rt,
+                        act768,
+                        &mean.data,
+                        &std.data,
+                        &gamma.data,
+                        &beta.data,
+                        gated768,
+                        m * trunk,
+                        *channels,
                     )?;
                     false
                 }
@@ -673,8 +935,16 @@ impl CudaModel {
                     pool_mean3(rt, p192, pooled, batch, s, 192, *mask_scale, *mask_quad)?;
                     // linear2+silu+输出合并+bias 拆分（G4 单 kernel 写 3 目标）
                     value_fc_fused(
-                        rt, pooled, l2, &l2_bias.data, vall_w, &vall_b.data,
-                        out_value, out_misc, out_moremisc, batch,
+                        rt,
+                        pooled,
+                        l2,
+                        &l2_bias.data,
+                        vall_w,
+                        &vall_b.data,
+                        out_value,
+                        out_misc,
+                        out_moremisc,
+                        batch,
                     )?;
                     // ownership 1x1（×mask 恒 1，省略；v_act 为 f16 激活流）
                     hgemm(rt, p192, own_w, out_ownership, m)?;
@@ -694,97 +964,108 @@ impl CudaModel {
             // --- 临时调试钩子：KATAGO_CUDA_DEBUG_LAYER=<i> 时 dump 两路流 ---
             // capture 模式下跳过（host 回拷不可重放）。
             if !capturing() {
-            if let Ok(spec) = std::env::var("KATAGO_CUDA_DEBUG_LAYER") {
-                if spec == li.to_string() {
-                    let tag = match lb {
-                        LayerBuf::InitialConv { .. } => "InitialConv",
-                        LayerBuf::Linear { .. } => "Linear",
-                        LayerBuf::RmsNorm { .. } => "RmsNorm",
-                        LayerBuf::Attention { .. } => "Attention",
-                        LayerBuf::Ffn { .. } => "Ffn",
-                        LayerBuf::GateSilu { channels, .. } => {
-                            if *channels == 768 { "GateSilu768" } else { "GateSilu384" }
-                        }
-                        LayerBuf::TrunkFinal { .. } => "TrunkFinal",
-                        LayerBuf::PolicyHead { .. } => "PolicyHead",
-                        LayerBuf::ValueHead { .. } => "ValueHead",
-                    };
-                    eprintln!("DEBUG layer {li} = {tag}");
-                    let w = |name: &str, d: &CudaSlice<u16>| -> Result<(), String> {
-                        let mut host = vec![0u16; d.len()];
-                        stream
-                            .memcpy_dtoh(d, &mut host)
-                            .map_err(|e| e.to_string())?;
-                        let f32v: Vec<f32> = host.iter().map(|&b| f16_to_f32_bits(b)).collect();
-                        let bytes: Vec<u8> = f32v.iter().flat_map(|f| f.to_le_bytes()).collect();
-                        std::fs::write(format!("target/cuda_debug_l{li}_{name}.bin"), bytes)
-                            .map_err(|e| e.to_string())?;
-                        Ok(())
-                    };
-                    w("act384f16", act384f16)?;
-                    {
-                        // act384 为 f32 流，走 f32 导出
-                        let mut host = vec![0.0f32; act384.len()];
-                        stream
-                            .memcpy_dtoh(act384, &mut host)
-                            .map_err(|e| e.to_string())?;
-                        let bytes: Vec<u8> =
-                            host.iter().flat_map(|f| f.to_le_bytes()).collect();
-                        std::fs::write(format!("target/cuda_debug_l{li}_act384.bin"), bytes)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    {
-                        // act768 为 f32 流，走 f32 导出
-                        let mut host = vec![0.0f32; act768.len()];
-                        stream
-                            .memcpy_dtoh(act768, &mut host)
-                            .map_err(|e| e.to_string())?;
-                        let bytes: Vec<u8> =
-                            host.iter().flat_map(|f| f.to_le_bytes()).collect();
-                        std::fs::write(format!("target/cuda_debug_l{li}_act768.bin"), bytes)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    for (name, d) in [
-                        ("normed", &*normed),
-                        ("act1152", &*act1152),
-                        ("act2304", &*act2304),
-                        ("gated768", &*gated768),
-                    ] {
-                        let mut host = vec![0u16; d.len()];
-                        stream
-                            .memcpy_dtoh(d, &mut host)
-                            .map_err(|e| e.to_string())?;
-                        let f32v: Vec<f32> = host.iter().map(|&b| f16_to_f32_bits(b)).collect();
-                        let bytes: Vec<u8> = f32v.iter().flat_map(|f| f.to_le_bytes()).collect();
-                        std::fs::write(format!("target/cuda_debug_l{li}_{name}.bin"), bytes)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    // 全部 dump 的 memcpy 排队后统一同步（消除 host 读竞态）。
-                    let _ = stream.synchronize();
-                    if li == self.layers.len() - 1 {
-                        let wf = |name: &str, d: &CudaSlice<f32>| -> Result<(), String> {
-                            let mut host = vec![0.0f32; d.len()];
+                if let Ok(spec) = std::env::var("KATAGO_CUDA_DEBUG_LAYER") {
+                    if spec == li.to_string() {
+                        let tag = match lb {
+                            LayerBuf::InitialConv { .. } => "InitialConv",
+                            LayerBuf::Linear { .. } => "Linear",
+                            LayerBuf::RmsNorm { .. } => "RmsNorm",
+                            LayerBuf::Attention { .. } => "Attention",
+                            LayerBuf::Ffn { .. } => "Ffn",
+                            LayerBuf::GateSilu { channels, .. } => {
+                                if *channels == 768 {
+                                    "GateSilu768"
+                                } else {
+                                    "GateSilu384"
+                                }
+                            }
+                            LayerBuf::TrunkFinal { .. } => "TrunkFinal",
+                            LayerBuf::PolicyHead { .. } => "PolicyHead",
+                            LayerBuf::ValueHead { .. } => "ValueHead",
+                        };
+                        eprintln!("DEBUG layer {li} = {tag}");
+                        let w = |name: &str, d: &CudaSlice<u16>| -> Result<(), String> {
+                            let mut host = vec![0u16; d.len()];
                             stream
                                 .memcpy_dtoh(d, &mut host)
                                 .map_err(|e| e.to_string())?;
+                            let f32v: Vec<f32> = host.iter().map(|&b| f16_to_f32_bits(b)).collect();
                             let bytes: Vec<u8> =
-                                host.iter().flat_map(|f| f.to_le_bytes()).collect();
+                                f32v.iter().flat_map(|f| f.to_le_bytes()).collect();
                             std::fs::write(format!("target/cuda_debug_l{li}_{name}.bin"), bytes)
                                 .map_err(|e| e.to_string())?;
                             Ok(())
                         };
-                        wf("pooled", pooled)?;
-                        wf("vec_a", vec_a)?;
+                        w("act384f16", act384f16)?;
+                        {
+                            // act384 为 f32 流，走 f32 导出
+                            let mut host = vec![0.0f32; act384.len()];
+                            stream
+                                .memcpy_dtoh(act384, &mut host)
+                                .map_err(|e| e.to_string())?;
+                            let bytes: Vec<u8> =
+                                host.iter().flat_map(|f| f.to_le_bytes()).collect();
+                            std::fs::write(format!("target/cuda_debug_l{li}_act384.bin"), bytes)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        {
+                            // act768 为 f32 流，走 f32 导出
+                            let mut host = vec![0.0f32; act768.len()];
+                            stream
+                                .memcpy_dtoh(act768, &mut host)
+                                .map_err(|e| e.to_string())?;
+                            let bytes: Vec<u8> =
+                                host.iter().flat_map(|f| f.to_le_bytes()).collect();
+                            std::fs::write(format!("target/cuda_debug_l{li}_act768.bin"), bytes)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        for (name, d) in [
+                            ("normed", &*normed),
+                            ("act1152", &*act1152),
+                            ("act2304", &*act2304),
+                            ("gated768", &*gated768),
+                        ] {
+                            let mut host = vec![0u16; d.len()];
+                            stream
+                                .memcpy_dtoh(d, &mut host)
+                                .map_err(|e| e.to_string())?;
+                            let f32v: Vec<f32> = host.iter().map(|&b| f16_to_f32_bits(b)).collect();
+                            let bytes: Vec<u8> =
+                                f32v.iter().flat_map(|f| f.to_le_bytes()).collect();
+                            std::fs::write(format!("target/cuda_debug_l{li}_{name}.bin"), bytes)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        // 全部 dump 的 memcpy 排队后统一同步（消除 host 读竞态）。
+                        let _ = stream.synchronize();
+                        if li == self.layers.len() - 1 {
+                            let wf = |name: &str, d: &CudaSlice<f32>| -> Result<(), String> {
+                                let mut host = vec![0.0f32; d.len()];
+                                stream
+                                    .memcpy_dtoh(d, &mut host)
+                                    .map_err(|e| e.to_string())?;
+                                let bytes: Vec<u8> =
+                                    host.iter().flat_map(|f| f.to_le_bytes()).collect();
+                                std::fs::write(
+                                    format!("target/cuda_debug_l{li}_{name}.bin"),
+                                    bytes,
+                                )
+                                .map_err(|e| e.to_string())?;
+                                Ok(())
+                            };
+                            wf("pooled", pooled)?;
+                            wf("vec_a", vec_a)?;
+                        }
                     }
                 }
-            }
             } // !capturing
         }
 
         if profiling {
             let total: f32 = layer_times.iter().map(|t| t.2.max(0.0)).sum();
-            eprintln!("[cuda-profile] total {total:.3} ms across {} kernels:",
-                layer_times.len());
+            eprintln!(
+                "[cuda-profile] total {total:.3} ms across {} kernels:",
+                layer_times.len()
+            );
             for (li, tag, ms) in &layer_times {
                 eprintln!("  {li:3} {tag:12} {ms:9.3} ms");
             }
@@ -889,13 +1170,7 @@ fn upload_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
             channels: l.channels,
         },
         Layer::PolicyHead(l) => LayerBuf::PolicyHead {
-            conv1pg: upload_weight_concat2(
-                stream,
-                &l.conv1p_weight,
-                &l.conv1g_weight,
-                96,
-                768,
-            )?,
+            conv1pg: upload_weight_concat2(stream, &l.conv1p_weight, &l.conv1g_weight, 96, 768)?,
             g_bias: upload_param(stream, &l.g_bias, 96)?,
             g_matmul: upload_weight(stream, &l.g_matmul, 96, 288)?,
             pass1: upload_weight(stream, &l.pass_matmul1, 96, 288)?,
@@ -919,12 +1194,7 @@ fn upload_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
                 &[3, 10, 8],
                 192,
             )?,
-            vall_b: upload_param_concat3(
-                stream,
-                &l.value_bias,
-                &l.misc_bias,
-                &l.moremisc_bias,
-            )?,
+            vall_b: upload_param_concat3(stream, &l.value_bias, &l.misc_bias, &l.moremisc_bias)?,
             own_w: upload_weight(stream, &l.ownership_conv, 1, 192)?,
             mask_scale: l.mask_scale,
             mask_quad: l.mask_quad,
@@ -953,7 +1223,12 @@ fn upload_weight(stream: &StreamRef, t: &Tensor, n: usize, k: usize) -> Result<W
     stream
         .memcpy_htod(host.as_slice(), &mut dev)
         .map_err(|e| e.to_string())?;
-    Ok(WeightBuf { data: dev, n, k, kp })
+    Ok(WeightBuf {
+        data: dev,
+        n,
+        k,
+        kp,
+    })
 }
 
 /// 两个权重行拼接上传：`[t1; t2]` → `[2*n_each, k]` f16（dual FFN 用）。
@@ -978,11 +1253,17 @@ fn upload_weight_concat2(
             host[(n_each + i) * kp + j] = f32_to_f16_bits(d2[i * k + j]);
         }
     }
-    let mut dev: CudaSlice<u16> = unsafe { stream.alloc(2 * n_each * kp) }.map_err(|e| e.to_string())?;
+    let mut dev: CudaSlice<u16> =
+        unsafe { stream.alloc(2 * n_each * kp) }.map_err(|e| e.to_string())?;
     stream
         .memcpy_htod(host.as_slice(), &mut dev)
         .map_err(|e| e.to_string())?;
-    Ok(WeightBuf { data: dev, n: 2 * n_each, k, kp })
+    Ok(WeightBuf {
+        data: dev,
+        n: 2 * n_each,
+        k,
+        kp,
+    })
 }
 
 /// 三个权重行拼接上传（G4 ValueHead 输出合并）：[t1; t2; t3] → [Σn, k]。
@@ -1012,11 +1293,17 @@ fn upload_weight_concat3(
             }
         }
     }
-    let mut dev: CudaSlice<u16> = unsafe { stream.alloc(total_n * kp) }.map_err(|e| e.to_string())?;
+    let mut dev: CudaSlice<u16> =
+        unsafe { stream.alloc(total_n * kp) }.map_err(|e| e.to_string())?;
     stream
         .memcpy_htod(host.as_slice(), &mut dev)
         .map_err(|e| e.to_string())?;
-    Ok(WeightBuf { data: dev, n: total_n, k, kp })
+    Ok(WeightBuf {
+        data: dev,
+        n: total_n,
+        k,
+        kp,
+    })
 }
 
 /// 三个 f32 参数向量拼接上传。
@@ -1035,8 +1322,13 @@ fn upload_param_concat3(
     host.extend_from_slice(d2);
     host.extend_from_slice(d3);
     let mut dev: CudaSlice<f32> = unsafe { stream.alloc(host.len()) }.map_err(|e| e.to_string())?;
-    stream.memcpy_htod(host.as_slice(), &mut dev).map_err(|e| e.to_string())?;
-    Ok(ParamBuf { data: dev, len: host.len() })
+    stream
+        .memcpy_htod(host.as_slice(), &mut dev)
+        .map_err(|e| e.to_string())?;
+    Ok(ParamBuf {
+        data: dev,
+        len: host.len(),
+    })
 }
 
 fn upload_param(stream: &StreamRef, t: &Tensor, len: usize) -> Result<ParamBuf, String> {
@@ -1046,7 +1338,9 @@ fn upload_param(stream: &StreamRef, t: &Tensor, len: usize) -> Result<ParamBuf, 
     };
     assert_eq!(data.len(), len, "参数形状与 IR 声明不符: {:?}", t.dims);
     let mut dev: CudaSlice<f32> = unsafe { stream.alloc(len) }.map_err(|e| e.to_string())?;
-    stream.memcpy_htod(data, &mut dev).map_err(|e| e.to_string())?;
+    stream
+        .memcpy_htod(data, &mut dev)
+        .map_err(|e| e.to_string())?;
     Ok(ParamBuf { data: dev, len })
 }
 
@@ -1060,7 +1354,9 @@ fn upload_f32(
     assert_eq!(data.len(), rows * stride, "f32 上传尺寸不符");
     let mut dev: CudaSlice<f32> =
         unsafe { stream.alloc(rows * stride) }.map_err(|e| e.to_string())?;
-    stream.memcpy_htod(data, &mut dev).map_err(|e| e.to_string())?;
+    stream
+        .memcpy_htod(data, &mut dev)
+        .map_err(|e| e.to_string())?;
     Ok(dev)
 }
 
@@ -1089,7 +1385,8 @@ fn hgemm(
     // tile 选择：N≤512 且 M 小 → t32(grid 是 t64 的 4 倍,解 N=384 的 starved);
     // M<1024 → t64;大 → v2(128)。
     let use_t32 = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T32") && m < 1024 && b.n <= 512;
-    let use_t64n32 = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T64N32") && m < 1024 && b.n <= 512;
+    let use_t64n32 =
+        crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T64N32") && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_kernel")?
     } else if use_t64n32 {
@@ -1106,7 +1403,15 @@ fn hgemm(
             return Ok(());
         }
     }
-    let (tile_m, tile_n, kname) = if use_t32 { (32usize, 32usize, "hgemm_t32") } else if use_t64n32 { (64usize, 32usize, "hgemm_t64n32") } else if m < 1024 { (64usize, 64usize, "hgemm_t64") } else { (128usize, 128usize, "hgemm_v2") };
+    let (tile_m, tile_n, kname) = if use_t32 {
+        (32usize, 32usize, "hgemm_t32")
+    } else if use_t64n32 {
+        (64usize, 32usize, "hgemm_t64n32")
+    } else if m < 1024 {
+        (64usize, 64usize, "hgemm_t64")
+    } else {
+        (128usize, 128usize, "hgemm_v2")
+    };
     let grid = (m.div_ceil(tile_m) as u32, b.n.div_ceil(tile_n) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
@@ -1156,7 +1461,13 @@ fn hgemm_f16(
         rt.get_func("hgemm_v2_f16out_kernel")?
     };
     let stream = active_stream(rt);
-    let (tile, kname) = if use_t32 { (32usize, "hgemm_t32_f16out") } else if m < 1024 { (64usize, "hgemm_t64_f16out") } else { (128usize, "hgemm_v2_f16out") };
+    let (tile, kname) = if use_t32 {
+        (32usize, "hgemm_t32_f16out")
+    } else if m < 1024 {
+        (64usize, "hgemm_t64_f16out")
+    } else {
+        (128usize, "hgemm_v2_f16out")
+    };
     let grid = (m.div_ceil(tile) as u32, b.n.div_ceil(tile) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
@@ -1191,7 +1502,8 @@ fn hgemm_residual(
     m: usize,
 ) -> Result<(), String> {
     let use_t32 = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T32") && m < 1024 && b.n <= 512;
-    let use_t64n32 = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T64N32") && m < 1024 && b.n <= 512;
+    let use_t64n32 =
+        crate::tactic_plan::tactic_enabled("KATAGO_CUDA_T64N32") && m < 1024 && b.n <= 512;
     let f = if use_t32 {
         rt.get_func("hgemm_t32_kernel")?
     } else if use_t64n32 {
@@ -1208,7 +1520,15 @@ fn hgemm_residual(
             return Ok(());
         }
     }
-    let (tile_m, tile_n, kname) = if use_t32 { (32usize, 32usize, "hgemm_t32") } else if use_t64n32 { (64usize, 32usize, "hgemm_t64n32") } else if m < 1024 { (64usize, 64usize, "hgemm_t64") } else { (128usize, 128usize, "hgemm_v2") };
+    let (tile_m, tile_n, kname) = if use_t32 {
+        (32usize, 32usize, "hgemm_t32")
+    } else if use_t64n32 {
+        (64usize, 32usize, "hgemm_t64n32")
+    } else if m < 1024 {
+        (64usize, 64usize, "hgemm_t64")
+    } else {
+        (128usize, 128usize, "hgemm_v2")
+    };
     let grid = (m.div_ceil(tile_m) as u32, b.n.div_ceil(tile_n) as u32, 1u32);
     let cfg = LaunchConfig {
         grid_dim: grid,
@@ -1707,7 +2027,6 @@ fn f32_bias_add_split(
     Ok(())
 }
 
-
 fn f32_to_f16(
     rt: &CudaRuntime,
     x: &CudaSlice<f32>,
@@ -1975,7 +2294,10 @@ fn attention_row(
     heads: usize,
 ) -> Result<(), String> {
     assert!(s <= 512, "attention_row 要求 S <= 512");
-    assert_eq!(d, 32, "attention 要求 D=32（smem/打包布局按 D=32 编译期定）");
+    assert_eq!(
+        d, 32,
+        "attention 要求 D=32（smem/打包布局按 D=32 编译期定）"
+    );
     // 默认 FA2（tensor core QK + 标量 PV，对拍已验证）；
     // KATAGO_CUDA_ATTN=v3 回退旧 kernel（数值对照兜底）。
     let use_v3 = crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3");
@@ -2031,14 +2353,23 @@ fn attention_fa2(
     bh: usize,
     scale: f32,
     heads: usize,
+    use_q64: bool,
 ) -> Result<(), String> {
     assert!(s <= 512, "attention_fa2 要求 S <= 512");
     assert_eq!(d, 32, "attention_fa2 要求 D=32");
-    let f = rt.get_func("attention_fa2_kernel")?;
+    let f = rt.get_func(if use_q64 {
+        "attention_fa2_q64_kernel"
+    } else {
+        "attention_fa2_kernel"
+    })?;
     let stream = active_stream(rt);
     let cfg = LaunchConfig {
-        grid_dim: (s.div_ceil(128) as u32, bh as u32, 1),
-        block_dim: (256, 1, 1),
+        grid_dim: (
+            s.div_ceil(if use_q64 { 64 } else { 128 }) as u32,
+            bh as u32,
+            1,
+        ),
+        block_dim: (if use_q64 { 128 } else { 256 }, 1, 1),
         shared_mem_bytes: 0,
     };
     unsafe {

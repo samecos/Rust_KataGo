@@ -1,8 +1,8 @@
 #!/bin/bash
 # 双流复测 round 2:稳定性复跑 + 扩展探顶(W96/128,serve=3)+ 归因对照。
-BIN=/root/rk-target/release/katago-rs
+BIN=/mnt/d/code/Rust_KataGo/target/cudarocmopt-wsl/release/katago-rs
 MODEL=/mnt/d/code/b11fix.onnx
-PLAN=/mnt/d/code/Rust_KataGo/plans/best-tactic-plan.json
+PLAN=/mnt/d/code/Rust_KataGo/plans/best-tactic-plan-sm120-q64-wsl.json
 OV="nnBackend=cudabackend,cudaTacticPlan=$PLAN"
 
 r() { # $1=serve $2=workers

@@ -1,8 +1,8 @@
 #!/bin/bash
 # RELAXED capture 模式验证:serve=2 能否带 graph(双流+图叠加)。
-BIN=/root/rk-target/release/katago-rs
+BIN=/mnt/d/code/Rust_KataGo/target/cudarocmopt-wsl/release/katago-rs
 MODEL=/mnt/d/code/b11fix.onnx
-PLAN=/mnt/d/code/Rust_KataGo/plans/best-tactic-plan.json
+PLAN=/mnt/d/code/Rust_KataGo/plans/best-tactic-plan-sm120-q64-wsl.json
 OV="nnBackend=cudabackend,cudaTacticPlan=$PLAN"
 
 r() { # $1=serve $2=workers

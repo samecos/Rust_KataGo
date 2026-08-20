@@ -12,6 +12,11 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+struct CutlassBuildInfo {
+    version: String,
+    commit: String,
+}
+
 fn main() {
     // Register the custom cfg so that Rust doesn't warn about it.
     println!("cargo::rustc-check-cfg=cfg(trt_shim_available)");
@@ -29,8 +34,9 @@ fn main() {
 
     let is_cuda = env::var("CARGO_FEATURE_CUDA").is_ok();
     if is_cuda {
-        compile_cuda_kernels();
-        compile_dual_ffn();
+        let (compiled_sms, attention_q64) = compile_cuda_kernels();
+        let cutlass = compile_dual_ffn();
+        emit_cuda_build_info(cutlass.as_ref(), &compiled_sms, attention_q64);
     }
 }
 
@@ -39,11 +45,11 @@ fn main() {
 /// nvcc -c 编成对象文件再打进静态库链接。CUTLASS 根查找顺序:
 /// 环境变量 KATAGO_CUTLASS_ROOT → 仓库 third_party/cutlass → D:/code/cutlass。
 /// 找不到或编译失败:跳过(Rust 侧无 katago_dualffn cfg,tactic 回退现有路径)。
-fn compile_dual_ffn() {
+fn compile_dual_ffn() -> Option<CutlassBuildInfo> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let src = manifest_dir.join("cuda-host").join("dual_ffn_cutlass.cu");
     if !src.exists() {
-        return;
+        return None;
     }
     let cutlass_root = env::var("KATAGO_CUTLASS_ROOT")
         .map(PathBuf::from)
@@ -58,25 +64,32 @@ fn compile_dual_ffn() {
         });
     let Some(cutlass_root) = cutlass_root else {
         println!("cargo:warning=CUTLASS not found (set KATAGO_CUTLASS_ROOT) — dual_ffn skipped");
-        return;
+        return None;
     };
     if !cutlass_root.join("include/cutlass/cutlass.h").exists()
-        || !cutlass_root.join("examples/45_dual_gemm/device/dual_gemm.h").exists()
+        || !cutlass_root
+            .join("examples/45_dual_gemm/device/dual_gemm.h")
+            .exists()
     {
         println!(
             "cargo:warning=CUTLASS root {} lacks headers — dual_ffn skipped",
             cutlass_root.display()
         );
-        return;
+        return None;
     }
     let Some(nvcc) = find_nvcc() else {
         println!("cargo:warning=nvcc not found — dual_ffn skipped");
-        return;
+        return None;
     };
     let Some((cuda_root, is_windows)) = find_cuda_root() else {
         println!("cargo:warning=CUDA root not found — dual_ffn skipped");
-        return;
+        return None;
     };
+
+    let version_path = cutlass_root.join("include/cutlass/version.h");
+    let cutlass_version =
+        parse_cutlass_version(&version_path).unwrap_or_else(|| "unknown".to_string());
+    let cutlass_commit = git_source_id(&cutlass_root).unwrap_or_else(|| "unknown".to_string());
 
     // gencode 取自 configs/sm-targets.json(与 PTX 路径同表)。
     let targets_json = manifest_dir.join("../../configs/sm-targets.json");
@@ -91,7 +104,12 @@ fn compile_dual_ffn() {
     let caps: Vec<String> = std::fs::read_to_string(&targets_json)
         .ok()
         .and_then(|t| serde_json::from_str::<SmTargets>(&t).ok())
-        .map(|t| t.targets.into_iter().map(|x| x.compute_capability).collect())
+        .map(|t| {
+            t.targets
+                .into_iter()
+                .map(|x| x.compute_capability)
+                .collect()
+        })
         .unwrap_or_else(|| vec!["12.0".to_string()]);
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -128,6 +146,11 @@ fn compile_dual_ffn() {
             .arg("/Zc:preprocessor /Zc:__cplusplus /EHsc /bigobj /std:c++17");
     }
     println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-changed={}", version_path.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        cutlass_root.join("examples/45_dual_gemm").display()
+    );
     println!("cargo:rerun-if-env-changed=KATAGO_CUTLASS_ROOT");
     println!("cargo:rerun-if-env-changed=KATAGO_ALLOW_BROKEN_CUDA_HOST");
     match cmd.status() {
@@ -140,8 +163,10 @@ fn compile_dual_ffn() {
             // 显式逃生门:KATAGO_ALLOW_BROKEN_CUDA_HOST=1(无 CUTLASS 环境
             // 下的降级开发场景仍可构建——那种场景在上面 root 检查已跳过)。
             if env::var("KATAGO_ALLOW_BROKEN_CUDA_HOST").as_deref() == Ok("1") {
-                println!("cargo:warning=nvcc -c failed for dual_ffn_cutlass: {other:?} — skipped (KATAGO_ALLOW_BROKEN_CUDA_HOST=1)");
-                return;
+                println!(
+                    "cargo:warning=nvcc -c failed for dual_ffn_cutlass: {other:?} — skipped (KATAGO_ALLOW_BROKEN_CUDA_HOST=1)"
+                );
+                return None;
             }
             panic!(
                 "nvcc -c failed for dual_ffn_cutlass (CUTLASS root {}): {other:?} — \
@@ -172,8 +197,203 @@ fn compile_dual_ffn() {
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
     println!("cargo:rustc-cfg=katago_dualffn");
+    Some(CutlassBuildInfo {
+        version: cutlass_version,
+        commit: cutlass_commit,
+    })
 }
 
+fn parse_cutlass_version(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value = |name: &str| -> Option<String> {
+        text.lines()
+            .find(|line| line.trim_start().starts_with(&format!("#define {name} ")))
+            .and_then(|line| line.split_whitespace().nth(2))
+            .map(str::to_string)
+    };
+    Some(format!(
+        "{}.{}.{}",
+        value("CUTLASS_MAJOR")?,
+        value("CUTLASS_MINOR")?,
+        value("CUTLASS_PATCH")?
+    ))
+}
+
+fn git_source_id(root: &std::path::Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let commit_out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !commit_out.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8_lossy(&commit_out.stdout)
+        .trim()
+        .to_string();
+
+    // A plain commit id is insufficient when CUTLASS has local edits. Hash the
+    // relevant tracked diff and untracked files so two different dirty trees
+    // cannot accidentally share a certified backend build id.
+    let diff = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "diff",
+            "--binary",
+            "HEAD",
+            "--",
+            "include",
+            "examples/45_dual_gemm",
+        ])
+        .output()
+        .ok()?;
+    let untracked = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--",
+            "include",
+            "examples/45_dual_gemm",
+        ])
+        .output()
+        .ok()?;
+    if diff.stdout.is_empty() && untracked.stdout.is_empty() {
+        return Some(commit);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(&diff.stdout);
+    let names = String::from_utf8_lossy(&untracked.stdout);
+    for name in names.lines().filter(|line| !line.is_empty()) {
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        if let Ok(bytes) = std::fs::read(root.join(name)) {
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+    }
+    Some(format!("{commit}+dirty.{}", hex::encode(hasher.finalize())))
+}
+
+fn nvcc_version_id(output: &str) -> String {
+    output
+        .lines()
+        .find(|line| line.contains("Cuda compilation tools"))
+        .and_then(|line| line.split_whitespace().find(|word| word.starts_with('V')))
+        .map(|word| {
+            word.trim_start_matches('V')
+                .trim_end_matches(',')
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Emit build metadata embedded in the CUDA backend. The build ID hashes only
+/// inputs that can change generated device code or the DualGemm host wrapper,
+/// so documentation-only Git commits do not invalidate a certified plan.
+fn emit_cuda_build_info(
+    cutlass: Option<&CutlassBuildInfo>,
+    compiled_sms: &[String],
+    attention_q64: bool,
+) {
+    use sha2::{Digest, Sha256};
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let workspace = manifest_dir.join("../..");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let kernels_dir = manifest_dir.join("cuda-kernels");
+    let host_dir = manifest_dir.join("cuda-host");
+    let targets_path = workspace.join("configs/sm-targets.json");
+
+    let nvcc_banner = find_nvcc()
+        .and_then(|nvcc| Command::new(nvcc).arg("--version").output().ok())
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let nvcc_version = nvcc_version_id(&nvcc_banner);
+
+    let mut inputs = vec![manifest_dir.join("build.rs"), targets_path.clone()];
+    for dir in [&kernels_dir, &host_dir] {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            inputs.extend(
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.extension()
+                            .is_some_and(|ext| ext == "cu" || ext == "h")
+                    }),
+            );
+        }
+    }
+    inputs.sort();
+
+    let cutlass_version = cutlass.map(|info| info.version.as_str()).unwrap_or("none");
+    let cutlass_commit = cutlass.map(|info| info.commit.as_str()).unwrap_or("none");
+    let mut hasher = Sha256::new();
+    hasher.update(b"katago-cuda-build-v1\0");
+    for path in &inputs {
+        if let Ok(bytes) = std::fs::read(path) {
+            hasher.update(
+                path.strip_prefix(&workspace)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .as_bytes(),
+            );
+            hasher.update([0]);
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(&bytes);
+        }
+    }
+    hasher.update(b"nvcc\0");
+    hasher.update(nvcc_version.as_bytes());
+    hasher.update(b"\0target\0");
+    hasher.update(
+        env::var("TARGET")
+            .unwrap_or_else(|_| "unknown".to_string())
+            .as_bytes(),
+    );
+    hasher.update(b"\0cutlass-version\0");
+    hasher.update(cutlass_version.as_bytes());
+    hasher.update(b"\0cutlass-commit\0");
+    hasher.update(cutlass_commit.as_bytes());
+    hasher.update(b"\0ptx-flags\0-ptx -O3 --std=c++17");
+    hasher.update(b"\0dual-flags\0-c -O3 --std=c++17 --expt-relaxed-constexpr");
+    if cfg!(windows) {
+        hasher.update(b" -Xcompiler /Zc:preprocessor /Zc:__cplusplus /EHsc /bigobj /std:c++17");
+    }
+    for sm in compiled_sms {
+        hasher.update(b"\0compiled-sm\0");
+        hasher.update(sm.as_bytes());
+    }
+    let build_id = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+    let sms = compiled_sms
+        .iter()
+        .map(|sm| format!("{sm:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let generated = format!(
+        "// @generated by build.rs\n\
+         pub const CUDA_KERNEL_BUILD_ID: &str = {build_id:?};\n\
+         pub const CUDA_COMPILER: &str = {nvcc_version:?};\n\
+         pub const CUDA_CUTLASS_VERSION: &str = {cutlass_version:?};\n\
+         pub const CUDA_CUTLASS_COMMIT: &str = {cutlass_commit:?};\n\
+         pub const CUDA_COMPILED_SMS: &[&str] = &[{sms}];\n\
+         pub const CUDA_CAP_DUAL_FFN: bool = {};\n\
+         pub const CUDA_CAP_ATTENTION_Q64: bool = {attention_q64};\n",
+        cutlass.is_some()
+    );
+    std::fs::write(out_dir.join("cuda_build.rs"), generated)
+        .expect("failed to write cuda_build.rs");
+}
 
 /// Compile the TensorRT C++ shim and link CUDA/TensorRT.
 fn build_trt_shim() {
@@ -358,20 +578,28 @@ fn compile_onnx_proto() {
 fn find_nvcc() -> Option<PathBuf> {
     for var in ["CUDA_PATH", "CUDA_HOME"] {
         if let Ok(root) = env::var(var) {
-            let p = PathBuf::from(&root).join("bin").join(if cfg!(windows) { "nvcc.exe" } else { "nvcc" });
+            let p = PathBuf::from(&root).join("bin").join(if cfg!(windows) {
+                "nvcc.exe"
+            } else {
+                "nvcc"
+            });
             if p.exists() {
                 return Some(p);
             }
         }
     }
     let plain = if cfg!(windows) { "nvcc.exe" } else { "nvcc" };
-    Command::new(plain).arg("--version").output().ok().map(|_| PathBuf::from(plain))
+    Command::new(plain)
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|_| PathBuf::from(plain))
 }
 
 /// Compile the hand-written CUDA kernels (`cuda-kernels/*.cu`) to PTX for
 /// every target listed in `configs/sm-targets.json`, and emit a Rust table
 /// embedding the PTX bytes so the CUDA backend can load them at runtime.
-fn compile_cuda_kernels() {
+fn compile_cuda_kernels() -> (Vec<String>, bool) {
     #[derive(serde::Deserialize)]
     struct SmTarget {
         id: String,
@@ -390,7 +618,7 @@ fn compile_cuda_kernels() {
 
     if !kernels_dir.exists() {
         println!("cargo:warning=cuda-kernels dir not found — CUDA backend will have no kernels");
-        return;
+        return (Vec::new(), false);
     }
     let mut cu_files: Vec<PathBuf> = std::fs::read_dir(&kernels_dir)
         .map(|rd| {
@@ -402,8 +630,10 @@ fn compile_cuda_kernels() {
         .unwrap_or_default();
     cu_files.sort();
     if cu_files.is_empty() {
-        println!("cargo:warning=cuda-kernels dir has no .cu files — CUDA backend will have no kernels");
-        return;
+        println!(
+            "cargo:warning=cuda-kernels dir has no .cu files — CUDA backend will have no kernels"
+        );
+        return (Vec::new(), false);
     }
 
     let targets: Vec<SmTarget> = match std::fs::read_to_string(&targets_json) {
@@ -436,16 +666,21 @@ fn compile_cuda_kernels() {
 
     let Some(nvcc) = find_nvcc() else {
         println!("cargo:warning=nvcc not found — CUDA kernels not compiled");
-        return;
+        return (Vec::new(), false);
     };
 
     let mut table = String::from("// @generated by build.rs — CUDA kernel PTX per SM target\n");
     table.push_str("pub const CUDA_TARGETS: &[(&str, &str, &[(&str, &[u8])])] = &[\n");
+    let mut compiled_sms = Vec::new();
+    let q64_kernel_name = "attention_fa2_q64";
+    let has_q64_kernel = cu_files
+        .iter()
+        .any(|path| path.file_stem().is_some_and(|name| name == q64_kernel_name));
+    let mut attention_q64 = false;
     for t in &targets {
-        table.push_str(&format!(
-            "    (\"{}\", \"{}\", &[\n",
-            t.id, t.compute_capability
-        ));
+        let mut target_table = format!("    (\"{}\", \"{}\", &[\n", t.id, t.compute_capability);
+        let mut target_complete = true;
+        let mut target_q64 = false;
         for cu in &cu_files {
             let name = cu.file_stem().unwrap().to_string_lossy().into_owned();
             let ptx_path = out_dir.join(format!("{}_{}.ptx", t.id, name));
@@ -465,12 +700,16 @@ fn compile_cuda_kernels() {
                 .status();
             match status {
                 Ok(s) if s.success() => {
-                    table.push_str(&format!(
+                    if name == q64_kernel_name {
+                        target_q64 = true;
+                    }
+                    target_table.push_str(&format!(
                         "        (\"{name}\", include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{}_{}.ptx\"))),\n",
                         t.id, name
                     ));
                 }
                 other => {
+                    target_complete = false;
                     println!(
                         "cargo:warning=nvcc failed for kernel {name} (target {}): {other:?}",
                         t.id
@@ -478,12 +717,28 @@ fn compile_cuda_kernels() {
                 }
             }
         }
-        table.push_str("    ]),\n");
+        target_table.push_str("    ]),\n");
+        if target_complete {
+            table.push_str(&target_table);
+            attention_q64 |= target_q64;
+            compiled_sms.push(
+                t.compute_capability
+                    .chars()
+                    .filter(char::is_ascii_digit)
+                    .collect(),
+            );
+        } else {
+            println!(
+                "cargo:warning=SM target {} omitted because one or more kernels failed to compile",
+                t.id
+            );
+        }
     }
     table.push_str("];\n");
     if let Err(e) = std::fs::write(out_dir.join("cuda_kernels.rs"), table) {
         println!("cargo:warning=failed to write cuda_kernels.rs: {e}");
     }
+    (compiled_sms, has_q64_kernel && attention_q64)
 }
 
 /// Directory containing cl.exe (MSVC host compiler), probed via the cc crate.

@@ -27,18 +27,18 @@
   一律注册为 tactic 候选经 `scripts/autotune.py` 裁决并入
   `plans/best-tactic-plan.json`(fail-closed)。
 
-## 2. 现状快照(2026-08-17)
+## 2. 现状快照(2026-08-19)
 
 ### 已落地(详见 cuda-optimization-plan.md 决策组表 G1-G10 全绿)
 
 | 层 | 状态 |
 |---|---|
 | GEMM | cuBLASLt 接管 hgemm/hgemm_residual/hgemm_f16(默认,`KATAGO_CUDA_CUBLASLT=0` 回退手写 t64/t128) |
-| attention | FA2 全 tensor core(QK mma + online softmax + PV mma),RoPE 融合进加载(10c4f1c) |
+| attention | FA2 全 tensor core(QK mma + online softmax + PV mma),RoPE 融合进加载;对照官方 `cudarocmopt` 后生产 tile 已由 q128 晋级 q64 |
 | 融合 | FUSION=none 为默认(autotune 裁决:cuBLASLt 时代手写融合净负);gatesilu 等保留为 CUBLASLT=0 组合候选 |
 | 调度 | 事件门控流水线(submit/finish 分离 + 双槽 + 完成即投递)+ per-size CUDA graph 缓存;serve=1 单消费者 |
 | batch | 精确尺寸 + nnMaxBatchSize=16 上限(padding 与 B16 凑满已分别证伪,见 §4 关键警示) |
-| autotune | scripts/autotune.py 8 决策组 ABBA + plan JSON fail-closed 指纹校验 |
+| autotune | scripts/autotune.py 8 决策组 ABBA + schema 2 plan(JSON 绑定 device/model/CUDA/CUTLASS/kernel build/capabilities,fail-closed) |
 | 精度路线 | FP16 终局(FP8 精度不足/INT8 无厂商路径,三段实验闭环) |
 
 ### 最新性能数字
@@ -52,6 +52,7 @@
 | **nnbench kernel B16(纯前向)** | 18.48ms 基线;B2 后 15.08ms(记录值);kernel 模式在 WDDM 深队列下有提交路径污染,以 direct 配对为准 | 同上 |
 | B16 单流上限(直测) | 871~894 行/s(M2 前) | 同上 |
 | **WSL(fork 基线一致环境,2026-08-17)** | **eval B16 单流 1015.7 / 搜索 t=32 962.3**(plan r1);对齐线达成 43%,**per-SM 86%(真实差距 ~14%)** | 优化文档「M3 追加 2」 |
+| **cudarocmopt q64(2026-08-19)** | Windows eval B16 **+2.95%**;WSL B16 **+3.44%**,search t8/t16 **+3.0/+2.4%**,attention core **+14.7%**;schema 2 生产 plan 已启用 | `cudarocmopt-validation-plan.md` |
 | **双流复活(2026-08-18,WSL+Windows)** | **serve=2+NOGRAPH+W64 = 1112(+9.5%)**;搜索语境维持 serve=1 | 优化文档「M4 前哨」 |
 | fork 每流(推算) | 2836/2 ≈ **1418 行/s/流** | fork plan |
 
@@ -235,7 +236,7 @@ WSL / clang-cl / driver-API launcher)。FP8 精度门未过前不动工。
 | M1 | C1 cuBLASLt top-N 计时重排 + C0 经典 cublas nvjet 试探 | C0 证伪(2026-08-17);C1 当时 ABBA +2.55% 采纳,**2026-08-17 晚复审下架**(B2 后边际归零 + 搜索口径净负 -4.3%/-4.4%,见优化文档「M3 追加」) | M0 |
 | M2 | B3 FA4(❌ 证伪:两变体均负,FA2 已是 mma.sync 局部最优)+ B2 dual-FFN(当日 ABBA +29.8%,**但提交源码编译断裂从未生效——2026-08-17 晚修复后重验证 +26.5% eval / +28.0% 搜索,对拍 PASS**) | 修复完成(见优化文档「M3 追加」) | M0 |
 | M3 | ~~C2 tcgen05 主 GEMM 通路~~ ❌ 硬件证伪关闭(2026-08-17);B4 ❌ 门槛证伪(CUTLASS 残差 GEMM 全形状不赢 cuBLASLt top-8);E1 ❌ 精度门不过(官方语义硬失败,FFN-only 仍超门);**M3 收官:三项全证伪**。剩余:A-lite(搜索凑批)、WSL(E4) | ABBA + 对拍(未及——全部在门槛/证伪阶段关闭) | M1 |
-| M4 | 冲击 per-SM 对齐线 2360;评估 E1/E2 与 A-lite(搜索语境) | 🔶 进行中(2026-08-19):E1 ❌ 精度门;双流复活 +9.5%(饱和口径);A-lite 空闲窗口/finish 公平性/host staging 均 ABBA 证伪;落地布尔 tactic 显式 `0` 语义修复(错误组合 409.4→1096.8,对拍 PASS)及 CUDA graph 零 flag UB 修复(冒烟 9/9,性能持平)。**诚实结论:对齐线在本机不可达**(kernel 饱和吞吐 per-SM 为 fork 47%,而 kernel 侧杠杆已全数证伪) | M1-M3 |
+| M4 | 冲击 per-SM 对齐线 2360;评估 E1/E2、A-lite 与官方 `cudarocmopt` 增量 | 🔶 进行中(2026-08-19):E1 ❌ 精度门;双流复活 +9.5%(饱和口径);A-lite/host staging 证伪;布尔 tactic 与 graph UB 已修;**q64 attention 双平台通过并晋级 schema 2**(eval +3%左右,attention core +14.7%)。对齐线仍不可达,但已兑现本轮最后一个可复现 kernel 增量 | M1-M3 |
 
 每个里程碑完成标准:对拍 PASS + ABBA 留痕 + plan JSON 更新 + 本文档 §8
 看板更新。**任何一步慢于基线即回退并在 cuda-optimization-plan.md 记证伪。**
@@ -248,9 +249,9 @@ WSL / clang-cl / driver-API launcher)。FP8 精度门未过前不动工。
 | nnbench 工具 | ✅ 已提交已实测(含 workers=2×当前 batch 修复) | crates/katago/src/cmd/nnbench.rs |
 | M0 Phase 0 测量 | ✅ 完成(2026-08-17) | cuda-optimization-plan.md「M0 Phase 0 测量」 |
 | H1-H5 假设 | ✅ 全部裁决 | §5 决策表;H1/H2/H3 证伪,H4 上修,H5 否决 |
-| M1(C0+C1) | C0 证伪;**C1 已落地又于 2026-08-17 晚复审下架**(B2 后边际归零+搜索口径净负);下架后 plan=r1 仅 DUALFFN | 数据见优化文档「M3 追加」 |
+| M1(C0+C1) | C0 证伪;**C1 已落地又于 2026-08-17 晚复审下架**(B2 后边际归零+搜索口径净负);当前 schema 2 plan 为 DUALFFN+q64 | 数据见优化文档「M3 追加」「M4 追加 2」 |
 | 方案 A 拓扑组合 | 🔶 **部分复活(2026-08-18)**:饱和供数双流 +9.5%(serve=2+NOGRAPH+W≥4b,WSL 1112/Windows 1105);搜索语境维持证伪(t=48 灾难 123);PADBATCH 组合永久证伪(259) | 原 -2% 证伪系 DUALFFN 断裂慢 kernel;数据见优化文档「M4 前哨」 |
-| 方案 B1-B4 | B1 ✅ 等价完成(现行已是单次 wide QKV packed GEMM，3→1 收益已吃到；只剩 CUTLASS 主循环替换，而同族 B1/B2 形状门槛慢 19-72%);B2 ✅ 落地(**2026-08-17 晚修复提交断裂后真正生效**,修复后 +26.5% eval/+28.0% 搜索,plan r1 已启用);B3 ❌ 证伪;B4 ❌ 门槛证伪 | B2 门槛实测 0.1116ms > cuBLASLt;修复细节见优化文档 M3 追加节 |
+| 方案 B1-B4 | B1 ✅ 等价完成;B2 ✅ DualFFN 落地(+26.5% eval/+28.0% 搜索);B3 FA4 ❌ 证伪,但官方不同组织的 q64 FA2 ✅ 采纳(eval +3%左右/core +14.7%);B4 ❌ 门槛证伪 | DualFFN+q64 已入 schema 2 plan;数据见优化文档 M3/M4 追加 |
 | 方案 C tcgen05 | C0 证伪/C1 落地(M1);**C2 ❌ 硬件证伪(2026-08-17)** | ptxas+CUTLASS 4.7+PTX ISA 9.3 三源互证,见优化文档 M3-pre;FP8/sm_120f 工具链留档(D:/code/cutlass4,device ✅,MSVC host C2719 待解) |
 | 方案 D cuDNN | ❌ 搁置 | H5:InitialConv 1.6% < 5% |
 | 方案 E 储备 | E1 ✅ 已裁决(2026-08-17):精度门不过,FP8 封存;E2 host staging/直接 pinned/输出零拷贝 ❌ ABBA 无收益(2026-08-19);E3 未动;**E4 WSL ✅ 已验证**(搜索 +4.6%/eval +2.4%,scripts/wsl_bench.sh) | DUALFFN 修复后 per-SM 差距 ~14%;确定杠杆仅剩 WSL 部署，简单 A-lite 已收口 |

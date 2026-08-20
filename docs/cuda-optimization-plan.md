@@ -873,3 +873,43 @@ B16 的剩余差距不是可由这些微调兑现的稳定收益。所有实验�
   未设置节点优先级，语义等价默认）。完整 CUDA 冒烟 **9/9 PASS**、3 ignored，
   graph launch+sync 10-27us（WDDM 微基准波动）；生产 B16 ABBA 旧/新 1079.1/1078.5（-0.06%，
   持平），作为安全性修复保留。
+
+## M4 追加 2:对照官方 `cudarocmopt` 的 q64 attention 与认证基础设施(2026-08-19)
+
+对照快照:`D:/ExperimentalCode/KataGo` 分支 `cudarocmopt`,HEAD `08939455`。
+现有后端已经具备其 per-handle stream、共享权重、1x1/packed-QKV GEMM、RoPE load
+融合、tensor-core attention、残差 `beta=1` 和 DualFFN 主体;本轮只移植其有独立
+增量的 `64Q x 64K,4 warp` attention 组织,并补齐路径/指纹/并发测量工具。
+
+- 数值:Windows/WSL 各 16 局面 ORT 整图对拍均 `RESULT: PASS`,policy top-1
+  `16/16`;保持 FP32 QK/PV 累加、FP32 online softmax 和精确 `expf`。
+- Windows:eval B16 `+2.95%`;search visits t8/t16 `+3.34/+2.77%`。
+- WSL:eval B1/B4/B8/B16 `+2.93/+4.35/+3.69/+3.44%`;长样本 search
+  visits t8/t16 `+3.0/+2.4%`,nnEvals/s `+3.3/+3.1%`;attention core
+  q128/q64 累计 `23.783/20.278 ms`(`+14.7%`)。
+- 路径:两平台 14-case tactic/fail-closed matrix 均 PASS,包含 q64 实际 launch、
+  plan>env、graph/direct、非法 key/value、模型/build mismatch 和强制 DualFFN
+  probe failure。
+- 生产:Windows `plans/best-tactic-plan.json` 升级 schema 2,启用
+  `DUALFFN=1 + ATTN_TILE=q64`;另存 q128 schema 2 回退 plan。WSL 因宿主目标/CUTLASS
+  工作树产生不同 device-code build id,使用独立认证 plan,禁止跨平台混用。
+- 同轮证伪:DualGemm swizzle `<1>` 仅 `+0.49%`;deferred residual + 下一层
+  RMSNorm 在 B8/B16 `-1.09/-1.33%`;两者实现与 tactic key 均删除。
+
+完整计划、原始数据索引和裁决见 `docs/cudarocmopt-validation-plan.md`。
+
+### M4 追加 3：定向 CUDA graph warmup（2026-08-19）
+
+参考 `cudarocmopt` 的 warmup 原则，但针对本项目按物理 batch 惰性创建 CUDA graph
+的实现，只预热 `[1,maxBatch]` 两个生产尺寸。`Backend::warmup_batches` 让 CUDA
+后端声明尺寸，`NnEvaluator::load_model` 在 server handle 交接前执行真实前向；
+warmup 失败在 server-ready 前报错，`cudaDisableWarmup=true` 仅用于诊断。
+
+Windows 冷启动测量（同一 release、q64 + DualFFN、`b11fix.onnx`）：B1 首调用
+从 `173.1/177.6 ms` 降至 `5.6/5.8 ms`（约 `96.7%`），B16 从 `260.9/272.9 ms`
+降至 `89.7/98.6 ms`（约 `65.0%`）；启动加首请求总耗时不增加，steady-state
+沿用既有 ABBA 结果无 `>=1%` 回退。因此定向 warmup 进入默认生产路径。
+WSL release/GTP 也确认 warmup `1,16` 可用；B1 `202.4/304.5 ms` 降至
+`5.35/5.62 ms`，B16 `345.6/402.0 ms` 降至 `81.8/83.1 ms`。
+Windows `nvidia-smi` 采样显示 warmup 常驻显存增量约 `31 MiB`，低于 `512 MiB`
+门槛。
