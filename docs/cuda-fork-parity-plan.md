@@ -255,6 +255,7 @@ WSL / clang-cl / driver-API launcher)。FP8 精度门未过前不动工。
 | 方案 C tcgen05 | C0 证伪/C1 落地(M1);**C2 ❌ 硬件证伪(2026-08-17)** | ptxas+CUTLASS 4.7+PTX ISA 9.3 三源互证,见优化文档 M3-pre;FP8/sm_120f 工具链留档(D:/code/cutlass4,device ✅,MSVC host C2719 待解) |
 | 方案 D cuDNN | ❌ 搁置 | H5:InitialConv 1.6% < 5% |
 | 方案 E 储备 | E1 ✅ 已裁决(2026-08-17):精度门不过,FP8 封存;E2 host staging/直接 pinned/输出零拷贝 ❌ ABBA 无收益(2026-08-19);E3 未动;**E4 WSL ✅ 已验证**(搜索 +4.6%/eval +2.4%,scripts/wsl_bench.sh) | DUALFFN 修复后 per-SM 差距 ~14%;确定杠杆仅剩 WSL 部署，简单 A-lite 已收口 |
+| 官方 v1.18.1 审计 + opt 测试制度化 | ✅ 2026-08-24:kernel 层无增量(官方三件套已等价);`[cuda-tactic]` 标记扩至全部 tactic + validate_cuda_tactics.py 24 case(含数值门)全绿;**附带修复存量 graph 丢批 bug**(pre-capture warm 无条件化,INVALID_VALUE 15→0,对拍 PASS) | 审计:`docs/upstream-notes/upstream-v1.18.1-inference-audit.md`;数据:优化文档「M4 追加 4」 |
 
 状态图例:⬜ 未开始 / 🔶 进行中 / ✅ 已落地 / ❌ 已证伪(须附 ABBA 数据)
 

@@ -249,6 +249,10 @@ mod imp {
                     } else if cublaslt_rank_time() && !crate::backends::cuda_exec::capturing() {
                         // C1 计时重排:在当前活跃流上逐候选计时(scratch 承载输出,
                         // beta=0,不碰真实 C);与真实工作同流提交,天然有序。
+                        crate::backends::cuda_exec::report_tactic_once(
+                            &crate::backends::cuda_exec::CUBLASLT_RANK_TIME_REPORT,
+                            "name=cublaslt_rank engine=time",
+                        );
                         let tstream = crate::backends::cuda_exec::active_stream_clone()
                             .unwrap_or_else(|| self.device.default_stream());
                         let mut scratch: CudaSlice<f32> = unsafe { tstream.alloc(c.len()) }
@@ -273,6 +277,7 @@ mod imp {
                         // 避免把未计时的选择固化进缓存。
                         Some(cands[0])
                     } else {
+                        crate::backends::cuda_exec::report_cublaslt_rank_heuristic_once();
                         st.algo_cache.lock().unwrap().insert(key, cands[0]);
                         Some(cands[0])
                     }
@@ -308,6 +313,10 @@ mod imp {
                     if cands.is_empty() {
                         None
                     } else if cublaslt_rank_time() && !crate::backends::cuda_exec::capturing() {
+                        crate::backends::cuda_exec::report_tactic_once(
+                            &crate::backends::cuda_exec::CUBLASLT_RANK_TIME_REPORT,
+                            "name=cublaslt_rank engine=time",
+                        );
                         let tstream = crate::backends::cuda_exec::active_stream_clone()
                             .unwrap_or_else(|| self.device.default_stream());
                         let mut scratch: CudaSlice<u16> = unsafe { tstream.alloc(c.len()) }
@@ -330,6 +339,7 @@ mod imp {
                     } else if crate::backends::cuda_exec::capturing() {
                         Some(cands[0])
                     } else {
+                        crate::backends::cuda_exec::report_cublaslt_rank_heuristic_once();
                         st.algo_cache.lock().unwrap().insert(key, cands[0]);
                         Some(cands[0])
                     }
@@ -1447,6 +1457,12 @@ mod backend_impl {
             } else {
                 h.max_batch_size as usize
             };
+            if phys_batch > n {
+                crate::backends::cuda_exec::report_tactic_once(
+                    &crate::backends::cuda_exec::PADBATCH_REPORT,
+                    &format!("name=padbatch launch=on phys={phys_batch} rows={n}"),
+                );
+            }
             let mut spatial_host = vec![0.0f32; phys_batch * single_spatial];
             let mut global_host = vec![0.0f32; phys_batch * NUM_GLOBAL_CHANNELS];
             for i in 0..n {
@@ -1535,17 +1551,19 @@ mod backend_impl {
                     let graph = if force_direct {
                         None
                     } else {
-                        // capture 前先直连跑一次的触发条件:
+                        // 捕获前先直连跑一次(无条件,2026-08-24 修复):
                         // - C1(KATAGO_CUDA_CUBLASLT_RANK=time):计时重排在非
                         //   capture 语境完成算法选择并写缓存,capture 把优胜
                         //   kernel 烙进 graph;
                         // - B2(KATAGO_CUDA_DUALFFN=1):DualGemm 首调用的
                         //   initialize(cudaFuncSetAttribute 等)在 capture 外
-                        //   完成,capture 内只剩纯 kernel 发射路径。
-                        if slot_idx == 0
-                            && (super::imp::cublaslt_rank_time()
-                                || crate::backends::cuda_exec::dual_ffn_enabled())
-                        {
+                        //   完成;
+                        // - 无 warm 时,进程内首次捕获的 graph exec 会被后续
+                        //   同流捕获作废(CUDA lazy module loading × capture,
+                        //   graph_launch_repro.rs 复现:首发 OK、二次捕获后
+                        //   cuGraphLaunch 恒 CUDA_ERROR_INVALID_VALUE,重
+                        //   upload 无效;生产表现为 warmup/首批 eval 丢弃)。
+                        if slot_idx == 0 {
                             h.model
                                 .apply(&h.rt, stream, &mut ws, &in_spatial, &in_global)
                                 .map_err(|e| NeuralNetError(format!("pre-capture warm: {e}")))?;

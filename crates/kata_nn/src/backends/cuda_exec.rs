@@ -275,6 +275,34 @@ static ATTENTION_FA2_REPORT: OnceLock<()> = OnceLock::new();
 static ATTENTION_FA2_Q64_REPORT: OnceLock<()> = OnceLock::new();
 static ATTENTION_Q64_FALLBACK_REPORT: OnceLock<()> = OnceLock::new();
 static ATTENTION_V3_REPORT: OnceLock<()> = OnceLock::new();
+// GEMM 引擎/瓦片、split-K、fusion、RMS 的一次性路径确认标记
+// （仿官方 C++ loggedUsingMmaAttention 等 logged* 标志；validate_cuda_tactics.py
+// 据此断言 tactic 真的切换了路径，防静默失效——M2 DUALFFN 断裂先例）。
+static GEMM_LT_PLAIN_REPORT: OnceLock<()> = OnceLock::new();
+static GEMM_LT_F16OUT_REPORT: OnceLock<()> = OnceLock::new();
+static GEMM_LT_RESIDUAL_REPORT: OnceLock<()> = OnceLock::new();
+static GEMM_HAND_PLAIN_REPORT: OnceLock<()> = OnceLock::new();
+static GEMM_HAND_F16OUT_REPORT: OnceLock<()> = OnceLock::new();
+static GEMM_HAND_RESIDUAL_REPORT: OnceLock<()> = OnceLock::new();
+static SPLITK_REPORT: OnceLock<()> = OnceLock::new();
+static FUSION_MODE_REPORT: OnceLock<()> = OnceLock::new();
+static RMS_V1_REPORT: OnceLock<()> = OnceLock::new();
+static RMS_W4_REPORT: OnceLock<()> = OnceLock::new();
+pub(crate) static PADBATCH_REPORT: OnceLock<()> = OnceLock::new();
+pub(crate) static CUBLASLT_RANK_TIME_REPORT: OnceLock<()> = OnceLock::new();
+pub(crate) static CUBLASLT_RANK_HEUR_REPORT: OnceLock<()> = OnceLock::new();
+
+/// 首次到达该路径时打一条 `[cuda-tactic]` 确认日志（每进程一次）。
+pub(crate) fn report_tactic_once(slot: &'static OnceLock<()>, msg: &str) {
+    slot.get_or_init(|| {
+        eprintln!("[cuda-tactic] {msg}");
+    });
+}
+
+/// cuBLASLt 启发式首选标记（供 validate_cuda_tactics.py 断言 rank 引擎）。
+pub(crate) fn report_cublaslt_rank_heuristic_once() {
+    report_tactic_once(&CUBLASLT_RANK_HEUR_REPORT, "name=cublaslt_rank engine=heuristic");
+}
 
 #[inline]
 fn q64_effective(requested: bool, compiled: bool) -> bool {
@@ -537,6 +565,7 @@ impl CudaModel {
             // 供 autotune 按组合实测选择。
             let fusion_mode = crate::tactic_plan::tactic_var("KATAGO_CUDA_FUSION")
                 .unwrap_or_else(|_| "none".to_string());
+            report_tactic_once(&FUSION_MODE_REPORT, &format!("name=fusion mode={fusion_mode}"));
             let fuse_up = fusion_mode == "all" || fusion_mode == "up";
             let fuse_down = fusion_mode == "all" || fusion_mode == "down";
             let skip_next = match lb {
@@ -1400,6 +1429,7 @@ fn hgemm(
     // cuBLASLt 旁路(KATAGO_CUDA_CUBLASLT=1,仅非 pad 的 f32 输出 GEMM)。
     if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         if rt.cublaslt_gemm(&stream, a, &b.data, c, m, b.n, b.k, 0.0)? {
+            report_tactic_once(&GEMM_LT_PLAIN_REPORT, "name=gemm kind=plain engine=cublaslt");
             return Ok(());
         }
     }
@@ -1433,6 +1463,10 @@ fn hgemm(
             .launch(cfg)
     }
     .map_err(|e| format!("{kname} launch failed: {e}"))?;
+    report_tactic_once(
+        &GEMM_HAND_PLAIN_REPORT,
+        &format!("name=gemm kind=plain engine=handwritten tile={kname}"),
+    );
     Ok(())
 }
 
@@ -1449,6 +1483,7 @@ fn hgemm_f16(
     if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         let stream0 = active_stream(rt);
         if rt.cublaslt_gemm_f16out(&stream0, a, &b.data, c, m, b.n, b.k)? {
+            report_tactic_once(&GEMM_LT_F16OUT_REPORT, "name=gemm kind=f16out engine=cublaslt");
             return Ok(());
         }
     }
@@ -1489,6 +1524,10 @@ fn hgemm_f16(
             .launch(cfg)
     }
     .map_err(|e| format!("{kname} launch failed: {e}"))?;
+    report_tactic_once(
+        &GEMM_HAND_F16OUT_REPORT,
+        &format!("name=gemm kind=f16out engine=handwritten tile={kname}"),
+    );
     Ok(())
 }
 
@@ -1517,6 +1556,7 @@ fn hgemm_residual(
     // cuBLASLt 旁路(KATAGO_CUDA_CUBLASLT=1,beta=1 残差)。
     if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         if rt.cublaslt_gemm(&stream, a, &b.data, c, m, b.n, b.k, 1.0)? {
+            report_tactic_once(&GEMM_LT_RESIDUAL_REPORT, "name=gemm kind=residual engine=cublaslt");
             return Ok(());
         }
     }
@@ -1550,6 +1590,10 @@ fn hgemm_residual(
             .launch(cfg)
     }
     .map_err(|e| format!("{kname} residual launch failed: {e}"))?;
+    report_tactic_once(
+        &GEMM_HAND_RESIDUAL_REPORT,
+        &format!("name=gemm kind=residual engine=handwritten tile={kname}"),
+    );
     Ok(())
 }
 
@@ -1584,6 +1628,7 @@ fn hgemm_splitk2_partial(
             .launch(cfg)
     }
     .map_err(|e| format!("splitk partial launch failed: {e}"))?;
+    report_tactic_once(&SPLITK_REPORT, "name=splitk launch=on");
     Ok(())
 }
 
@@ -2142,6 +2187,11 @@ fn rms_norm_f32(
 ) -> Result<(), String> {
     // KATAGO_CUDA_RMS=v1 回退旧单行版(诊断 warp4 写坏 act384 的嫌疑)。
     let use_v1 = crate::tactic_plan::tactic_var("KATAGO_CUDA_RMS").as_deref() == Ok("v1");
+    if use_v1 {
+        report_tactic_once(&RMS_V1_REPORT, "name=rms launch=v1");
+    } else {
+        report_tactic_once(&RMS_W4_REPORT, "name=rms launch=w4");
+    }
     let (f, cfg) = if use_v1 {
         (
             rt.get_func("rms_norm_f32_kernel")?,

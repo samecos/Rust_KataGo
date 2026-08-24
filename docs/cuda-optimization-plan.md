@@ -913,3 +913,34 @@ WSL release/GTP 也确认 warmup `1,16` 可用；B1 `202.4/304.5 ms` 降至
 `5.35/5.62 ms`，B16 `345.6/402.0 ms` 降至 `81.8/83.1 ms`。
 Windows `nvidia-smi` 采样显示 warmup 常驻显存增量约 `31 MiB`，低于 `512 MiB`
 门槛。
+
+### M4 追加 4：官方 v1.18.1 审计、opt 组合测试制度化与 graph 丢批修复（2026-08-24）
+
+对照官方 `D:/code/KataGo` v1.18.1（92ee95c0）推理侧全量审计，结论与产物：
+
+- **审计结论**：kernel/调度层无新增移植项——官方 `ecfbeb46`（2026-08-16
+  大提交：CUTLASS DualGemm 融合 FFN、tensor-core flash attention
+  Q64/KV64、benchmarknn）三件套我们全部已有等价或更彻底实现；官方
+  multi-server-thread 线仍在铺测试（`1abc4a18` 只动测试脚本），v1.19
+  跟踪。审计文档：`docs/upstream-notes/upstream-v1.18.1-inference-audit.md`。
+- **唯一采纳增量**（官方 `runcudaopttests.sh` 方法论）：
+  1. `[cuda-tactic]` 一次性路径标记扩展至全部 tactic（gemm kind×engine/
+     tile、splitk、fusion、rms、padbatch、cublaslt_rank；原仅 dual_ffn/
+     attention/graph），仿官方 loggedUsingMmaAttention 等 logged* 标志；
+  2. `scripts/validate_cuda_tactics.py` 扩到 24 case + `--with-numeric`
+     数值门（每组合 dump 4 局面 + ORT FP32 对拍）；快速模式与数值门
+     双跑全绿（24/24），padbatch 案例固定 pad×graph 组合仅断言路径接管
+     （该组合 ABBA 已证伪，已知 INVALID_VALUE WARNING 行为）。
+- **附带发现的存量 bug（已修）**：无 pre-capture warm apply 时，进程内
+  首次捕获的 graph exec 会被后续同流捕获作废——`cuGraphLaunch` 恒
+  `CUDA_ERROR_INVALID_VALUE`（重 upload/独立 ws/独立流/flags=0/空捕获
+  均不救，`REPRO_*` 开关逐项排除；graph_launch_repro.rs 定位），生产
+  表现为 warmup 后首批 eval 静默丢批（submit 失败→token=MAX→全零输出
+  发给搜索）。修复 = 捕获前 warm apply 无条件化（原仅
+  RANK=time/DUALFFN 时执行，这解释了为何默认 plan 下必现而历史
+  DUALFFN 认证轮未见）。验证：benchmark auto-tune INVALID_VALUE 15→0、
+  24 case 全绿、dump+ORT 对拍 PASS、B16 eval W32 = 1034.6 nnEval/s
+  （当日环境波动带内，无性能回归）。
+  回归测试：`tests/graph_launch_repro.rs`（`REPRO_NO_WARM=1` 复现）。
+- 文档同步：AGENTS.md benchmark 注释更正（auto-tune 模型只加载一次，
+  ~25s 重载描述过时）。

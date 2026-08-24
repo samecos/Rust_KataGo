@@ -24,7 +24,7 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
 - 性能基准(release):`./target/release/katago-rs.exe benchmark --config
   configs/gtp_smoke.cfg --model D:/code/b11fix.onnx --override-config
   nnBackend=cudabackend --override-config numSearchThreads=1 -v 20 -n 1 -t 1,4`
-  (注意:不带 -t 时走 auto-tune,每个线程配置都重新加载模型 ~25s,很慢;
+  (不带 -t 时走 auto-tune;模型只加载一次但逐档搜索仍慢,
   务必用 -t 指定 1-2 个配置)
 - 离线 autotune:`python scripts/autotune.py --threads both`(8 决策组 ABBA,
   产出 plans/best-tactic-plan.json);接入选认证 plan:`--override-config
@@ -40,6 +40,17 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   2×当前 batch——serve target 是发射阈值非上限,worker 过多会把 avgBatch 抬高);
   cuBLASLt 候选池探针:`cargo test -p kata_nn --test probe_cublaslt_algos
   --features cuda --release -- --nocapture`
+- tactic 组合验证(仿官方 runcudaopttests.sh,对齐 v1.18.1 审计结论):
+  `scripts/validate_cuda_tactics.py`(24 case:路径标记断言 + plan
+  fail-closed 负例;`--with-numeric` 加数值门——每组合 dump+ORT 对拍)。
+  所有 tactic 路径决策点会打一次性 `[cuda-tactic]` 标记(dual_ffn/
+  attention/gemm kind×engine/splitk/fusion/rms/padbatch/cublaslt_rank/
+  graph),供脚本与人工确认开关真实生效(M2 DUALFFN 断裂先例的制度化)
+- graph 回归测试:`cargo test -p kata_nn --test graph_launch_repro
+  --features cuda --release`(2026-08-24 修复:无 pre-capture warm 时
+  首次捕获的 graph exec 会被后续同流捕获作废,首批发射恒
+  CUDA_ERROR_INVALID_VALUE——warmup/首批 eval 静默丢批;
+  `REPRO_NO_WARM=1` 可复现)
 
 ## 后端选择
 
