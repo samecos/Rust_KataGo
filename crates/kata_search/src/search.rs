@@ -197,13 +197,18 @@ pub struct SearchThread {
     pub graph_hash: Hash128,
 
     /// Path traced down the graph during a playout.
-    pub graph_path: HashSet<*const SearchNode>,
+    pub graph_path: PtrHashSet<*const SearchNode>,
 
     pub should_count_playout: bool,
     pub rand: Rand,
 
     pub nn_result_buf: NNResultBuf,
     pub stats_buf: Vec<MoreNodeStats>,
+
+    /// Scratch buffer for downweight_bad_children_and_normalize_weight,
+    /// owned per thread so backups don't allocate (upstream uses a stack
+    /// array; a Vec avoids the fixed MAX_NN_POLICY_SIZE zeroing cost).
+    pub stdevs_buf: Vec<f64>,
 
     pub upper_bound_visits_left: f64,
 
@@ -214,23 +219,62 @@ pub struct SearchThread {
     pub illegal_move_hashes: HashSet<Hash128>,
 }
 
+/// Cheap hasher for sets keyed by raw node pointers (graph path, tree-walk
+/// dedup). Upstream C++ uses identity-hashed `unordered_set`; the default
+/// SipHash costs far more than the set operations themselves on these hot
+/// paths. The multiply breaks the low-zero-bit alignment pattern of heap
+/// pointers.
+#[derive(Default)]
+pub struct PtrHasher(u64);
+
+impl std::hash::Hasher for PtrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.0 = (n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    fn write_isize(&mut self, n: isize) {
+        self.0 = (n as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+}
+
+pub type PtrHashSet<T> = HashSet<T, std::hash::BuildHasherDefault<PtrHasher>>;
+
 impl SearchThread {
     /// Create per-thread state from the current search configuration.
     pub fn new(thread_idx: i32, search: &Search) -> Self {
-        let seed = format!("{} {}", search.rand_seed, thread_idx);
+        // Mirrors upstream makeSeed: the stream differs per thread, per
+        // position, per move count, and per search, so noise sequences do not
+        // repeat when the same root is searched again.
+        let seed = format!(
+            "{}$searchThread${}${}${}${}${}",
+            search.rand_seed,
+            thread_idx,
+            search.root_board.pos_hash.hash0,
+            search.root_board.pos_hash.hash1,
+            search.root_history.move_history.len(),
+            search.num_searches_begun,
+        );
         Self {
             thread_idx,
             pla: search.root_pla,
             board: search.root_board.clone(),
             history: search.root_history.clone(),
             graph_hash: search.root_graph_hash,
-            graph_path: HashSet::new(),
+            graph_path: PtrHashSet::with_capacity_and_hasher(256, Default::default()),
             should_count_playout: false,
             rand: Rand::new_from_seed(&seed),
             nn_result_buf: NNResultBuf::new(),
-            stats_buf: Vec::new(),
+            stats_buf: Vec::with_capacity(nn_pos::MAX_NN_POLICY_SIZE),
+            stdevs_buf: Vec::with_capacity(nn_pos::MAX_NN_POLICY_SIZE),
             upper_bound_visits_left: 0.0,
-            old_nn_outputs_to_clean_up: Vec::new(),
+            old_nn_outputs_to_clean_up: Vec::with_capacity(8),
             illegal_move_hashes: HashSet::new(),
         }
     }
@@ -600,10 +644,23 @@ impl<'a> Search<'a> {
     }
 
     pub fn set_root_hint_loc(&mut self, hint_loc: Loc) {
+        // When we positively change the hint loc, we clear the search to make
+        // absolutely sure that the hintloc takes effect, and that all nnevals
+        // (including the root noise that adds the hintloc) have a chance to
+        // happen.
+        if hint_loc != NULL_LOC && self.root_hint_loc != hint_loc {
+            self.clear_search();
+        }
         self.root_hint_loc = hint_loc;
     }
 
     pub fn set_avoid_move_until_by_loc(&mut self, b_vec: &[i32], w_vec: &[i32]) {
+        if self.avoid_move_until_by_loc_black == b_vec
+            && self.avoid_move_until_by_loc_white == w_vec
+        {
+            return;
+        }
+        self.clear_search();
         self.avoid_move_until_by_loc_black = b_vec.to_vec();
         self.avoid_move_until_by_loc_white = w_vec.to_vec();
     }
@@ -613,10 +670,17 @@ impl<'a> Search<'a> {
     }
 
     pub fn set_always_include_owner_map(&mut self, b: bool) {
+        if !self.always_include_owner_map && b {
+            self.clear_search();
+        }
         self.always_include_owner_map = b;
     }
 
     pub fn set_root_symmetry_pruning_only(&mut self, root_prune_only_symmetries: &[i32]) {
+        if self.root_prune_only_symmetries == root_prune_only_symmetries {
+            return;
+        }
+        self.clear_search();
         self.root_prune_only_symmetries = root_prune_only_symmetries.to_vec();
     }
 
@@ -950,11 +1014,13 @@ impl<'a> Search<'a> {
 
         let num_threads = self.search_params.num_threads.max(1);
         if num_threads <= 1 {
-            // Single-threaded fallback: identical to the original serial loop
-            // so that `num_threads = 1` keeps bit-for-bit the same behaviour
-            // and performance as before parallelization.
+            // Single-threaded fallback: mirrors the upstream serial loop,
+            // which builds one SearchThread for the whole search (the RNG
+            // reseeding, board/history clones, and Vec growth of a
+            // per-playout construction are pure overhead).
             let mut last_time_used_recomputing_tc_limit = 0.0;
             let mut num_playouts = 0_i64;
+            let mut thread = SearchThread::new(0, &*self);
 
             loop {
                 let time_used = if has_tc || has_max_time {
@@ -1021,7 +1087,6 @@ impl<'a> Search<'a> {
                 upper_bound_visits_left = upper_bound_visits_left
                     .min(max_visits as f64 - num_playouts as f64 - num_non_playout_visits as f64);
 
-                let mut thread = SearchThread::new(0, &*self);
                 let finished =
                     self.run_single_playout(&mut thread, upper_bound_visits_left, root_ptr.0);
                 if finished {
@@ -1449,14 +1514,32 @@ impl<'a> Search<'a> {
                     self.recursively_recompute_stats(&mut *root_ptr);
                 }
                 if any_filtered {
+                    // Recursive stats recomputation resulted in us marking all
+                    // nodes we have, mirroring upstream. Anything filtered is
+                    // old now, delete it.
                     self.delete_all_old_or_all_new_table_nodes_and_subtree_value_bias_multithreaded(
                         true,
                     );
                 }
             } else if any_filtered {
-                // TODO: Implement full tree invalidation for the case where no
-                // dynamic/subtree bonuses are in use. This path is not exercised
-                // by the current test suite, so we keep it as a no-op for now.
+                // Sweep over the tree marking the kept subtree as good (calling
+                // a NULL function), then delete anything unmarked — exactly the
+                // upstream branch. Marking is NOT optional: deleting by age
+                // without first bumping the kept subtree's age would free nodes
+                // still referenced by root child pointers (search_node_age was
+                // incremented at the end of the previous begin_search, so the
+                // retained tree is "old" until re-marked here).
+                {
+                    // SAFETY: the root node outlives this call (it is owned by
+                    // self.root_node and only freed via clear_search / the
+                    // delete-old sweep below, which runs strictly after).
+                    let new_root_ptr = self.root_node.as_deref().unwrap() as *const SearchNode;
+                    let new_root_ref = unsafe { &*new_root_ptr };
+                    self.apply_recursively_any_order_multithreaded(
+                        std::slice::from_ref(&new_root_ref),
+                        &|_node, _idx| {},
+                    );
+                }
                 self.delete_all_old_or_all_new_table_nodes_and_subtree_value_bias_multithreaded(
                     true,
                 );
@@ -2706,6 +2789,7 @@ impl<'a> Search<'a> {
                 }
                 let amount_to_subtract = 0.0;
                 let amount_to_prune = 0.0;
+                let mut stdevs_scratch = Vec::with_capacity(num_children);
                 self.downweight_bad_children_and_normalize_weight(
                     num_children as i32,
                     total_child_weight,
@@ -2713,6 +2797,7 @@ impl<'a> Search<'a> {
                     amount_to_subtract,
                     amount_to_prune,
                     &mut stats_buf,
+                    &mut stdevs_scratch,
                 );
                 for i in 0..num_children {
                     buf[i].weight_factor = stats_buf[i].weight_adjusted;
@@ -4252,7 +4337,11 @@ impl<'a> Search<'a> {
             return 0.0;
         }
 
-        let nn_output = match parent.get_nn_output() {
+        // Borrow without an Arc refcount round trip: this runs once per root
+        // child per playout. Safe because replaced outputs are deferred to
+        // thread cleanup and only freed at the next begin_search, so the pointee
+        // outlives this call regardless of concurrent swaps.
+        let nn_output = match unsafe { parent.nn_output_ref() } {
             Some(output) => output,
             None => return 0.0,
         };
@@ -6029,6 +6118,7 @@ impl<'a> Search<'a> {
         parent_utility: f64,
         parent_weight_per_visit: f64,
         is_during_search: bool,
+        is_root: bool,
         _warn_big_weight: bool,
         best_child_weight: f64,
         count_edge_visit: bool,
@@ -6047,9 +6137,9 @@ impl<'a> Search<'a> {
         let child_virtual_losses = child.virtual_losses.load(Ordering::Acquire) as i64;
         let child_visits = child.stats.visits.load(Ordering::Acquire);
         let utility_avg = child.stats.utility_avg.load(Ordering::Acquire);
-        let utility_sq_avg = child.stats.utility_sq_avg.load(Ordering::Acquire);
-        let score_mean_avg = child.stats.score_mean_avg.load(Ordering::Acquire);
-        let score_mean_sq_avg = child.stats.score_mean_sq_avg.load(Ordering::Acquire);
+        // score_mean/score_mean_sq feed only the root-only ending-score bonus,
+        // and utility_sq_avg only the optional PUCT-V factor; load them lazily
+        // so the default descent touches just one stats cache line per child.
         let mut child_weight = if count_edge_visit {
             child
                 .stats
@@ -6062,13 +6152,18 @@ impl<'a> Search<'a> {
             fpu_value
         } else {
             let mut u = utility_avg;
-            let ending_score_bonus = self.get_ending_white_score_bonus(node, move_loc);
-            if ending_score_bonus != 0.0 {
-                u += self.get_score_utility_diff(
-                    score_mean_avg,
-                    score_mean_sq_avg,
-                    ending_score_bonus,
-                );
+            if is_root {
+                let ending_score_bonus = self.get_ending_white_score_bonus(node, move_loc);
+                if ending_score_bonus != 0.0 {
+                    let score_mean_avg = child.stats.score_mean_avg.load(Ordering::Acquire);
+                    let score_mean_sq_avg =
+                        child.stats.score_mean_sq_avg.load(Ordering::Acquire);
+                    u += self.get_score_utility_diff(
+                        score_mean_avg,
+                        score_mean_sq_avg,
+                        ending_score_bonus,
+                    );
+                }
             }
             u
         };
@@ -6092,10 +6187,6 @@ impl<'a> Search<'a> {
             child_weight += virtual_loss_weight;
         }
 
-        let is_root = self
-            .root_node
-            .as_deref()
-            .map_or(false, |root| std::ptr::eq(node, root));
         if is_during_search && is_root && count_edge_visit {
             // Futile visits pruning is omitted here because it requires the
             // search thread's `upper_bound_visits_left` estimate.
@@ -6194,6 +6285,7 @@ impl<'a> Search<'a> {
             && self.search_params.puct_var_exploration > 0.0
             && child_visits > 0
         {
+            let utility_sq_avg = child.stats.utility_sq_avg.load(Ordering::Acquire);
             let variance = (utility_sq_avg - utility_avg * utility_avg).max(0.0);
             let child_stdev = variance.sqrt();
             let factor = 1.0
@@ -6222,6 +6314,7 @@ impl<'a> Search<'a> {
         _parent_utility: f64,
         _parent_weight_per_visit: f64,
         is_during_search: bool,
+        is_root: bool,
         rand: Option<&mut Rand>,
     ) -> f64 {
         let move_pos = self.get_pos(move_loc) as usize;
@@ -6235,10 +6328,6 @@ impl<'a> Search<'a> {
 
         let mut child_utility = fpu_value;
 
-        let is_root = self
-            .root_node
-            .as_deref()
-            .map_or(false, |root| std::ptr::eq(node, root));
         if is_during_search && is_root && self.search_params.wide_root_noise > 0.0 {
             self.maybe_apply_wide_root_noise(&mut nn_policy_prob, &mut child_utility, rand, node);
         }
@@ -6457,7 +6546,9 @@ impl<'a> Search<'a> {
         }
 
         let mut use_human_sl = false;
-        let mut active_output = nn_output.clone();
+        // Only materialized when a human SL policy actually replaces the net
+        // policy; the common path avoids the extra Arc refcount round trip.
+        let mut active_output: Option<Arc<NNOutput>> = None;
         if let Some(human_eval) = self.human_evaluator {
             if self.search_params.human_sl_profile.initialized
                 || !human_eval.requires_sgf_metadata()
@@ -6492,9 +6583,12 @@ impl<'a> Search<'a> {
                     }
 
                     if use_human_sl {
-                        active_output = human_output;
+                        active_output = Some(human_output);
                         policy_prob_mass_visited = 0.0;
-                        let human_policy_probs = active_output.get_policy_probs_maybe_noised();
+                        let human_policy_probs = active_output
+                            .as_ref()
+                            .unwrap()
+                            .get_policy_probs_maybe_noised();
                         for i in 0..children_capacity {
                             let child_pointer = children.get(i);
                             if child_pointer.get_if_allocated_relaxed().is_none() {
@@ -6560,7 +6654,10 @@ impl<'a> Search<'a> {
         };
 
         *num_children_found = 0;
-        let active_policy_probs = active_output.get_policy_probs_maybe_noised();
+        let active_policy_probs = match active_output.as_ref() {
+            Some(human) => human.get_policy_probs_maybe_noised(),
+            None => nn_output.get_policy_probs_maybe_noised(),
+        };
         for i in 0..children_capacity {
             let child_pointer = children.get(i);
             let child = match child_pointer.get_if_allocated_relaxed() {
@@ -6583,6 +6680,7 @@ impl<'a> Search<'a> {
                 parent_utility,
                 parent_weight_per_visit,
                 is_during_search,
+                is_root,
                 false,
                 max_child_weight,
                 *count_edge_visit,
@@ -6664,6 +6762,7 @@ impl<'a> Search<'a> {
                     parent_utility,
                     parent_weight_per_visit,
                     true,
+                    is_root,
                     Some(&mut thread.rand),
                 );
                 if selection_value > max_selection_value {
@@ -6829,6 +6928,7 @@ impl<'a> Search<'a> {
                 parent_utility,
                 parent_weight_per_visit,
                 true,
+                is_root,
                 Some(&mut thread.rand),
             );
             if selection_value > max_selection_value {
@@ -7062,6 +7162,10 @@ impl<'a> Search<'a> {
             Some(o) => o,
             None => return 1.0,
         };
+        self.compute_weight_from_nn_output_some(nn_output)
+    }
+
+    fn compute_weight_from_nn_output_some(&self, nn_output: &NNOutput) -> f64 {
         if !self.search_params.use_uncertainty {
             return 1.0;
         }
@@ -7211,6 +7315,7 @@ impl<'a> Search<'a> {
             amount_to_subtract,
             amount_to_prune,
             &mut thread.stats_buf[..num_good_children],
+            &mut thread.stdevs_buf,
         );
 
         let mut win_loss_value_sum = 0.0;
@@ -7238,15 +7343,23 @@ impl<'a> Search<'a> {
         }
 
         {
-            let nn_output = node
-                .get_nn_output()
-                .expect("recompute_node_stats called on a node without nn output");
-            let win_prob = nn_output.white_win_prob as f64;
-            let loss_prob = nn_output.white_loss_prob as f64;
-            let no_result_prob = nn_output.white_no_result_prob as f64;
-            let score_mean = nn_output.white_score_mean as f64;
-            let score_mean_sq = nn_output.white_score_mean_sq as f64;
-            let lead = nn_output.white_lead as f64;
+            // Borrow without refcount churn — this runs per node backup.
+            // Same lifetime argument as get_ending_white_score_bonus. The
+            // scalars are copied out so the borrow ends before the
+            // subtree-bias bookkeeping below mutates node fields.
+            let (win_prob, loss_prob, no_result_prob, score_mean, score_mean_sq, lead, weight) = {
+                let nn_output = unsafe { node.nn_output_ref() }
+                    .expect("recompute_node_stats called on a node without nn output");
+                (
+                    nn_output.white_win_prob as f64,
+                    nn_output.white_loss_prob as f64,
+                    nn_output.white_no_result_prob as f64,
+                    nn_output.white_score_mean as f64,
+                    nn_output.white_score_mean_sq as f64,
+                    nn_output.white_lead as f64,
+                    self.compute_weight_from_nn_output_some(nn_output),
+                )
+            };
             let mut utility = self.get_result_utility(win_prob - loss_prob, no_result_prob)
                 + self.get_score_utility(score_mean, score_mean_sq);
 
@@ -7287,8 +7400,8 @@ impl<'a> Search<'a> {
                 }
             }
 
-            let weight = self.compute_weight_from_nn_output(Some(&nn_output));
-            win_loss_value_sum += (win_prob - loss_prob) * weight;
+            let win_loss_value_sum_tail = (win_prob - loss_prob) * weight;
+            win_loss_value_sum += win_loss_value_sum_tail;
             no_result_value_sum += no_result_prob * weight;
             score_mean_sum += score_mean * weight;
             score_mean_sq_sum += score_mean_sq * weight;
@@ -7420,6 +7533,7 @@ impl<'a> Search<'a> {
         amount_to_subtract: f64,
         amount_to_prune: f64,
         stats_buf: &mut [MoreNodeStats],
+        stdevs_scratch: &mut Vec<f64>,
     ) {
         let n = num_children as usize;
         if n == 0 || current_total_weight <= 0.0 {
@@ -7457,7 +7571,12 @@ impl<'a> Search<'a> {
             .as_ref()
             .expect("value_weight_distribution required when value_weight_exponent != 0");
 
-        let mut stdevs = vec![0.0f64; n];
+        // Thread-owned scratch, resized to the actual child count: no heap
+        // alloc in the steady state (capacity is retained across backups) and
+        // no fixed 362-slot zeroing (which measurably hurt multithreaded
+        // throughput through extra memory traffic).
+        stdevs_scratch.clear();
+        stdevs_scratch.resize(n, 0.0);
         let mut simple_value_sum = 0.0;
         for i in 0..n {
             let num_visits = stats_buf[i].stats.visits;
@@ -7468,7 +7587,7 @@ impl<'a> Search<'a> {
             let weight = stats_buf[i].weight_adjusted;
             let precision = 1.5 * weight.sqrt();
             const MIN_VARIANCE: f64 = 0.00000001;
-            stdevs[i] = (MIN_VARIANCE + 1.0 / precision).sqrt();
+            stdevs_scratch[i] = (MIN_VARIANCE + 1.0 / precision).sqrt();
             simple_value_sum += stats_buf[i].self_utility * weight;
         }
 
@@ -7494,7 +7613,7 @@ impl<'a> Search<'a> {
                 stats_buf[i].weight_adjusted = new_weight;
             }
 
-            let z = (stats_buf[i].self_utility - simple_value) / stdevs[i];
+            let z = (stats_buf[i].self_utility - simple_value) / stdevs_scratch[i];
             let p = distribution.get_cdf(z) + 0.0001;
             stats_buf[i].weight_adjusted *= p.powf(self.search_params.value_weight_exponent);
             total_new_unnorm_weight += stats_buf[i].weight_adjusted;
@@ -7678,17 +7797,20 @@ impl<'a> Search<'a> {
 
     fn remove_subtree_value_bias(&self, node: Option<&SearchNode>) {
         // Subtract this node's last recorded contribution from the shared bias
-        // entry, mirroring the C++ SearchNode destructor. Must run before the
-        // node is freed, on paths where the subtree bias table outlives the
-        // node (e.g. subtree reuse on move, stale-node sweeps).
+        // entry, mirroring the C++ SearchNode destructor: only the freeProp
+        // fraction is withdrawn, and the entry reference is dropped so the
+        // table's refcount GC can reclaim it. Must run before the node is
+        // freed, on paths where the subtree bias table outlives the node
+        // (e.g. subtree reuse on move, stale-node sweeps).
         let node = match node {
             Some(n) => n,
             None => return,
         };
         if let Some(entry) = node.subtree_value_bias_table_entry.as_ref() {
+            let free_prop = self.search_params.subtree_value_bias_free_prop;
             entry.update(
-                -node.last_subtree_value_bias_delta_sum,
-                -node.last_subtree_value_bias_weight,
+                -node.last_subtree_value_bias_delta_sum * free_prop,
+                -node.last_subtree_value_bias_weight * free_prop,
             );
         }
     }
@@ -7761,6 +7883,14 @@ impl<'a> Search<'a> {
 }
 
 // Initialization and core search logic
+impl<'a> Drop for Search<'a> {
+    fn drop(&mut self) {
+        // Mirrors upstream ~Search(): the node table holds non-owning raw
+        // pointers, so without this every dropped Search leaks the whole tree.
+        self.clear_search();
+    }
+}
+
 impl<'a> Search<'a> {
     fn compute_root_values(&mut self) {
         let mut root_safe_area = vec![C_EMPTY; MAX_ARR_SIZE as usize].into_boxed_slice();
@@ -7822,6 +7952,12 @@ impl<'a> Search<'a> {
             next_child: usize,
         }
 
+        // One scratch thread for the whole walk: constructing a SearchThread
+        // (MD5+SHA-256 seeding, ~35KB board/history clone) per interior node
+        // costs milliseconds-to-seconds on large reused trees, and the stats
+        // recompute only needs its stats_buf scratch space.
+        let mut scratch_thread = SearchThread::new(0, self);
+
         let root_ptr = self
             .root_node
             .as_deref()
@@ -7871,6 +8007,15 @@ impl<'a> Search<'a> {
             }
 
             let is_root = node_ptr == root_ptr;
+            // Upstream drives this walk through applyRecursivelyPostOrder-
+            // Mulithreaded, which marks every visited node with the current
+            // searchNodeAge; the mark is what keeps the retained subtree alive
+            // through the subsequent delete-all-old sweep after root filtering.
+            unsafe {
+                (*node_ptr)
+                    .node_age
+                    .store(self.search_node_age, Ordering::Release);
+            }
             let found_any_children =
                 children_capacity > 0 && !children.get(0).get_raw_ptr().is_null();
             let node = unsafe { &mut *node_ptr };
@@ -7902,8 +8047,7 @@ impl<'a> Search<'a> {
                     node.stats_lock.store(false, Ordering::Release);
                 }
             } else {
-                let mut dummy_thread = SearchThread::new(-1, self);
-                self.recompute_node_stats(node, &mut dummy_thread, 0, is_root);
+                self.recompute_node_stats(node, &mut scratch_thread, 0, is_root);
             }
 
             on_path.remove(&node_ptr);
@@ -8243,7 +8387,15 @@ impl<'a> Search<'a> {
         }
 
         debug_assert!(!child_ptr.is_null(), "child was selected but not set");
-        let inserted = thread.graph_path.insert(child_ptr as *const SearchNode);
+        // Cycle detection is only meaningful when nodes are shared via the
+        // graph table; without graph search every node is tree-unique, so skip
+        // the hash-set round trip entirely (mirrors C++, which only populates
+        // graphPath when graph search dedups a revisit).
+        let inserted = if self.search_params.use_graph_search {
+            thread.graph_path.insert(child_ptr as *const SearchNode)
+        } else {
+            true
+        };
         if !inserted {
             if count_edge_visit {
                 let children = unsafe { &*node_ptr }.get_children_with_state(node_state);
@@ -8439,6 +8591,7 @@ impl<'a> Search<'a> {
                 parent_utility,
                 parent_weight_per_visit,
                 false,
+                is_root,
                 false,
                 non_lcb_best_child_weight,
                 true,
@@ -9055,6 +9208,7 @@ impl<'a> Search<'a> {
                     &policy_probs_buf[..stats_buf_len],
                 );
             }
+            let mut stdevs_scratch = Vec::with_capacity(stats_buf.len());
             self.downweight_bad_children_and_normalize_weight(
                 num_children,
                 total_child_weight,
@@ -9062,6 +9216,7 @@ impl<'a> Search<'a> {
                 0.0,
                 0.0,
                 &mut stats_buf,
+                &mut stdevs_scratch,
             );
         }
 
@@ -9189,6 +9344,7 @@ impl<'a> Search<'a> {
                     &policy_probs_buf[..stats_buf_len],
                 );
             }
+            let mut stdevs_scratch = Vec::with_capacity(stats_buf.len());
             self.downweight_bad_children_and_normalize_weight(
                 num_children,
                 total_child_weight,
@@ -9196,6 +9352,7 @@ impl<'a> Search<'a> {
                 0.0,
                 0.0,
                 &mut stats_buf,
+                &mut stdevs_scratch,
             );
         }
 
@@ -9435,6 +9592,56 @@ mod tests {
         assert_eq!(search.get_root_visits(), 0);
         assert_eq!(search.get_chosen_move_loc(), NULL_LOC);
         assert_eq!(search.get_playout_doubling_advantage_pla(), C_EMPTY);
+    }
+
+    #[test]
+    fn test_begin_search_filter_after_reuse_does_not_dangle() {
+        // Regression for the begin_search root-filter UAF: after a first
+        // search builds a tree, a second begin_search on the SAME root (no
+        // make_move) bumps search_node_age, so the retained subtree counts as
+        // "old". When avoid-move filtering then triggers the delete-old sweep,
+        // the retained subtree must have been re-marked first — otherwise the
+        // root's child pointers dangle and the second search reads freed
+        // memory (this test would crash or trip heap corruption).
+        let mut search = search_with_dummy();
+        let mut params = SearchParams::new();
+        params.max_visits = 100;
+        params.num_threads = 1;
+        search.set_params(&params);
+        let board = Board::new(19, 19);
+        let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+        search.set_position(P_BLACK, &board, &history);
+
+        // First search: build a tree.
+        search.run_whole_search(P_BLACK);
+        assert!(search.root_node.is_some());
+        assert!(search.get_root_visits() > 0);
+
+        // Second search on the same root WITHOUT make_move — with avoid-move
+        // filtering active so any_filtered goes down the delete-old path.
+        let mut b_vec = vec![0; kata_game::board::MAX_ARR_SIZE];
+        let mut w_vec = vec![0; kata_game::board::MAX_ARR_SIZE];
+        b_vec[location::get_loc(3, 3, 19) as usize] = 1;
+        search.set_avoid_move_until_by_loc(&b_vec, &w_vec);
+        search.run_whole_search(P_BLACK);
+        assert!(search.root_node.is_some());
+        assert!(search.get_root_visits() > 0);
+
+        // Walk the root children to force dereferences of any retained nodes.
+        let root = search.root_node.as_deref().unwrap();
+        let children = root.get_children();
+        let cap = children.get_capacity();
+        let mut num_children = 0;
+        for i in 0..cap {
+            match children.get(i).get_if_allocated() {
+                Some(child) => {
+                    let _ = child.stats.visits.load(Ordering::Acquire);
+                    num_children += 1;
+                }
+                None => break,
+            }
+        }
+        assert!(num_children > 0);
     }
 
     #[test]
@@ -9844,6 +10051,7 @@ mod tests {
             1.0,
             false,
             false,
+            false,
             10.0,
             true,
             Some(&mut lcb),
@@ -9920,6 +10128,7 @@ mod tests {
                 0.1,
                 1.0,
                 true,
+                false,
                 false,
                 10.0,
                 true,

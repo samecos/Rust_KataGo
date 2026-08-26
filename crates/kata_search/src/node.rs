@@ -381,8 +381,11 @@ impl<'a> SearchNodeChildrenReference<'a> {
         }
     }
 
+    #[inline]
     pub fn get(&self, i: usize) -> &SearchChildPointer {
-        assert!(i < self.get_capacity(), "child index {} out of capacity", i);
+        // Hot path: callers already walk 0..get_capacity(), so the bound check
+        // is a debug-only invariant like upstream's NDEBUG asserts.
+        debug_assert!(i < self.get_capacity(), "child index {} out of capacity", i);
         if i < children_sizes::SIZE0_TOTAL {
             &self.node.children0.as_ref().unwrap()[i]
         } else if i < children_sizes::SIZE1_TOTAL {
@@ -708,6 +711,24 @@ impl SearchNode {
             None
         } else {
             Some(Arc::clone(unsafe { &*ptr }))
+        }
+    }
+
+    /// Borrow the stored NN output without touching the Arc refcount.
+    ///
+    /// # Safety
+    /// The node must outlive the returned reference. This holds for any
+    /// caller holding `&SearchNode` during a search: nodes are freed only
+    /// between searches, and outputs replaced mid-search are deferred to the
+    /// owning thread's cleanup list until the next `begin_search`.
+    pub unsafe fn nn_output_ref(&self) -> Option<&NNOutput> {
+        let ptr = self.nn_output.load(Ordering::Acquire);
+        if ptr.is_null() {
+            None
+        } else {
+            // SAFETY: caller guarantees the pointee outlives the borrow; the
+            // load above is non-null.
+            Some(unsafe { &**ptr })
         }
     }
 

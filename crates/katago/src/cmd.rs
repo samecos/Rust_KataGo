@@ -7,6 +7,7 @@ pub mod cuda_fingerprint;
 pub mod eval_sgf;
 pub mod gatekeeper;
 pub mod gen_book;
+pub mod genconfig;
 pub mod gpu_test;
 pub mod gtp;
 pub mod r#match;

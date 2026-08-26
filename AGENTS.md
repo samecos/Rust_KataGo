@@ -17,6 +17,12 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
 - GTP 冒烟:`--model /dev/null`(dummy 后端);真实推理:`--model D:/code/b11fix.onnx
   --override-config nnBackend=cudabackend`(CUDA)或 `nnBackend=trtbackend`(TRT,
   首次构建引擎较慢,plan 缓存在模型旁)
+- genconfig(交互式生成 GTP 配置,对齐上游 benchmark.cpp 的 MainCmds::genconfig):
+  问答规则/搜索限制/后端(多出 nnBackend 选择写入配置,Rust 端运行时选后端所需)/
+  显存缓存/设备,然后 ternary 搜索调优 numSearchThreads 并测半 batch,产物可直接
+  供 `gtp --config` 使用;不测"每 GPU 2 个 NN server 线程"(本仓库单消费者凑批设计,
+  `NnEvaluator::set_num_threads` 为 no-op)。复用 benchmark.rs 的调优件
+  (create_nneval/do_auto_tune_threads 等,pub(crate))
 - 数值对拍:`cargo test -p kata_nn --test dump_nn_io_cuda --features cuda --release`
   生成转储 → `.venv/Scripts/python.exe scripts/compare_nn_output.py
   crates/kata_nn/target/nn_io_dump_cuda`(ORT FP32 黄金参考;gates:policy 5e-2、

@@ -265,7 +265,10 @@ searchFactorWhenWinningThreshold = 0.95
 # Maximum number of positions to send to a single GPU at once. The default
 # value is roughly equal to numSearchThreads, but can be specified manually
 # if running out of memory, or using multiple GPUs that expect to share work.
-# nnMaxBatchSize = <integer>
+# Tuning may have specified a value here if it measured it to be faster.
+# If you later change numSearchThreads yourself, and this has been set to a
+# specific value, adjust this proportionally and/or consider benchmarking.
+$$NN_MAX_BATCH_SIZE
 
 # Controls the neural network cache size, which is the primary RAM/memory use.
 # KataGo will cache up to (2 ** nnCacheSizePowerOfTwo) many neural net
@@ -470,6 +473,8 @@ pub fn make_config(
     max_time: f64,
     max_ponder_time: f64,
     device_idxs: &[i32],
+    server_threads_per_device: i32,
+    nn_max_batch_size: i32,
     nn_cache_size_power_of_two: i32,
     nn_mutex_pool_size_power_of_two: i32,
     num_search_threads: i32,
@@ -585,20 +590,40 @@ pub fn make_config(
         &global::int_to_string(nn_mutex_pool_size_power_of_two),
     );
 
+    if nn_max_batch_size > 0 {
+        replace(
+            "$$NN_MAX_BATCH_SIZE",
+            &format!("nnMaxBatchSize = {}", global::int_to_string(nn_max_batch_size)),
+        );
+    } else {
+        replace("$$NN_MAX_BATCH_SIZE", "# nnMaxBatchSize = <integer>");
+    }
+
     let multiple_gpus = if device_idxs.is_empty() {
-        String::new()
+        if server_threads_per_device > 1 {
+            format!(
+                "numNNServerThreadsPerModel = {}\n",
+                global::int_to_string(server_threads_per_device)
+            )
+        } else {
+            String::new()
+        }
     } else {
         let mut replacement = String::new();
         replacement.push_str(&format!(
             "numNNServerThreadsPerModel = {}\n",
-            device_idxs.len()
+            global::int_to_string((device_idxs.len() as i32) * server_threads_per_device)
         ));
-        for (i, &device) in device_idxs.iter().enumerate() {
-            let i_str = global::int_to_string(i as i32);
-            let dev_str = global::int_to_string(device);
-            replacement.push_str(&format!("cudaDeviceToUseThread{i_str} = {dev_str}\n"));
-            replacement.push_str(&format!("trtDeviceToUseThread{i_str} = {dev_str}\n"));
-            replacement.push_str(&format!("openclDeviceToUseThread{i_str} = {dev_str}\n"));
+        let mut thread_idx = 0;
+        for &device in device_idxs {
+            for _ in 0..server_threads_per_device {
+                let t_str = global::int_to_string(thread_idx);
+                let dev_str = global::int_to_string(device);
+                replacement.push_str(&format!("cudaDeviceToUseThread{t_str} = {dev_str}\n"));
+                replacement.push_str(&format!("trtDeviceToUseThread{t_str} = {dev_str}\n"));
+                replacement.push_str(&format!("openclDeviceToUseThread{t_str} = {dev_str}\n"));
+                thread_idx += 1;
+            }
         }
         replacement
     };
@@ -613,7 +638,7 @@ mod tests {
     use kata_core::config::ConfigParser;
 
     fn make_default_config() -> String {
-        make_config(&Rules::default(), 500, 300, 10.0, 60.0, &[], 18, 16, 6)
+        make_config(&Rules::default(), 500, 300, 10.0, 60.0, &[], 1, 0, 18, 16, 6)
     }
 
     #[test]
@@ -656,6 +681,8 @@ mod tests {
             MAX_TIME_LIMIT,
             MAX_TIME_LIMIT,
             &[],
+            1,
+            0,
             18,
             16,
             6,
@@ -669,19 +696,43 @@ mod tests {
 
     #[test]
     fn test_pondering_disabled() {
-        let config = make_config(&Rules::default(), 500, 300, 10.0, 0.0, &[], 18, 16, 6);
+        let config = make_config(&Rules::default(), 500, 300, 10.0, 0.0, &[], 1, 0, 18, 16, 6);
         assert!(config.contains("ponderingEnabled = false"));
         assert!(config.contains("# maxTimePondering = 60.0"));
     }
 
     #[test]
     fn test_multiple_gpus_replaced() {
-        let config = make_config(&Rules::default(), 500, 300, 10.0, 60.0, &[0, 1], 18, 16, 6);
+        let config = make_config(&Rules::default(), 500, 300, 10.0, 60.0, &[0, 1], 1, 0, 18, 16, 6);
         assert!(config.contains("numNNServerThreadsPerModel = 2"));
         assert!(config.contains("cudaDeviceToUseThread0 = 0"));
         assert!(config.contains("cudaDeviceToUseThread1 = 1"));
         assert!(config.contains("trtDeviceToUseThread0 = 0"));
         assert!(config.contains("openclDeviceToUseThread1 = 1"));
+    }
+
+    #[test]
+    fn test_nn_max_batch_size() {
+        let config = make_config(&Rules::default(), 500, 300, 10.0, 60.0, &[], 1, 24, 18, 16, 6);
+        assert!(config.contains("nnMaxBatchSize = 24"));
+        let config = make_default_config();
+        assert!(config.contains("# nnMaxBatchSize = <integer>"));
+    }
+
+    #[test]
+    fn test_server_threads_per_device() {
+        // No explicit devices: just the server thread count when > 1.
+        let config = make_config(&Rules::default(), 500, 300, 10.0, 60.0, &[], 2, 0, 18, 16, 6);
+        assert!(config.contains("numNNServerThreadsPerModel = 2"));
+        assert!(!config.contains("cudaDeviceToUseThread"));
+        // Explicit devices: threads multiply and per-thread device keys enumerate
+        // every server thread of every device.
+        let config = make_config(&Rules::default(), 500, 300, 10.0, 60.0, &[0, 1], 2, 0, 18, 16, 6);
+        assert!(config.contains("numNNServerThreadsPerModel = 4"));
+        assert!(config.contains("cudaDeviceToUseThread0 = 0"));
+        assert!(config.contains("cudaDeviceToUseThread1 = 0"));
+        assert!(config.contains("cudaDeviceToUseThread2 = 1"));
+        assert!(config.contains("cudaDeviceToUseThread3 = 1"));
     }
 
     #[test]

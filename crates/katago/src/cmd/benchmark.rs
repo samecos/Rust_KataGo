@@ -36,9 +36,9 @@ use kata_search::search::Search;
 
 use crate::cli::CommonArgs;
 
-const DEFAULT_MAX_VISITS: i64 = 800;
-const DEFAULT_SECONDS_PER_GAME_MOVE: f64 = 5.0;
-const TERNARY_SEARCH_INITIAL_MAX: i32 = 32;
+pub(crate) const DEFAULT_MAX_VISITS: i64 = 800;
+pub(crate) const DEFAULT_SECONDS_PER_GAME_MOVE: f64 = 5.0;
+pub(crate) const TERNARY_SEARCH_INITIAL_MAX: i32 = 32;
 const MIN_BENCHMARK_SGF_DATA_SIZE: i32 = 9;
 const MAX_BENCHMARK_SGF_DATA_SIZE: i32 = 19;
 const DEFAULT_BENCHMARK_SGF_DATA_SIZE: i32 = 19;
@@ -93,12 +93,12 @@ struct BenchmarkArgs {
 
 /// Results collected for a single benchmark configuration.
 #[derive(Debug, Clone, Copy)]
-struct BenchmarkResults {
-    num_threads: i32,
+pub(crate) struct BenchmarkResults {
+    pub(crate) num_threads: i32,
     total_positions_searched: i32,
     total_positions: i32,
-    total_visits: i64,
-    total_seconds: f64,
+    pub(crate) total_visits: i64,
+    pub(crate) total_seconds: f64,
     num_nn_evals: i64,
     num_nn_batches: i64,
     avg_batch_size: f64,
@@ -172,7 +172,7 @@ impl BenchmarkResults {
         s
     }
 
-    fn compute_elo_effect(&self, seconds_per_game_move: f64) -> f64 {
+    pub(crate) fn compute_elo_effect(&self, seconds_per_game_move: f64) -> f64 {
         const ELO_GAIN_PER_DOUBLING: f64 = 250.0;
 
         let compute_elo_cost = |base_visits: f64| {
@@ -500,7 +500,7 @@ fn load_sgf(
 ///
 /// These strings are taken from `TestCommon::getBenchmarkSGFData` in
 /// `KataGo/cpp/tests/testcommon.cpp` to match the original C++ behavior.
-fn get_benchmark_sgf_data(board_size: i32) -> &'static str {
+pub(crate) fn get_benchmark_sgf_data(board_size: i32) -> &'static str {
     match board_size {
         9 => {
             "(;FF[4]GM[1]SZ[9]HA[0]KM[7];B[ef];W[ed];B[ge];W[gc];B[cc];W[cd];B[bd];W[ce];B[be];W[dg];B[cf];W[df];B[de];W[dd];B[ee];W[cg];B[bf];W[cb];B[eg];W[bc];B[bh];W[he];B[hd];W[gf];B[fe];W[hf];B[fc];W[eb];B[gd];W[fh];B[eh];W[hh];B[ac];W[dc];B[fb];W[ab];B[fg];W[gg];B[fi];W[bg];B[dh];W[gh];B[ea];W[da];B[fa];W[ad];B[ch];W[id];B[ic];W[ie];B[gb];W[gi];B[ec];W[hc];B[hb];W[ei];B[db];W[ae];B[ag];W[eb];B[ig];W[db];B[ih];W[ii];B[di];W[ac];B[fi];W[hg];B[ei];W[af];B[ff];W[if];B[fd];W[bb])"
@@ -569,7 +569,7 @@ fn setup_initial_board_and_hist(
     Ok((board, next_pla, hist))
 }
 
-fn create_nneval(
+pub(crate) fn create_nneval(
     max_num_threads: i32,
     sgf: &CompactSgf,
     model_file: &str,
@@ -642,7 +642,7 @@ fn set_num_threads(
     nn_eval.set_current_batch_size(desired_batch_size);
 }
 
-fn do_fixed_tune_threads(
+pub(crate) fn do_fixed_tune_threads(
     params: &SearchParams,
     sgf: &CompactSgf,
     num_positions_per_game: i32,
@@ -689,7 +689,7 @@ fn do_fixed_tune_threads(
     Ok(results)
 }
 
-fn do_auto_tune_threads(
+pub(crate) fn do_auto_tune_threads(
     params: &SearchParams,
     sgf: &CompactSgf,
     num_positions_per_game: i32,
@@ -879,7 +879,7 @@ fn get_or_run_result(
     Ok(result)
 }
 
-fn benchmark_search_on_positions_and_print(
+pub(crate) fn benchmark_search_on_positions_and_print(
     params: SearchParams,
     sgf: &CompactSgf,
     num_positions_to_use: i32,
@@ -980,7 +980,7 @@ fn benchmark_search_on_positions_and_print(
     Ok(result)
 }
 
-fn print_elo_comparison(
+pub(crate) fn print_elo_comparison(
     results: &[BenchmarkResults],
     seconds_per_game_move: f64,
     out: &mut dyn Write,
