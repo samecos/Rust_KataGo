@@ -5998,20 +5998,20 @@ impl<'a> Search<'a> {
         &self,
         nn_policy_prob: &mut f64,
         child_utility: &mut f64,
-        rand: &mut Rand,
+        rand: Option<&mut Rand>,
         parent: &SearchNode,
     ) {
-        if self.search_params.wide_root_noise <= 0.0 {
-            return;
-        }
+        // For very large wideRootNoise, go ahead and also smooth out the policy
         *nn_policy_prob =
             nn_policy_prob.powf(1.0 / (4.0 * self.search_params.wide_root_noise + 1.0));
-        if rand.next_bool(0.5) {
-            let bonus = self.search_params.wide_root_noise * rand.next_gaussian().abs();
-            if parent.next_pla == P_WHITE {
-                *child_utility += bonus;
-            } else {
-                *child_utility -= bonus;
+        if let Some(rand) = rand {
+            if rand.next_bool(0.5) {
+                let bonus = self.search_params.wide_root_noise * rand.next_gaussian().abs();
+                if parent.next_pla == P_WHITE {
+                    *child_utility += bonus;
+                } else {
+                    *child_utility -= bonus;
+                }
             }
         }
     }
@@ -6033,6 +6033,7 @@ impl<'a> Search<'a> {
         best_child_weight: f64,
         count_edge_visit: bool,
         lcb_buf: Option<&mut f64>,
+        rand: Option<&mut Rand>,
     ) -> f64 {
         let move_pos = self.get_pos(move_loc) as usize;
         if move_pos >= policy_probs.len() {
@@ -6130,10 +6131,12 @@ impl<'a> Search<'a> {
             }
 
             if self.search_params.wide_root_noise > 0.0 && nn_policy_prob >= 0.0 {
-                // Deterministic policy smoothing only; the random utility bonus
-                // requires a search thread's RNG.
-                nn_policy_prob =
-                    nn_policy_prob.powf(1.0 / (4.0 * self.search_params.wide_root_noise + 1.0));
+                self.maybe_apply_wide_root_noise(
+                    &mut nn_policy_prob,
+                    &mut child_utility,
+                    rand,
+                    node,
+                );
             }
         }
 
@@ -6197,6 +6200,7 @@ impl<'a> Search<'a> {
         _parent_utility: f64,
         _parent_weight_per_visit: f64,
         is_during_search: bool,
+        rand: Option<&mut Rand>,
     ) -> f64 {
         let move_pos = self.get_pos(move_loc) as usize;
         if move_pos >= policy_probs.len() {
@@ -6207,15 +6211,14 @@ impl<'a> Search<'a> {
             return Self::POLICY_ILLEGAL_SELECTION_VALUE;
         }
 
-        let child_utility = fpu_value;
+        let mut child_utility = fpu_value;
 
         let is_root = self
             .root_node
             .as_deref()
             .map_or(false, |root| std::ptr::eq(node, root));
         if is_during_search && is_root && self.search_params.wide_root_noise > 0.0 {
-            nn_policy_prob =
-                nn_policy_prob.powf(1.0 / (4.0 * self.search_params.wide_root_noise + 1.0));
+            self.maybe_apply_wide_root_noise(&mut nn_policy_prob, &mut child_utility, rand, node);
         }
 
         explore_selection_value_raw(
@@ -6562,6 +6565,7 @@ impl<'a> Search<'a> {
                 max_child_weight,
                 *count_edge_visit,
                 None,
+                Some(&mut thread.rand),
             );
             if selection_value > max_selection_value {
                 max_selection_value = selection_value;
@@ -6638,6 +6642,7 @@ impl<'a> Search<'a> {
                     parent_utility,
                     parent_weight_per_visit,
                     true,
+                    Some(&mut thread.rand),
                 );
                 if selection_value > max_selection_value {
                     max_selection_value = selection_value;
@@ -6802,6 +6807,7 @@ impl<'a> Search<'a> {
                 parent_utility,
                 parent_weight_per_visit,
                 true,
+                Some(&mut thread.rand),
             );
             if selection_value > max_selection_value {
                 max_selection_value = selection_value;
@@ -6876,9 +6882,10 @@ impl<'a> Search<'a> {
             && node.subtree_value_bias_table_entry.is_some()
         {
             let entry = node.subtree_value_bias_table_entry.as_ref().unwrap();
-            if entry.weight_sum > 0.001 {
-                utility += self.search_params.subtree_value_bias_factor * entry.delta_utility_sum
-                    / entry.weight_sum;
+            let (delta_utility_sum, weight_sum) = entry.read();
+            if weight_sum > 0.001 {
+                utility += self.search_params.subtree_value_bias_factor * delta_utility_sum
+                    / weight_sum;
             }
         }
 
@@ -7230,22 +7237,30 @@ impl<'a> Search<'a> {
                     let utility_children = utility_sum / current_total_child_weight;
                     let subtree_value_bias_weight = orig_total_child_weight
                         .powf(self.search_params.subtree_value_bias_weight_exponent);
-                    let _subtree_value_bias_delta_sum =
+                    let subtree_value_bias_delta_sum =
                         (utility_children - utility) * subtree_value_bias_weight;
 
-                    // The Rust SubtreeValueBiasEntry currently lacks per-entry locking,
-                    // so the table-update side is skipped here. We still apply the
-                    // existing bias so that behaviour matches when the factor is nonzero.
-                    let new_entry_delta_utility_sum = entry.delta_utility_sum;
-                    let new_entry_weight_sum = entry.weight_sum;
+                    // Move this node's contribution in the shared entry to the
+                    // current (utility_children - utility) delta, atomically.
+                    // Mirrors C++ searchupdatehelpers.cpp: the node stores its
+                    // last recorded contribution so recompute is idempotent.
+                    let (new_entry_delta_utility_sum, new_entry_weight_sum) = entry.update(
+                        subtree_value_bias_delta_sum
+                            - node.last_subtree_value_bias_delta_sum,
+                        subtree_value_bias_weight - node.last_subtree_value_bias_weight,
+                    );
+                    node.last_subtree_value_bias_delta_sum = subtree_value_bias_delta_sum;
+                    node.last_subtree_value_bias_weight = subtree_value_bias_weight;
+
                     if new_entry_weight_sum > 0.001 {
-                        utility += bias_factor * new_entry_delta_utility_sum / new_entry_weight_sum;
+                        utility += bias_factor * new_entry_delta_utility_sum
+                            / new_entry_weight_sum;
                     }
                 } else {
-                    let new_entry_delta_utility_sum = entry.delta_utility_sum;
-                    let new_entry_weight_sum = entry.weight_sum;
+                    let (new_entry_delta_utility_sum, new_entry_weight_sum) = entry.read();
                     if new_entry_weight_sum > 0.001 {
-                        utility += bias_factor * new_entry_delta_utility_sum / new_entry_weight_sum;
+                        utility += bias_factor * new_entry_delta_utility_sum
+                            / new_entry_weight_sum;
                     }
                 }
             }
@@ -7640,11 +7655,20 @@ impl<'a> Search<'a> {
     }
 
     fn remove_subtree_value_bias(&self, node: Option<&SearchNode>) {
-        // TODO: Subtract this node's contribution from the shared bias entry.
-        // The entry currently has no internal lock, so for safety we just drop
-        // the node's reference. This is functionally conservative and does not
-        // affect the current test suite.
-        let _ = node;
+        // Subtract this node's last recorded contribution from the shared bias
+        // entry, mirroring the C++ SearchNode destructor. Must run before the
+        // node is freed, on paths where the subtree bias table outlives the
+        // node (e.g. subtree reuse on move, stale-node sweeps).
+        let node = match node {
+            Some(n) => n,
+            None => return,
+        };
+        if let Some(entry) = node.subtree_value_bias_table_entry.as_ref() {
+            entry.update(
+                -node.last_subtree_value_bias_delta_sum,
+                -node.last_subtree_value_bias_weight,
+            );
+        }
     }
 
     fn delete_all_old_or_all_new_table_nodes_and_subtree_value_bias_multithreaded(
@@ -7691,11 +7715,23 @@ impl<'a> Search<'a> {
 
         for map_mutex in &node_table.entries {
             let mut map = map_mutex.lock();
+            let mut ptrs: Vec<*mut SearchNode> = Vec::with_capacity(map.len());
             for (_, ptr) in map.drain() {
                 if !ptr.is_null() {
-                    unsafe {
-                        drop(Box::from_raw(ptr));
+                    ptrs.push(ptr);
+                }
+            }
+            drop(map);
+            for ptr in ptrs {
+                unsafe {
+                    let node = &*ptr;
+                    if let Some(entry) = node.subtree_value_bias_table_entry.as_ref() {
+                        entry.update(
+                            -node.last_subtree_value_bias_delta_sum,
+                            -node.last_subtree_value_bias_weight,
+                        );
                     }
+                    drop(Box::from_raw(ptr));
                 }
             }
         }
@@ -8384,6 +8420,7 @@ impl<'a> Search<'a> {
                 false,
                 non_lcb_best_child_weight,
                 true,
+                None,
                 None,
             );
 
@@ -9788,6 +9825,7 @@ mod tests {
             10.0,
             true,
             Some(&mut lcb),
+            None,
         );
 
         // Expected: explore = 1.0 * 0.5 / (1 + 10), value = -0.2 from Black's perspective.

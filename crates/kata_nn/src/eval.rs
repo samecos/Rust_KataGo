@@ -35,13 +35,22 @@ use crate::inputs::{MiscNNInputParams, NNOutput, get_hash, nn_pos};
 use crate::sgf_meta::SgfMetadata;
 use crate::version::{get_inputs_version, get_num_global_features, get_num_spatial_features};
 
+/// Number of slots per hash bucket. Unlike the C++ `NNCacheTable` (single
+/// slot per bucket, replace on collision), each bucket here holds several
+/// entries: lookups move the hit to the front (move-to-front LRU) and
+/// inserts evict the tail slot, so colliding hashes coexist instead of
+/// thrashing.
+const NN_CACHE_ENTRY_SIZE: usize = 4;
+
 /// A simple hash table caching `NNOutput` values by `nn_hash`.
 ///
-/// The implementation mirrors C++ `NNCacheTable`: a flat array of entries with
-/// a smaller mutex pool guarding access.
+/// The implementation follows the C++ `NNCacheTable` structure (flat array
+/// with a smaller mutex pool guarding access) but extends each bucket to
+/// `NN_CACHE_ENTRY_SIZE` entries with move-to-front replacement, so a bucket
+/// survives multiple colliding hashes instead of thrashing on every collision.
 pub struct NnCacheTable {
     table_mask: u64,
-    entries: Vec<UnsafeCell<Option<Arc<NNOutput>>>>,
+    entries: Vec<UnsafeCell<[Option<Arc<NNOutput>>; NN_CACHE_ENTRY_SIZE]>>,
     mutexes: Vec<Mutex<()>>,
     mutex_mask: u32,
 }
@@ -66,7 +75,7 @@ impl NnCacheTable {
 
         let mut entries = Vec::with_capacity(table_size as usize);
         for _ in 0..table_size {
-            entries.push(UnsafeCell::new(None));
+            entries.push(UnsafeCell::new(std::array::from_fn(|_| None)));
         }
         let mutexes: Vec<Mutex<()>> = (0..mutex_count).map(|_| Mutex::new(())).collect();
 
@@ -79,55 +88,60 @@ impl NnCacheTable {
     }
 
     /// Look up an output by hash. Returns `None` if not present.
+    ///
+    /// On a hit the entry is moved to the front of its bucket (move-to-front
+    /// LRU, mirroring C++ `NNCacheTable::get`).
     pub fn get(&self, nn_hash: Hash128) -> Option<Arc<NNOutput>> {
         let idx = (nn_hash.hash0 & self.table_mask) as usize;
         let mutex_idx = (idx as u32 & self.mutex_mask) as usize;
         let _lock = self.mutexes[mutex_idx].lock().unwrap();
 
-        // Safety: we hold the mutex for this entry.
-        let entry = unsafe { &*self.entries[idx].get() };
-        entry.as_ref().and_then(|ptr| {
-            if ptr.nn_hash == nn_hash {
-                Some(Arc::clone(ptr))
-            } else {
-                None
+        // Safety: we hold the mutex for this bucket.
+        let bucket = unsafe { &mut *self.entries[idx].get() };
+        for i in 0..bucket.len() {
+            if let Some(ptr) = &bucket[i] {
+                if ptr.nn_hash == nn_hash {
+                    let found = Arc::clone(ptr);
+                    if i > 0 {
+                        // Rotate the prefix so the hit lands at slot 0.
+                        bucket[..=i].rotate_right(1);
+                    }
+                    return Some(found);
+                }
             }
-        })
+        }
+        None
     }
 
     /// Store `output` in the cache, indexed by `output.nn_hash`.
+    ///
+    /// The new entry is inserted at the front of its bucket; the tail slot
+    /// (least recently used) is evicted and dropped after the lock is
+    /// released, matching the C++ design.
     pub fn set(&self, output: &Arc<NNOutput>) {
         let idx = (output.nn_hash.hash0 & self.table_mask) as usize;
         let mutex_idx = (idx as u32 & self.mutex_mask) as usize;
         let _lock = self.mutexes[mutex_idx].lock().unwrap();
 
-        // Safety: we hold the mutex for this entry. The old value is swapped
-        // out and dropped after the lock is released, matching the C++ design.
-        let old = unsafe { (*self.entries[idx].get()).replace(Arc::clone(output)) };
+        // Safety: we hold the mutex for this bucket.
+        let bucket = unsafe { &mut *self.entries[idx].get() };
+        let mut evicted = bucket[NN_CACHE_ENTRY_SIZE - 1].take();
+        for i in (1..NN_CACHE_ENTRY_SIZE).rev() {
+            bucket[i] = bucket[i - 1].take();
+        }
+        bucket[0] = Some(Arc::clone(output));
         drop(_lock);
-        drop(old);
+        drop(evicted);
     }
 
     /// Remove all entries from the cache.
     pub fn clear(&self) {
-        let mut old_value = None;
         for idx in 0..self.entries.len() {
             let mutex_idx = (idx as u32 & self.mutex_mask) as usize;
             let _lock = self.mutexes[mutex_idx].lock().unwrap();
-            // Safety: we hold the mutex for this entry.
-            std::mem::swap(unsafe { &mut *self.entries[idx].get() }, &mut old_value);
-            drop(_lock);
-            old_value = None;
-        }
-    }
-}
-
-impl Drop for NnCacheTable {
-    fn drop(&mut self) {
-        for entry in &self.entries {
-            // Safety: no other thread can be accessing the table during drop.
-            unsafe {
-                *entry.get() = None;
+            // Safety: we hold the mutex for this bucket.
+            for slot in unsafe { &mut *self.entries[idx].get() } {
+                *slot = None;
             }
         }
     }
@@ -2037,15 +2051,45 @@ mod tests {
         let out1 = output_with_hash(hash1);
         cache.set(&out0);
         cache.set(&out1);
-        // The table stores only one entry per bucket, so out1 overwrites out0.
-        // The full-hash check must prevent returning out1 for hash0.
-        assert!(cache.get(hash0).is_none());
-        assert_eq!(cache.get(hash1).unwrap().nn_hash, hash1);
-
-        // Re-store out0 and verify it replaces out1 in the same bucket.
-        cache.set(&out0);
-        assert!(cache.get(hash1).is_none());
+        // Both colliding entries coexist within the bucket's slots, and the
+        // full-hash check keeps their lookups distinct.
         assert_eq!(cache.get(hash0).unwrap().nn_hash, hash0);
+        assert_eq!(cache.get(hash1).unwrap().nn_hash, hash1);
+    }
+
+    #[test]
+    fn test_cache_bucket_evicts_lru_on_overflow() {
+        let cache = NnCacheTable::new(4, 2);
+        // Five hashes that all land in bucket 0 (i * 16 mod 16 == 0).
+        let hashes: Vec<_> = (0..5).map(|i| Hash128::new(i * 16, 0)).collect();
+        for h in &hashes {
+            cache.set(&output_with_hash(*h));
+        }
+        // Only 4 slots per bucket: the first-inserted, never-touched entry is
+        // the LRU victim.
+        assert!(cache.get(hashes[0]).is_none());
+        for h in &hashes[1..] {
+            assert!(cache.get(*h).is_some());
+        }
+    }
+
+    #[test]
+    fn test_cache_get_refreshes_recency() {
+        let cache = NnCacheTable::new(4, 2);
+        let hashes: Vec<_> = (0..5).map(|i| Hash128::new(i * 16, 0)).collect();
+        for h in &hashes[..4] {
+            cache.set(&output_with_hash(*h));
+        }
+        // Touch hash0 so it becomes the most recently used entry.
+        assert!(cache.get(hashes[0]).is_some());
+        // Inserting a 5th colliding entry must evict hash1 (now LRU), not
+        // the refreshed hash0.
+        cache.set(&output_with_hash(hashes[4]));
+        assert!(cache.get(hashes[0]).is_some());
+        assert!(cache.get(hashes[1]).is_none());
+        for h in &hashes[2..] {
+            assert!(cache.get(*h).is_some());
+        }
     }
 
     #[test]

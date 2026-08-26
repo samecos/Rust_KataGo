@@ -66,7 +66,9 @@ def play_game(cmd_a, cmd_b, a_black: bool, visits: int) -> str:
             # 双 pass 终局
             score = cmd(black, "final_score").strip()
             return "B" if score.startswith("B+") else "W"
-    raise RuntimeError("game exceeded move limit")
+    # 走满手上限仍未双 pass：直接计分兜底（等强引擎偶发互不虚着时会走到这里）
+    score = cmd(black, "final_score").strip()
+    return "B" if score.startswith("B+") else "W"
 
 
 def main():

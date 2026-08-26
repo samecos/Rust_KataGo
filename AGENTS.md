@@ -76,7 +76,9 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   fork 主规划,跨对话对齐入口,CUDA 性能动工前必读其 §1/§2/§8**)、
   cuda-optimization-plan.md(M4 路线图与 SM120 时效资料)、
   fork-sm120-kernel-notes.md(KataGomo_fork 认证 plan 提炼)、
-  使用与GUI接入.md(GTP GUI 接入与配置用法)
+  搜索算法调研与改进计划.md(kata_search 现状审计、官方 KataGo 演进与学术前沿、
+  搜索树改进 P0-P2 路线;含 wideRootNoise 随机项/pondering/subtreeValueBias 写侧/
+  evalCache 四处移植断裂清单)、使用与GUI接入.md(GTP GUI 接入与配置用法)
 - `plans/`:autotune 产物(best-tactic-plan.json、autotune-history.json)
 
 ## 约定

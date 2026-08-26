@@ -139,6 +139,8 @@ pub struct GtpEngine {
     initial_genmove_params: SearchParams,
     initial_analysis_params: SearchParams,
     is_genmove_params: bool,
+    pondering_enabled: bool,
+    pondering_active: bool,
 
     b_time_controls: TimeControls,
     w_time_controls: TimeControls,
@@ -282,7 +284,7 @@ impl GtpEngine {
         }
 
         let has_human_model = human_model_file.is_some();
-        let (initial_genmove_params, initial_analysis_params) =
+        let (mut initial_genmove_params, mut initial_analysis_params) =
             load_genmove_and_analysis_params(&cfg, has_human_model)?;
 
         let pondering_enabled = if cfg.contains("ponderingEnabled") {
@@ -290,7 +292,24 @@ impl GtpEngine {
         } else {
             false
         };
-        let _ = pondering_enabled;
+        // Safety bound mirroring the official gtp_example.cfg guidance
+        // (`maxTimePondering = 60.0`): if pondering is enabled but no pondering
+        // limit was configured at all, cap the background search at 60 s per
+        // position instead of burning the GPU unboundedly.
+        if pondering_enabled {
+            const UNBOUNDED_TIME: f64 = 1.0e12;
+            const UNBOUNDED_COUNT: i64 = 1_i64 << 50;
+            let bound_pondering = |p: &mut SearchParams| {
+                if p.max_time_pondering >= UNBOUNDED_TIME
+                    && p.max_visits_pondering >= UNBOUNDED_COUNT
+                    && p.max_playouts_pondering >= UNBOUNDED_COUNT
+                {
+                    p.max_time_pondering = 60.0;
+                }
+            };
+            bound_pondering(&mut initial_genmove_params);
+            bound_pondering(&mut initial_analysis_params);
+        }
 
         let cleanup_before_pass = if cfg.contains("cleanupBeforePass") {
             cfg.get_enabled("cleanupBeforePass")
@@ -505,6 +524,8 @@ impl GtpEngine {
             initial_genmove_params,
             initial_analysis_params,
             is_genmove_params: true,
+            pondering_enabled,
+            pondering_active: false,
             b_time_controls: TimeControls::new(),
             w_time_controls: TimeControls::new(),
             initial_board: board.clone(),
@@ -621,6 +642,8 @@ impl GtpEngine {
             initial_genmove_params: params.clone(),
             initial_analysis_params: params.clone(),
             is_genmove_params: true,
+            pondering_enabled: false,
+            pondering_active: false,
             b_time_controls: TimeControls::new(),
             w_time_controls: TimeControls::new(),
             initial_board: board.clone(),
@@ -1235,6 +1258,12 @@ impl GtpEngine {
             if currently_genmoving {
                 currently_genmoving = false;
                 self.stop_and_wait();
+            }
+            // Any incoming command ends an in-flight pondering search before
+            // the handler touches engine state.
+            if self.pondering_active {
+                self.bot.stop_and_wait();
+                self.pondering_active = false;
             }
 
             if line.is_empty() {
@@ -2180,7 +2209,14 @@ impl GtpEngine {
                 break;
             }
 
-            let _ = maybe_start_pondering;
+            if maybe_start_pondering
+                && self.pondering_enabled
+                && !currently_analyzing
+                && !currently_genmoving
+            {
+                self.bot.ponder();
+                self.pondering_active = true;
+            }
         }
 
         if currently_analyzing {
@@ -2188,6 +2224,10 @@ impl GtpEngine {
         }
         if currently_genmoving {
             self.stop_and_wait();
+        }
+        if self.pondering_active {
+            self.bot.stop_and_wait();
+            self.pondering_active = false;
         }
 
         Ok(())

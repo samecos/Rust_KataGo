@@ -93,6 +93,20 @@ GUI 里的胜率曲线与领地热图实时变化。不带 interval 则保留一
 | kata-raw-nn | ✅（调试用） |
 | set_position / clear_cache / final_score | ✅ |
 
+### 后台思考(pondering)与选点分散
+
+- **对局场景**:`--override-config ponderingEnabled=true` 可在等待对手落子期间后台预搜,
+  落子后即刻响应并大幅缓解"走几步后新局面首帧候选集中"(树已在后台展开)。
+  未配置任何 pondering 限额(`maxVisitsPondering`/`maxPlayoutsPondering`/`maxTimePondering`)
+  时自动套 60 秒/手的安全上限;如需更长可显式设 `maxTimePondering`(秒)。
+- **分析场景(Lizzie/Sabaki 等)**:保持默认 `ponderingEnabled=false`(GUI 频繁 play/undo
+  会让后台搜索持续占 GPU)。分析时想看到更多候选点,用
+  `--override-config analysisWideRootNoise=0.25` 左右(官方语义"强制分析更多样的着法",
+  0.04 为默认微扰,1.0 会摊到全盘,推荐 0.2-0.3)。
+- **跨手洞见(EvalCache)**:`gtp_cuda.cfg` 已默认 `useEvalCache=true`——交互分析往深处走、
+  解决某个盲点后回退到早先局面,引擎会记住该分支的解,早先局面的搜索更容易顺着已解
+  分支继续深挖(官方 v1.16.4 机制;`clear_cache` 命令可整体清空)。
+
 ## 4. 常见问题
 
 - **启动报 `cudaTacticPlan ... mismatch`**：GPU/模型与认证时不符。重跑

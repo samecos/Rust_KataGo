@@ -36,6 +36,24 @@ impl AtomicF64 {
     pub fn store(&self, value: f64, order: Ordering) {
         self.bits.store(value.to_bits(), order);
     }
+
+    pub fn compare_exchange_weak(
+        &self,
+        current: f64,
+        new: f64,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<f64, f64> {
+        self.bits
+            .compare_exchange_weak(
+                current.to_bits(),
+                new.to_bits(),
+                success,
+                failure,
+            )
+            .map(f64::from_bits)
+            .map_err(f64::from_bits)
+    }
 }
 
 pub type SearchNodeState = i32;

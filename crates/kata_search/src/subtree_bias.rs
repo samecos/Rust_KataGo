@@ -8,9 +8,11 @@ use kata_core::rng::Rand;
 use kata_game::board::{Board, Loc, MAX_ARR_SIZE, NULL_LOC, Player};
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
 use crate::local_pattern::LocalPatternHasher;
+use crate::node::AtomicF64;
 
 struct ZobristTables {
     pattern_hasher: LocalPatternHasher,
@@ -52,10 +54,56 @@ fn zobrist_tables() -> &'static ZobristTables {
 }
 
 /// Accumulated statistics used to correct neural-net utility estimates.
-#[derive(Debug, Default)]
+///
+/// Both fields are atomics updated via CAS from multiple search threads,
+/// mirroring the per-entry `std::atomic_flag` locking in the C++
+/// `SubtreeValueBiasEntry`.
+#[derive(Debug)]
 pub struct SubtreeValueBiasEntry {
-    pub delta_utility_sum: f64,
-    pub weight_sum: f64,
+    pub delta_utility_sum: AtomicF64,
+    pub weight_sum: AtomicF64,
+}
+
+impl SubtreeValueBiasEntry {
+    /// Atomically add `delta_incr` / `weight_incr` and return the new
+    /// `(delta_utility_sum, weight_sum)`.
+    pub fn update(&self, delta_incr: f64, weight_incr: f64) -> (f64, f64) {
+        fn fetch_add(field: &AtomicF64, incr: f64) -> f64 {
+            let mut current = field.load(Ordering::Relaxed);
+            loop {
+                let new = current + incr;
+                match field.compare_exchange_weak(
+                    current,
+                    new,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return new,
+                    Err(actual) => current = actual,
+                }
+            }
+        }
+        let d = fetch_add(&self.delta_utility_sum, delta_incr);
+        let w = fetch_add(&self.weight_sum, weight_incr);
+        (d, w)
+    }
+
+    /// Read the current `(delta_utility_sum, weight_sum)`.
+    pub fn read(&self) -> (f64, f64) {
+        (
+            self.delta_utility_sum.load(Ordering::Acquire),
+            self.weight_sum.load(Ordering::Acquire),
+        )
+    }
+}
+
+impl Default for SubtreeValueBiasEntry {
+    fn default() -> Self {
+        Self {
+            delta_utility_sum: AtomicF64::new(0.0),
+            weight_sum: AtomicF64::new(0.0),
+        }
+    }
 }
 
 /// Sharded table mapping board patterns to empirical bias entries.
@@ -128,6 +176,27 @@ mod tests {
 
     fn empty_board() -> Board {
         Board::new(9, 9)
+    }
+
+    #[test]
+    fn test_update_accumulates_and_reads() {
+        let entry = SubtreeValueBiasEntry::default();
+        let (d0, w0) = entry.read();
+        assert_eq!((d0, w0), (0.0, 0.0));
+
+        let (d1, w1) = entry.update(0.25, 2.0);
+        assert!((d1 - 0.25).abs() < 1e-12);
+        assert!((w1 - 2.0).abs() < 1e-12);
+
+        // Idempotent recompute pattern: moving the contribution from one
+        // value to another only shifts the entry by the difference.
+        let (d2, w2) = entry.update(0.5 - 0.25, 3.0 - 2.0);
+        assert!((d2 - 0.5).abs() < 1e-12);
+        assert!((w2 - 3.0).abs() < 1e-12);
+
+        let (d3, w3) = entry.read();
+        assert!((d3 - 0.5).abs() < 1e-12);
+        assert!((w3 - 3.0).abs() < 1e-12);
     }
 
     #[test]
