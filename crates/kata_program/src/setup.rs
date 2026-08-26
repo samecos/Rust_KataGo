@@ -782,6 +782,12 @@ fn load_params_impl(
         } else {
             1.0
         };
+        params.virtual_loss_utility_blend = if contains_idx("virtualLossUtilityBlend") {
+            cfg.get_double(&key_for("virtualLossUtilityBlend"), 0.0, 1.0)
+                .map_err(to_string_error)?
+        } else {
+            1.0
+        };
 
         params.tree_reuse_carry_over_time_factor = if contains_idx("treeReuseCarryOverTimeFactor") {
             cfg.get_double(&key_for("treeReuseCarryOverTimeFactor"), 0.0, 1.0)

@@ -122,6 +122,13 @@ pub struct SearchParams {
     // Threading-related
     pub node_table_shards_power_of_two: i32,
     pub num_virtual_losses_per_thread: f64,
+    /// Scales the utility-distortion half of virtual loss (WU-UCT, Liu et al.
+    /// 2018: the child-weight inflation alone already deflates the exploration
+    /// term of in-flight playouts). 1.0 = official KataGo soft blend
+    /// (bit-identical), 0.0 = pure "watch the unobserved" mode that keeps the
+    /// weight inflation but leaves the child utility untouched so workers may
+    /// keep exploiting a clearly best node concurrently.
+    pub virtual_loss_utility_blend: f64,
 
     // Asyncbot
     pub num_threads: i32,
@@ -272,6 +279,7 @@ impl SearchParams {
 
             node_table_shards_power_of_two: 16,
             num_virtual_losses_per_thread: 3.0,
+            virtual_loss_utility_blend: 1.0,
 
             num_threads: 1,
             min_playouts_per_thread: 0.0,
@@ -661,6 +669,10 @@ impl SearchParams {
             "numVirtualLossesPerThread".to_string(),
             json!(self.num_virtual_losses_per_thread),
         );
+        ret.insert(
+            "virtualLossUtilityBlend".to_string(),
+            json!(self.virtual_loss_utility_blend),
+        );
 
         ret.insert("numSearchThreads".to_string(), json!(self.num_threads));
         ret.insert(
@@ -948,6 +960,7 @@ impl fmt::Display for SearchParams {
 
         print_param!(node_table_shards_power_of_two);
         print_param!(num_virtual_losses_per_thread);
+        print_param!(virtual_loss_utility_blend);
 
         print_param!(num_threads);
         print_param!(min_playouts_per_thread);

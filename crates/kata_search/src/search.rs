@@ -6172,18 +6172,28 @@ impl<'a> Search<'a> {
         if child_virtual_losses > 0 {
             let virtual_loss_weight =
                 child_virtual_losses as f64 * self.search_params.num_virtual_losses_per_thread;
-            let utility_radius = self.search_params.win_loss_utility_factor
-                + self.search_params.static_score_utility_factor
-                + self.search_params.dynamic_score_utility_factor;
-            let virtual_loss_utility = if node.next_pla == P_WHITE {
-                -utility_radius
-            } else {
-                utility_radius
-            };
-            let virtual_loss_weight_frac =
-                virtual_loss_weight / (virtual_loss_weight + 0.25_f64.max(child_weight));
-            child_utility =
-                child_utility + (virtual_loss_utility - child_utility) * virtual_loss_weight_frac;
+            // WU-UCT mode (virtualLossUtilityBlend = 0): keep only the weight
+            // inflation — the exploration term p/(1+w) already shrinks for
+            // in-flight playouts, while the child utility stays untouched so
+            // workers can keep exploiting a clearly best node concurrently.
+            // 1.0 (default) is the official KataGo soft blend, bit-identical.
+            let virtual_loss_utility_blend = self.search_params.virtual_loss_utility_blend;
+            if virtual_loss_utility_blend > 0.0 {
+                let utility_radius = self.search_params.win_loss_utility_factor
+                    + self.search_params.static_score_utility_factor
+                    + self.search_params.dynamic_score_utility_factor;
+                let virtual_loss_utility = if node.next_pla == P_WHITE {
+                    -utility_radius
+                } else {
+                    utility_radius
+                };
+                let virtual_loss_weight_frac =
+                    virtual_loss_weight / (virtual_loss_weight + 0.25_f64.max(child_weight));
+                child_utility = child_utility
+                    + (virtual_loss_utility - child_utility)
+                        * virtual_loss_weight_frac
+                        * virtual_loss_utility_blend;
+            }
             child_weight += virtual_loss_weight;
         }
 
@@ -10163,6 +10173,123 @@ mod tests {
         let c = mk_child(0.2 * 0.2 + (2.0 * prior) * (2.0 * prior));
         assert!((run(&search, c) - (baseline_explore + value_component)).abs() < 1e-12);
         unsafe { drop(Box::from_raw(c)) };
+    }
+
+    #[test]
+    fn test_virtual_loss_utility_blend() {
+        // WU-UCT mode (Liu et al. 2018): virtual loss keeps the child-weight
+        // inflation (deflating the exploration term of in-flight playouts) but
+        // scales the utility distortion by virtualLossUtilityBlend. Default
+        // 1.0 must reproduce the official KataGo soft blend exactly; 0.0 must
+        // leave the stored utility untouched.
+        let mut search = search_with_dummy();
+        search.root_pla = P_BLACK;
+
+        let mut parent = SearchNode::new(P_BLACK, false, 0, Hash128::default());
+        parent.initialize_children();
+        parent.state.store(STATE_EXPANDED0, Ordering::Release);
+
+        let mut nn_output = NNOutput::default();
+        nn_output.nn_x_len = 19;
+        nn_output.nn_y_len = 19;
+        let loc = location::get_loc(3, 3, search.root_board.x_size);
+        let pos = search.get_pos(loc) as usize;
+        nn_output.policy_probs[pos] = 0.5;
+        nn_output.policy_probs[search.get_pos(PASS_LOC) as usize] = 0.5;
+        parent
+            .nn_output
+            .store(Box::into_raw(Box::new(Arc::new(nn_output))), Ordering::Release);
+        let parent: &'static mut SearchNode = Box::leak(Box::new(parent));
+
+        let mk_child = |virtual_losses: i32| {
+            let child_ptr = Box::into_raw(Box::new(SearchNode::new(
+                P_WHITE,
+                false,
+                0,
+                Hash128::default(),
+            )));
+            unsafe {
+                (*child_ptr).stats.visits.store(10, Ordering::Release);
+                (*child_ptr).stats.weight_sum.store(10.0, Ordering::Release);
+                (*child_ptr).stats.utility_avg.store(0.2, Ordering::Release);
+                (*child_ptr).stats.utility_sq_avg.store(0.04, Ordering::Release);
+                (*child_ptr)
+                    .virtual_losses
+                    .store(virtual_losses, Ordering::Release);
+            }
+            child_ptr
+        };
+
+        let run = |s: &Search, child_ptr: *mut SearchNode| -> f64 {
+            s.get_explore_selection_value_of_child(
+                parent,
+                parent
+                    .get_nn_output()
+                    .unwrap()
+                    .get_policy_probs_maybe_noised(),
+                unsafe { &*child_ptr },
+                loc,
+                1.0,
+                10.0,
+                10,
+                0.0,
+                0.1,
+                1.0,
+                true,
+                false,
+                false,
+                10.0,
+                true,
+                None,
+                None,
+            )
+        };
+
+        // Analytic expectations. Parent is P_BLACK so the value component
+        // negates the stored (white-perspective) utility.
+        let vl_w = 1.0 * search.search_params.num_virtual_losses_per_thread;
+        let frac = vl_w / (vl_w + 0.25_f64.max(10.0));
+        let radius = search.search_params.win_loss_utility_factor
+            + search.search_params.static_score_utility_factor
+            + search.search_params.dynamic_score_utility_factor;
+        let dist_utility = |blend: f64| 0.2 + (radius - 0.2) * frac * blend;
+        let explore = |weight: f64| 1.0 * 0.5 / (1.0 + weight);
+
+        // No virtual losses: plain PUCT value.
+        let c = mk_child(0);
+        assert!((run(&search, c) - (explore(10.0) + -0.2)).abs() < 1e-12);
+        unsafe { drop(Box::from_raw(c)) };
+
+        // blend = 1.0 (default): official soft blend, utility pulled toward
+        // the loss radius by frac, weight inflated by vl_w.
+        let c = mk_child(1);
+        assert!((run(&search, c) - (explore(10.0 + vl_w) + -dist_utility(1.0))).abs() < 1e-12);
+        unsafe { drop(Box::from_raw(c)) };
+
+        // blend = 0.0 (pure WU-UCT): utility untouched, only the weight
+        // inflation deflates the exploration term.
+        let mut params = search.search_params.clone();
+        params.virtual_loss_utility_blend = 0.0;
+        search.set_params_no_clearing(&params);
+        let c = mk_child(1);
+        assert!((run(&search, c) - (explore(10.0 + vl_w) + -0.2)).abs() < 1e-12);
+        unsafe { drop(Box::from_raw(c)) };
+
+        // blend = 0.5: linear interpolation of the utility distortion.
+        let mut params = search.search_params.clone();
+        params.virtual_loss_utility_blend = 0.5;
+        search.set_params_no_clearing(&params);
+        let c = mk_child(1);
+        assert!(
+            (run(&search, c) - (explore(10.0 + vl_w) + -dist_utility(0.5))).abs() < 1e-12,
+            "expected {}, got {}",
+            explore(10.0 + vl_w) + -dist_utility(0.5),
+            run(&search, c)
+        );
+        unsafe { drop(Box::from_raw(c)) };
+
+        // Sanity: default in fresh params is 1.0 (official semantics).
+        assert_eq!(SearchParams::new().virtual_loss_utility_blend, 1.0);
     }
 
     fn store_output(node: &SearchNode, nn_output: NNOutput) {
