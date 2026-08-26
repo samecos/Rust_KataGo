@@ -663,6 +663,13 @@ fn load_params_impl(
             }
         };
 
+        params.puct_var_exploration = if contains_idx("puctVarExploration") {
+            cfg.get_double(&key_for("puctVarExploration"), 0.0, 4.0)
+                .map_err(to_string_error)?
+        } else {
+            0.0
+        };
+
         params.enable_passing_hacks = if contains_idx("enablePassingHacks") {
             cfg.get_bool(&key_for("enablePassingHacks"))
                 .map_err(to_string_error)?

@@ -92,6 +92,11 @@ pub struct SearchParams {
     pub fill_dame_before_pass: bool,
     pub avoid_mytd_dagger_hack_pla: Player,
     pub wide_root_noise: f64,
+    /// PUCT-V style child-level variance-aware exploration scale
+    /// (0.0 = off, bit-identical to baseline). See Weichart 2025,
+    /// arXiv:2512.21648: exploration bonus scaled by the child's empirical
+    /// utility stdev, normalized against `cpuct_utility_stdev_prior`.
+    pub puct_var_exploration: f64,
     pub enable_passing_hacks: bool,
     pub enable_more_passing_hacks: bool,
 
@@ -242,6 +247,7 @@ impl SearchParams {
             fill_dame_before_pass: false,
             avoid_mytd_dagger_hack_pla: C_EMPTY,
             wide_root_noise: 0.0,
+            puct_var_exploration: 0.0,
             enable_passing_hacks: false,
             enable_more_passing_hacks: false,
 
@@ -597,6 +603,10 @@ impl SearchParams {
         );
         ret.insert("wideRootNoise".to_string(), json!(self.wide_root_noise));
         ret.insert(
+            "puctVarExploration".to_string(),
+            json!(self.puct_var_exploration),
+        );
+        ret.insert(
             "enablePassingHacks".to_string(),
             json!(self.enable_passing_hacks),
         );
@@ -909,6 +919,7 @@ impl fmt::Display for SearchParams {
             self.avoid_mytd_dagger_hack_pla as i32
         )?;
         print_param!(wide_root_noise);
+        print_param!(puct_var_exploration);
         print_param!(enable_passing_hacks);
         print_param!(enable_more_passing_hacks);
 

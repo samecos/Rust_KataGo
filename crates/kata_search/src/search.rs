@@ -6047,6 +6047,7 @@ impl<'a> Search<'a> {
         let child_virtual_losses = child.virtual_losses.load(Ordering::Acquire) as i64;
         let child_visits = child.stats.visits.load(Ordering::Acquire);
         let utility_avg = child.stats.utility_avg.load(Ordering::Acquire);
+        let utility_sq_avg = child.stats.utility_sq_avg.load(Ordering::Acquire);
         let score_mean_avg = child.stats.score_mean_avg.load(Ordering::Acquire);
         let score_mean_sq_avg = child.stats.score_mean_sq_avg.load(Ordering::Acquire);
         let mut child_weight = if count_edge_visit {
@@ -6180,8 +6181,29 @@ impl<'a> Search<'a> {
             );
         }
 
+        // PUCT-V style child-level variance-aware exploration (Weichart 2025,
+        // arXiv:2512.21648): scale this child's exploration bonus by its
+        // empirical utility stdev, normalized against cpuctUtilityStdevPrior
+        // so a typical child keeps factor ~1 while volatile subtrees get
+        // explored sooner. 0.0 (default) skips this entirely — bit-identical
+        // to the baseline. Applies only on the search-descent path, not to
+        // reporting / move-selection math.
+        let mut effective_explore_scaling = explore_scaling;
+        if is_during_search
+            && count_edge_visit
+            && self.search_params.puct_var_exploration > 0.0
+            && child_visits > 0
+        {
+            let variance = (utility_sq_avg - utility_avg * utility_avg).max(0.0);
+            let child_stdev = variance.sqrt();
+            let factor = 1.0
+                + self.search_params.puct_var_exploration
+                    * (child_stdev / self.search_params.cpuct_utility_stdev_prior - 1.0);
+            effective_explore_scaling *= factor.clamp(0.25, 4.0);
+        }
+
         explore_selection_value_raw(
-            explore_scaling,
+            effective_explore_scaling,
             nn_policy_prob,
             child_weight,
             child_utility,
@@ -9836,6 +9858,102 @@ mod tests {
         unsafe {
             drop(Box::from_raw(child_ptr));
         }
+    }
+
+    #[test]
+    fn test_puct_var_exploration_scales_explore_term() {
+        // Mirrors test_get_explore_selection_value_of_child_with_fabricated_root
+        // but drives the selection path with is_during_search=true so the
+        // PUCT-V child-variance factor applies when puct_var_exploration > 0.
+        let mut search = search_with_dummy();
+        search.root_pla = P_BLACK;
+
+        let mut params = search.search_params.clone();
+        params.puct_var_exploration = 1.0;
+        search.set_params_no_clearing(&params);
+
+        let mut parent = SearchNode::new(P_BLACK, false, 0, Hash128::default());
+        parent.initialize_children();
+        parent.state.store(STATE_EXPANDED0, Ordering::Release);
+
+        let mut nn_output = NNOutput::default();
+        nn_output.nn_x_len = 19;
+        nn_output.nn_y_len = 19;
+        let loc = location::get_loc(3, 3, search.root_board.x_size);
+        let pos = search.get_pos(loc) as usize;
+        nn_output.policy_probs[pos] = 0.5;
+        nn_output.policy_probs[search.get_pos(PASS_LOC) as usize] = 0.5;
+        parent
+            .nn_output
+            .store(Box::into_raw(Box::new(Arc::new(nn_output))), Ordering::Release);
+        let parent: &'static mut SearchNode = Box::leak(Box::new(parent));
+
+        let mk_child = |utility_sq: f64| {
+            let child_ptr = Box::into_raw(Box::new(SearchNode::new(
+                P_WHITE,
+                false,
+                0,
+                Hash128::default(),
+            )));
+            unsafe {
+                (*child_ptr).stats.visits.store(10, Ordering::Release);
+                (*child_ptr).stats.weight_sum.store(10.0, Ordering::Release);
+                (*child_ptr).stats.utility_avg.store(0.2, Ordering::Release);
+                (*child_ptr).stats.utility_sq_avg.store(utility_sq, Ordering::Release);
+            }
+            child_ptr
+        };
+
+        let run = |s: &Search, child_ptr: *mut SearchNode| -> f64 {
+            s.get_explore_selection_value_of_child(
+                parent,
+                parent
+                    .get_nn_output()
+                    .unwrap()
+                    .get_policy_probs_maybe_noised(),
+                unsafe { &*child_ptr },
+                loc,
+                1.0,
+                10.0,
+                10,
+                0.0,
+                0.1,
+                1.0,
+                true,
+                false,
+                10.0,
+                true,
+                None,
+                None,
+            )
+        };
+
+        let baseline_explore = 0.5 / 11.0;
+        let value_component = -0.2;
+        let prior = search.search_params.cpuct_utility_stdev_prior;
+
+        // stdev == prior: factor 1, identical to baseline.
+        let c = mk_child(0.2 * 0.2 + prior * prior);
+        assert!((run(&search, c) - (baseline_explore + value_component)).abs() < 1e-9);
+        unsafe { drop(Box::from_raw(c)) };
+
+        // stdev == 2*prior: factor 2, explore term doubles.
+        let c = mk_child(0.2 * 0.2 + (2.0 * prior) * (2.0 * prior));
+        assert!((run(&search, c) - (2.0 * baseline_explore + value_component)).abs() < 1e-9);
+        unsafe { drop(Box::from_raw(c)) };
+
+        // zero variance: factor clamps at 0.25 instead of collapsing to 0.
+        let c = mk_child(0.2 * 0.2);
+        assert!((run(&search, c) - (0.25 * baseline_explore + value_component)).abs() < 1e-9);
+        unsafe { drop(Box::from_raw(c)) };
+
+        // Disabled (0.0) is bit-identical regardless of variance.
+        let mut params = search.search_params.clone();
+        params.puct_var_exploration = 0.0;
+        search.set_params_no_clearing(&params);
+        let c = mk_child(0.2 * 0.2 + (2.0 * prior) * (2.0 * prior));
+        assert!((run(&search, c) - (baseline_explore + value_component)).abs() < 1e-12);
+        unsafe { drop(Box::from_raw(c)) };
     }
 
     fn store_output(node: &SearchNode, nn_output: NNOutput) {
