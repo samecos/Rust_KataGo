@@ -2454,6 +2454,77 @@ impl<'a> Search<'a> {
         child_ptr.map(|p| unsafe { &*p })
     }
 
+    /// VarDE-style root decision-variance diagnostic (Luong et al., ICML 2026,
+    /// arXiv:2608.21995, Lemma 3.4 instantiated at the root with the LSE_τ
+    /// smooth surrogate of max):
+    ///
+    /// ```text
+    /// Y        = LSE_τ(u_1..u_K),  u_i = child i utility from the root
+    ///                                    player's perspective
+    /// w_i      = softmax(u/τ)_i    (influence weights, Σ w_i = 1)
+    /// Var[Y]  ≈ Σ_i w_i² · σ̃_i² / W_i
+    /// ```
+    ///
+    /// σ̃_i² is the child's floored empirical utility variance
+    /// (`utility_variance_with_floor`) and W_i its graph-search child weight.
+    /// Only children with W_i > 0 contribute (unvisited children have no
+    /// variance estimate). Returns `None` when there is no root or no visited
+    /// child. Deliberately NOT wired into any GTP/analysis output: this is a
+    /// pure diagnostic for tests and future tooling — "how tightly is the
+    /// current root recommendation estimated". sqrt of the value is on the
+    /// utility scale; 1/Var grows ~linearly in visited weight while the
+    /// decision is stable.
+    pub fn root_decision_variance(&self) -> Option<f64> {
+        const TAU: f64 = 0.1;
+        let root = self.root_node.as_deref()?;
+        if root.next_pla != P_WHITE && root.next_pla != P_BLACK {
+            return None;
+        }
+        let children = root.get_children();
+        // (u_i, σ̃_i², W_i) for every visited child.
+        let mut entries: Vec<(f64, f64, f64)> = Vec::new();
+        for i in 0..children.get_capacity() {
+            let child_pointer = children.get(i);
+            let child = match child_pointer.get_if_allocated() {
+                Some(c) => c,
+                None => break,
+            };
+            let child_weight = child.stats.get_child_weight(child_pointer.get_edge_visits());
+            if child_weight <= 0.0 {
+                continue;
+            }
+            let utility_avg = child.stats.utility_avg.load(Ordering::Acquire);
+            let utility_sq_avg = child.stats.utility_sq_avg.load(Ordering::Acquire);
+            // Child utilities are white-positive; the root decision maximizes
+            // from the mover's perspective.
+            let u = if root.next_pla == P_WHITE {
+                utility_avg
+            } else {
+                -utility_avg
+            };
+            entries.push((
+                u,
+                utility_variance_with_floor(utility_sq_avg, utility_avg),
+                child_weight,
+            ));
+        }
+        if entries.is_empty() {
+            return None;
+        }
+        // Softmax influence weights over the mover-perspective utilities,
+        // max-shifted for numerical stability.
+        let max_u = entries.iter().fold(f64::NEG_INFINITY, |m, e| m.max(e.0));
+        let exp_sum: f64 = entries.iter().map(|e| ((e.0 - max_u) / TAU).exp()).sum();
+        let variance = entries
+            .iter()
+            .map(|e| {
+                let w = ((e.0 - max_u) / TAU).exp() / exp_sum;
+                w * w * e.1 / e.2
+            })
+            .sum();
+        Some(variance)
+    }
+
     pub fn print_root_policy_map(&self, out: &mut String) {
         out.clear();
         let root = match self.root_node.as_deref() {
@@ -5916,6 +5987,19 @@ impl<'a> Search<'a> {
 
 const TOTALCHILDWEIGHT_PUCT_OFFSET: f64 = 0.01;
 
+// VarDE variance floor (Luong et al., ICML 2026, arXiv:2608.21995): the
+// empirical utility variance from few samples can be spuriously ~0, and float
+// round-off can push sq_avg - avg^2 slightly negative. Floor it at a small
+// positive constant so variance consumers (`root_decision_variance`,
+// `puctVarExploration`) never see a degenerate estimate. The paper's
+// sensitivity analysis shows performance is stable across a broad range of
+// floors, so a fixed documented constant suffices (utility spans ~[-1, 1]).
+const UTILITY_VARIANCE_FLOOR: f64 = 1e-4;
+
+fn utility_variance_with_floor(utility_sq_avg: f64, utility_avg: f64) -> f64 {
+    (utility_sq_avg - utility_avg * utility_avg).max(UTILITY_VARIANCE_FLOOR)
+}
+
 fn cpuct_exploration(total_child_weight: f64, search_params: &SearchParams) -> f64 {
     search_params.cpuct_exploration
         + search_params.cpuct_exploration_log
@@ -6296,7 +6380,9 @@ impl<'a> Search<'a> {
             && child_visits > 0
         {
             let utility_sq_avg = child.stats.utility_sq_avg.load(Ordering::Acquire);
-            let variance = (utility_sq_avg - utility_avg * utility_avg).max(0.0);
+            // VarDE-style floor: never trust a degenerate (early/round-off)
+            // zero variance estimate (Luong et al. 2026, arXiv:2608.21995).
+            let variance = utility_variance_with_floor(utility_sq_avg, utility_avg);
             let child_stdev = variance.sqrt();
             let factor = 1.0
                 + self.search_params.puct_var_exploration
@@ -10173,6 +10259,118 @@ mod tests {
         let c = mk_child(0.2 * 0.2 + (2.0 * prior) * (2.0 * prior));
         assert!((run(&search, c) - (baseline_explore + value_component)).abs() < 1e-12);
         unsafe { drop(Box::from_raw(c)) };
+    }
+
+    #[test]
+    fn test_utility_variance_with_floor() {
+        // VarDE floor (arXiv:2608.21995): variance estimates neither pass
+        // through a spuriously-small value nor go negative from round-off.
+        // Above the floor: raw second-moment estimate passes through.
+        let v = utility_variance_with_floor(0.2 * 0.2 + 0.09, 0.2);
+        assert!((v - 0.09).abs() < 1e-12);
+        // Exactly zero empirical variance: floored, not zero.
+        assert!(
+            (utility_variance_with_floor(0.2 * 0.2, 0.2) - UTILITY_VARIANCE_FLOOR).abs() < 1e-12
+        );
+        // Float round-off pushing sq_avg - avg^2 below zero: still floored.
+        assert!(
+            (utility_variance_with_floor(0.2 * 0.2 - 1e-12, 0.2) - UTILITY_VARIANCE_FLOOR).abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn test_root_decision_variance_with_fabricated_root() {
+        let mut search = search_with_dummy();
+
+        // No root: None.
+        assert!(search.root_decision_variance().is_none());
+
+        search.root_pla = P_BLACK;
+        let mut root = SearchNode::new(P_BLACK, false, 0, Hash128::default());
+        root.initialize_children();
+        root.state.store(STATE_EXPANDED0, Ordering::Release);
+
+        // Root with no visited children: None.
+        search.root_node = Some(Box::new(root));
+        assert!(search.root_decision_variance().is_none());
+        let mut root = *search.root_node.take().unwrap();
+
+        let mk_child =
+            |pla: Player, visits: i64, weight_sum: f64, utility_avg: f64, utility_sq_avg: f64| {
+                let child_ptr = Box::into_raw(Box::new(SearchNode::new(
+                    pla, false, 0, Hash128::default(),
+                )));
+                unsafe {
+                    (*child_ptr).stats.visits.store(visits, Ordering::Release);
+                    (*child_ptr).stats.weight_sum.store(weight_sum, Ordering::Release);
+                    (*child_ptr)
+                        .stats
+                        .utility_avg
+                        .store(utility_avg, Ordering::Release);
+                    (*child_ptr)
+                        .stats
+                        .utility_sq_avg
+                        .store(utility_sq_avg, Ordering::Release);
+                }
+                child_ptr
+            };
+
+        let loc_a = location::get_loc(3, 3, search.root_board.x_size);
+        let loc_b = location::get_loc(9, 9, search.root_board.x_size);
+        // Root is Black to move, so u_i = -utility_avg. Child A is best for
+        // Black (u=0.4), child B clearly worse (u=-0.1); τ=0.1.
+        let c_a = mk_child(
+            P_WHITE,
+            10,
+            10.0,
+            -0.4,
+            (-0.4f64) * (-0.4) + 0.01, // σ² = 0.01
+        );
+        let c_b = mk_child(
+            P_WHITE,
+            40,
+            40.0,
+            0.1,
+            0.1 * 0.1 + 0.04, // σ² = 0.04
+        );
+        root.get_children().get(0).store(c_a);
+        root.get_children().get(0).set_move_loc(loc_a);
+        root.get_children().get(0).set_edge_visits(10);
+        root.get_children().get(1).store(c_b);
+        root.get_children().get(1).set_move_loc(loc_b);
+        root.get_children().get(1).set_edge_visits(40);
+
+        search.root_node = Some(Box::new(root));
+
+        let v = search.root_decision_variance().expect("variance for visited children");
+        // Hand-computed VarDE value: softmax over {0.4, -0.1}/0.1 gives
+        // w_a = 1/(1+e^-5), w_b = e^-5/(1+e^-5); Var = Σ w_i² σ_i² / W_i.
+        let e5 = (-5.0f64).exp();
+        let w_a = 1.0 / (1.0 + e5);
+        let w_b = e5 / (1.0 + e5);
+        let expected = w_a * w_a * 0.01 / 10.0 + w_b * w_b * 0.04 / 40.0;
+        assert!((v - expected).abs() < 1e-12);
+
+        unsafe {
+            drop(Box::from_raw(c_a));
+            drop(Box::from_raw(c_b));
+        }
+
+        // Zero empirical variance child: floored, Var = floor / W.
+        let mut root = *search.root_node.take().unwrap();
+        let c = mk_child(P_WHITE, 5, 5.0, -0.4, (-0.4f64) * (-0.4));
+        root.get_children().get(0).store(c);
+        root.get_children().get(0).set_move_loc(loc_a);
+        root.get_children().get(0).set_edge_visits(5);
+        // Slot 1 still points at the freed c_b: clear it before reuse.
+        root.get_children().get(1).store(std::ptr::null_mut());
+        search.root_node = Some(Box::new(root));
+        let v = search.root_decision_variance().unwrap();
+        assert!((v - UTILITY_VARIANCE_FLOOR / 5.0).abs() < 1e-12);
+        unsafe {
+            drop(Box::from_raw(c));
+        }
     }
 
     #[test]
