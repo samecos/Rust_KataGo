@@ -55,7 +55,7 @@ GTP 是标准输入/输出协议：GUI 的引擎命令直接指向 `katago-rs`�
 
 ## 真实模型推理
 
-仓库不携带模型。请准备一个 KataGo 导出的 ONNX 模型，并把路径替换为本机路径。当前 CUDA 执行器的验证模型是 modelVersion 15 的 19 路 b11 Transformer：c768 trunk、12 attention heads、384 bottleneck；输入为 `input_spatial [B,22,19,19]` 和 `input_global [B,19]`，输出为 policy/value/misc/ownership 五组张量。`b11fix.onnx` 是开发时使用的实例；任意 ONNX 或其它 KataGo 网络结构并不保证兼容。
+仓库不携带模型。CUDA 支持已验证的 19 路 b11 Transformer：c768 trunk、12 attention heads、384 bottleneck、22/19 输入特征。Go Server Worker 默认使用原生 modelVersion 17 的 `kata1-tf3-b11c768-s11001M-d5973M.bin.gz`，与 C++ Worker 共用文件。原有 modelVersion 15 的 `b11fix.onnx` 路径仍支持，其输入为 `input_spatial [B,22,19,19]` 和 `input_global [B,19]`。其它网络结构不保证兼容，原生加载器会在 GPU 初始化前检查结构。
 
 ### CUDA 后端（主线）
 
@@ -130,6 +130,23 @@ katago-rs gtp --config configs/gtp_smoke.cfg --model /path/to/model.onnx \
 ```
 
 `--override-config` 接受逗号分隔的 `key=value` 列表；命令中的 `katago-rs` 假设二进制已加入 `PATH`，否则使用 `target/debug/katago-rs[.exe]` 或 `target/release/katago-rs[.exe]`。
+
+## Go Server Worker
+
+如需成为 **Go Server 的纯 NN Worker**，使用独立的 `nnworker` 子命令：
+
+```powershell
+cargo build -p katago --features cuda --release
+.\target\release\katago-rs.exe nnworker --server 127.0.0.1:50051 `
+  --worker-id rustgo-5070ti `
+  --model D:/Go/Server/models/kata1-tf3-b11c768-s11001M-d5973M.bin.gz `
+  --config configs/worker_cuda.cfg --capacity 32
+```
+
+搜索由 Go Server 维护，Worker 只提供局面评估。默认与 C++ Worker 共用原生 TF3
+`.bin.gz`（modelVersion 17），所有 Worker 用实际模型文件 SHA-256 加入同一池。
+`scripts/run_go_worker.ps1` 已默认选择此模型；旧 ONNX 认证 plan 绑定另一模型，不能复用。
+启动、配置及验证见 [Go Server Worker 接入](docs/Go-Server-Worker.md)。
 
 ## JSON-lines 分析协议
 

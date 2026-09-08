@@ -1273,13 +1273,39 @@ mod backend_impl {
     use crate::desc::ModelDesc;
     use kata_core::config::Config;
     use kata_core::logger::Logger;
-    use kata_game::symmetry::{copy_inputs_with_symmetry, copy_outputs_with_symmetry, invert};
+    use kata_game::symmetry::{copy_inputs_with_symmetry, copy_outputs_with_symmetry};
     use std::any::Any;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// CUDA 后端（手写 kernel，sm-targets.json 选择编译目标）。
     pub struct CudaBackend;
+
+    fn policy_channel(policy: &[f32], row: usize, channel: usize, area: usize) -> &[f32] {
+        let stride = area + 1;
+        let offset = (row * 6 + channel) * stride;
+        &policy[offset..offset + stride]
+    }
+
+    #[cfg(test)]
+    mod policy_tests {
+        use super::policy_channel;
+
+        #[test]
+        fn channel_stride_includes_pass_for_every_batch_row() {
+            let logits: Vec<f32> = (0..2 * 6 * 362).map(|i| i as f32).collect();
+            for row in 0..2 {
+                for ch in [0, 5] {
+                    let slice = policy_channel(&logits, row, ch, 361);
+                    let offset = (row * 6 + ch) * 362;
+                    assert_eq!(slice.len(), 362);
+                    assert_eq!(slice[0], offset as f32);
+                    assert_eq!(slice[360], (offset + 360) as f32);
+                    assert_eq!(slice[361], (offset + 361) as f32);
+                }
+            }
+        }
+    }
 
     /// Validate and, when requested, execute the real production DualFFN
     /// capability probe before any serve thread can submit inference.
@@ -1777,24 +1803,28 @@ mod backend_impl {
             };
             drop(g);
 
-            let single_policy = 6 * (policy_area + 1);
             let mut tmp_policy_base = vec![0.0f32; policy_area];
             let mut tmp_policy_opt = vec![0.0f32; policy_area];
             let mut tmp_ownership = vec![0.0f32; policy_area];
             for i in 0..n {
                 let sym_idx = input_bufs[i].symmetry;
-                let inv_sym = if sym_idx != 0 { invert(sym_idx) } else { 0 };
-                let p_off = i * single_policy;
-                let base_src = &host.policy[p_off..p_off + policy_area];
-                let opt_src = &host.policy[p_off + 5 * policy_area..p_off + 6 * policy_area];
-                if inv_sym != 0 {
+                // copy_outputs_with_symmetry already reverses the input
+                // transform. Passing invert(sym_idx) reverses it twice for
+                // quarter-turn symmetries 5 and 6.
+                let base_channel = policy_channel(&host.policy, i, 0, policy_area);
+                let opt_channel = policy_channel(&host.policy, i, 5, policy_area);
+                let base_src = &base_channel[..policy_area];
+                // policy_concat_kernel writes [B,6,S+1]: each channel has its
+                // own trailing pass logit. Include it in the channel stride.
+                let opt_src = &opt_channel[..policy_area];
+                if sym_idx != 0 {
                     copy_outputs_with_symmetry(
                         base_src,
                         &mut tmp_policy_base,
                         1,
                         nn_y_len,
                         nn_x_len,
-                        inv_sym,
+                        sym_idx,
                     );
                     copy_outputs_with_symmetry(
                         opt_src,
@@ -1802,7 +1832,7 @@ mod backend_impl {
                         1,
                         nn_y_len,
                         nn_x_len,
-                        inv_sym,
+                        sym_idx,
                     );
                 } else {
                     tmp_policy_base.copy_from_slice(base_src);
@@ -1813,8 +1843,8 @@ mod backend_impl {
                     outputs[i].policy_probs[pos] = tmp_policy_base[pos]
                         + (tmp_policy_opt[pos] - tmp_policy_base[pos]) * optimism;
                 }
-                let base_pass = host.policy[p_off + policy_area];
-                let opt_pass = host.policy[p_off + 5 * policy_area + policy_area];
+                let base_pass = base_channel[policy_area];
+                let opt_pass = opt_channel[policy_area];
                 outputs[i].policy_probs[policy_area] =
                     base_pass + (opt_pass - base_pass) * optimism;
                 let v_off = i * 3;
@@ -1832,14 +1862,14 @@ mod backend_impl {
                 if input_bufs[i].include_owner_map {
                     let o_off = i * policy_area;
                     let src = &host.ownership[o_off..o_off + policy_area];
-                    if inv_sym != 0 {
+                    if sym_idx != 0 {
                         copy_outputs_with_symmetry(
                             src,
                             &mut tmp_ownership,
                             1,
                             nn_y_len,
                             nn_x_len,
-                            inv_sym,
+                            sym_idx,
                         );
                     } else {
                         tmp_ownership.copy_from_slice(src);
@@ -1884,14 +1914,47 @@ mod backend_impl {
         fn load_model_file(
             &self,
             file: &str,
-            _expected_sha256: &str,
+            expected_sha256: &str,
         ) -> Result<Box<dyn LoadedModel>, NeuralNetError> {
             let bytes = std::fs::read(file)
                 .map_err(|e| NeuralNetError(format!("could not read {file}: {e}")))?;
-            let parsed = crate::onnx_model::parse_onnx_model(&bytes)
-                .map_err(|e| NeuralNetError(format!("onnx metadata parse failed: {e}")))?;
-            let graph = crate::onnx_parser::parse_layer_graph(&bytes)
-                .map_err(|e| NeuralNetError(format!("layer graph parse failed: {e}")))?;
+            if !expected_sha256.is_empty() {
+                use sha2::{Digest, Sha256};
+                let actual = hex::encode(Sha256::digest(&bytes));
+                if !actual.eq_ignore_ascii_case(expected_sha256) {
+                    return Err(NeuralNetError(format!(
+                        "model SHA256 mismatch for {file}: expected {expected_sha256}, got {actual}"
+                    )));
+                }
+            }
+            let lower_file = file.to_ascii_lowercase();
+            let (model_desc, graph) = if lower_file.ends_with(".onnx") {
+                let parsed = crate::onnx_model::parse_onnx_model(&bytes)
+                    .map_err(|e| NeuralNetError(format!("onnx metadata parse failed: {e}")))?;
+                let graph = crate::onnx_parser::parse_layer_graph(&bytes)
+                    .map_err(|e| NeuralNetError(format!("layer graph parse failed: {e}")))?;
+                (parsed.model_desc, graph)
+            } else {
+                let compressed = lower_file.ends_with(".gz");
+                let inner = lower_file.strip_suffix(".gz").unwrap_or(&lower_file);
+                let binary = if inner.ends_with(".bin") {
+                    true
+                } else if inner.ends_with(".txt") {
+                    false
+                } else {
+                    return Err(NeuralNetError(
+                        "CUDA model must be .onnx, .bin[.gz], or .txt[.gz]".into(),
+                    ));
+                };
+                // Parse the exact bytes that were verified above. The worker
+                // and tactic plan retain the original file's identity; this
+                // in-memory lowering never substitutes an exported model.
+                let desc = crate::model_parser::load_model_from_bytes(&bytes, binary, compressed)
+                    .map_err(|e| NeuralNetError(format!("native model parse failed: {e}")))?;
+                let graph = crate::native_model::lower_model(&desc)
+                    .map_err(|e| NeuralNetError(format!("native CUDA model unsupported: {e}")))?;
+                (desc, graph)
+            };
             let rt = Arc::new(
                 CudaRuntime::new().map_err(|e| NeuralNetError(format!("CUDA init failed: {e}")))?,
             );
@@ -1908,7 +1971,7 @@ mod backend_impl {
                 .synchronize()
                 .map_err(|e| NeuralNetError(format!("CUDA sync failed: {e}")))?;
             Ok(Box::new(CudaLoadedModel {
-                model_desc: parsed.model_desc,
+                model_desc,
                 model,
                 rt,
                 model_path: file.to_string(),

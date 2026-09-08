@@ -61,6 +61,8 @@ mod tests {
             num_score_value_channels: 6,
             num_ownership_channels: 1,
             meta_encoder_version: 0,
+            prefer_pass_alive_under_suicide_rules: false,
+            prefer_exclude_territory_adjacent_to_atari: false,
             post_process_params: ModelPostProcessParams::default(),
             trunk: TrunkDesc {
                 name: "trunk".into(),

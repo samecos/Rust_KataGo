@@ -38,6 +38,7 @@ fn run(args: Vec<String>) -> i32 {
         "benchmark" => cmd::benchmark::benchmark(rest),
         "genconfig" => cmd::genconfig::genconfig(rest),
         "nnbench" => cmd::nnbench::nnbench(rest),
+        "nnworker" => cmd::nnworker::nnworker(rest),
         "cuda-fingerprint" => cmd::cuda_fingerprint::cuda_fingerprint(rest),
         "contribute" => cmd::contribute::contribute(rest),
         "evalsgf" => cmd::eval_sgf::evalsgf(rest),
@@ -103,6 +104,7 @@ fn print_usage(program: &str) {
     eprintln!("  benchmark                   Run NN/search benchmark");
     eprintln!("  genconfig                   Interactively generate and tune a GTP config");
     eprintln!("  nnbench                     Pure NN forward throughput benchmark (cuda)");
+    eprintln!("  nnworker                    Connect to Go Server as a pure NN gRPC worker");
     eprintln!(
         "  contribute                  Contribute games to distributed training (not enabled)"
     );

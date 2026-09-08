@@ -8,6 +8,7 @@ pub mod desc;
 pub mod eval;
 pub mod inputs;
 pub mod model_parser;
+pub mod native_model;
 pub mod onnx_builder;
 pub mod onnx_model;
 pub mod onnx_parser;

@@ -60,6 +60,16 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
 
 ## 后端选择
 
+- Go Server Worker：`katago-rs nnworker --server 127.0.0.1:50051
+  --worker-id rustgo-5070ti
+  --model D:/Go/Server/models/kata1-tf3-b11c768-s11001M-d5973M.bin.gz
+  --config configs/worker_cuda.cfg --capacity 32`；真实后端当前仅 CUDA。
+  `crates/kata_worker` 实现纯 NN gRPC Worker，Server 持有搜索图；协议与
+  `D:/Go/Server/proto/worker.proto` 同步。接入/模型身份边界与验证见
+  `docs/Go-Server-Worker.md`。合成测试必须显式 `--allow-dummy` + `/dev/null`。
+  原生 TF3 v17 直接解析并 lower 为 CUDA 层图，SHA 绑定原始压缩文件；
+  `worker_cuda.cfg` 不引用旧 b11fix ONNX 的认证 plan。
+
 - 配置键 `nnBackend`(每模型可用 `nnBackend{i}` 覆盖):`dummybackend`(默认)/
   `trtbackend` / `cudabackend` / `eigenbackend`(未实现,选择即报错)
 - `cudabackend` 需要 katago 的 `cuda` feature(透传 `kata_nn/cuda` +
@@ -70,6 +80,16 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
 
 - `crates/kata_*`:引擎各层(core/game/data/search/nn/program/book/distributed);
   `crates/katago` 为 CLI(bin `katago-rs`)
+- `crates/xuanping`:玄枰 GUI(egui/eframe 0.36,冷感东方风;视图:
+  Play(分析覆层 `a`)/ Review `r` / Settings「器」`e` / 帮助「键」`?`,
+  棋谱条 `k`、玄墨/雪宣双主题 `t`、←/→ 步进;
+  运行 `cargo run -p xuanping`(无模型=演示模式);引擎模式
+  `cargo run -p xuanping --features cuda -- --model D:/code/b11fix.onnx
+  --backend cuda --threads 8`(同 workspace kata_* 直连,AsyncBot 分析回调
+  0.25s 喂候选/领地/根胜率,用户执黑引擎执白,中国规则 komi 7.5);
+  帧截图自验 `XUANPING_SHOT=<ppm>`(配 `XUANPING_VIEW/THEME/HELP/MODEL/
+  BACKEND/THREADS` 截任意状态)、`XUANPING_DEBUG=1` 打布局指标;
+  设计稿与生成脚本在 `docs/design/`、`scripts/design/xuanping_mockup.py`)
 - `crates/kata_nn`:NN 抽象层与后端(`backends/`:dummy、trt、cuda/cuda_exec);
   `cuda-kernels/*.cu` 为手写 kernel(basic/gemm/gemm_v2/elementwise/attention/
   executor),由 build.rs 按 `configs/sm-targets.json`(sm_120 优先)用 nvcc

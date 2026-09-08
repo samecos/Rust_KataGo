@@ -32,7 +32,7 @@ pub struct ConvLayerDesc {
     pub out_channels: i32,
     pub dilation_y: i32,
     pub dilation_x: i32,
-    /// `outC x inC x H x W` in col-major order (W has least stride, outC greatest).
+    /// `outC x inC x H x W` in row-major order (W has least stride, outC greatest).
     pub weights: Vec<f32>,
 }
 
@@ -708,6 +708,10 @@ pub struct ModelDesc {
     pub num_score_value_channels: i32,
     pub num_ownership_channels: i32,
     pub meta_encoder_version: i32,
+    /// Compute pass-alive features as if multi-stone suicide were legal.
+    pub prefer_pass_alive_under_suicide_rules: bool,
+    /// Exclude empty territory points adjacent to chains in atari (rules v3).
+    pub prefer_exclude_territory_adjacent_to_atari: bool,
     pub post_process_params: ModelPostProcessParams,
     pub trunk: TrunkDesc,
     pub policy_head: PolicyHeadDesc,
@@ -789,6 +793,8 @@ impl Default for ModelDesc {
             num_score_value_channels: 0,
             num_ownership_channels: 0,
             meta_encoder_version: 0,
+            prefer_pass_alive_under_suicide_rules: false,
+            prefer_exclude_territory_adjacent_to_atari: false,
             post_process_params: ModelPostProcessParams::default(),
             trunk: TrunkDesc::default(),
             policy_head: PolicyHeadDesc::default(),

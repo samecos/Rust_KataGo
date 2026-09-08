@@ -1,0 +1,33 @@
+[package]
+name = "kata_worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+cuda = ["kata_nn/cuda", "kata_program/cuda"]
+
+[dependencies]
+anyhow.workspace = true
+kata_core = { path = "../kata_core" }
+kata_game = { path = "../kata_game" }
+kata_nn = { path = "../kata_nn" }
+kata_program = { path = "../kata_program" }
+sha2.workspace = true
+hex.workspace = true
+log.workspace = true
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+uuid = { version = "1", features = ["v4"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+serde_json.workspace = true

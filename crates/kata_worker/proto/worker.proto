@@ -1,0 +1,130 @@
+syntax = "proto3";
+package goeval.v1;
+
+// Worker initiates one stream. Evaluations can complete out of request order.
+service WorkerService {
+  rpc Connect(stream WorkerMessage) returns (stream ServerMessage);
+}
+
+enum Color { EMPTY = 0; BLACK = 1; WHITE = 2; }
+message Move { Color color = 1; int32 vertex = 2; } // -1 = pass, otherwise y*size+x, top left origin.
+message Stone { Color color = 1; uint32 vertex = 2; }
+message Position {
+  uint32 board_size = 1;
+  double komi = 2;
+  string rules = 3; // First production profile: chinese, as defined by pinned KataGo.
+  repeated Move moves = 4;
+  repeated Stone initial_stones = 5; // Reference fixtures only; service v1 rejects setup positions.
+  Color initial_player = 6;
+  Color next_player = 7; // Must agree with replay, never silently change the replayed history.
+}
+
+// Semantic evaluator inputs; NOT GPU backend, batch, device or precision controls.
+message EvalParameters {
+  int32 symmetry = 1; // 0..7; v1 defaults to fixed 0 for reproducible baseline.
+  double policy_temperature = 2; // Must be > 0, explicitly set to 1 by service.
+  double policy_optimism = 3;
+  double draw_equivalent_wins_for_white = 4; // Explicitly set to 0.5 by service.
+  double playout_doubling_advantage = 5;
+  bool include_ownership = 6;
+  uint32 max_history = 7; // Explicitly 1000 for the v1 default profile.
+  bool conservative_pass = 8;
+  bool enable_passing_hacks = 9;
+  bool always_compute_pass_alive = 10;
+  bool exclude_territory_adjacent_to_atari = 11;
+  bool avoid_mytdagger_hack = 12;
+  bool skip_cache = 13; // For controlled evaluator validation; never changes GPU configuration.
+  // Search-only replay permission, never permission to play illegal or out-of-turn moves.
+  // Only an intermediate ordinary second friendly pass may be traversed after it ended the game.
+  bool allow_terminal_search_history = 14;
+  // Final history is ended by an ordinary second friendly pass and the search node
+  // is forceNonTerminal, exactly as in the pinned Search::playoutDescend.
+  bool force_non_terminal = 15;
+}
+
+message WorkerHello {
+  string worker_id = 1;
+  string instance_id = 2;
+  uint32 protocol_version = 3;
+  string model_sha256 = 4;
+  uint32 model_version = 5;
+  string input_profile = 6; // "katago-eval-v1"
+  uint32 max_in_flight = 7;
+  uint32 max_board_size = 8;
+  bool supports_ownership = 9;
+  bool supports_shortterm_error = 10;
+  string engine_commit = 11;
+  string backend_info = 12; // Diagnostics only, never backend selection.
+  bool default_always_compute_pass_alive = 13;
+  bool default_exclude_territory_adjacent_to_atari = 14;
+  bool supports_friendly_pass_search = 15;
+}
+
+message EvalRequest {
+  uint64 task_id = 1;
+  uint64 generation = 2;
+  string session_id = 3;
+  bytes input_hash = 4; // Echo exactly; hash belongs to service's semantic input contract.
+  string model_sha256 = 5;
+  Position position = 6;
+  EvalParameters parameters = 7;
+  uint64 lease_ms = 8;
+}
+
+// Postprocessed NNOutput, all values in white perspective, policy in original board orientation.
+message NNOutput {
+  repeated float policy = 1; // size*size points then pass. Illegal values may be negative per evaluator.
+  double white_win_prob = 2;
+  double white_loss_prob = 3;
+  double white_no_result_prob = 4;
+  double white_score_mean = 5;
+  double white_score_mean_sq = 6;
+  double white_lead = 7;
+  double var_time_left = 8;
+  double shortterm_winloss_error = 9;
+  double shortterm_score_error = 10;
+  repeated float ownership = 11;
+  bool has_shortterm_error = 12; // Must match this connection's WorkerHello.supports_shortterm_error.
+}
+
+message EvalResult {
+  uint64 task_id = 1;
+  uint64 generation = 2;
+  string session_id = 3;
+  bytes input_hash = 4;
+  string model_sha256 = 5;
+  NNOutput output = 6;
+  // INVALID_CONTEXT is deterministic request validation failure (do not retry).
+  // EVALUATOR_ERROR / INVALID_OUTPUT / WORKER_INTERNAL_ERROR are Worker faults.
+  // Legacy EVALUATION_ERROR must be treated as an unclassified Worker fault.
+  // Cancellation, lease expiry and admission errors retain separate codes.
+  string error_code = 7;
+  string error_message = 8;
+  // Worker admission/job creation through completed protobuf output/error.
+  // Includes request copy, queue, context, evaluator and output conversion;
+  // excludes the outgoing stream queue and network. This is not RPC RTT.
+  uint64 elapsed_us = 9;
+  // Optional distinguishes legacy/missing/unexecuted stages from a real zero.
+  optional uint64 queue_us = 10; // Actual enqueue through compute start.
+  optional uint64 context_us = 11; // Parameter validation, full replay and input preparation.
+  // NNEvaluator::evaluate wall time: internal queue/cache/inference/postprocessing.
+  // This is NOT a device kernel timer. Present even if evaluate throws.
+  optional uint64 evaluator_us = 12;
+}
+
+message WorkerHeartbeat {
+  uint32 in_flight = 1;
+  uint64 completed_requests = 2;
+  uint64 failed_requests = 3;
+  uint64 nn_rows = 4;
+  uint64 nn_batches = 5;
+}
+message WorkerMessage {
+  oneof payload { WorkerHello hello = 1; EvalResult result = 2; WorkerHeartbeat heartbeat = 3; }
+}
+message Welcome { uint32 protocol_version = 1; string connection_id = 2; }
+message Cancel { uint64 task_id = 1; uint64 generation = 2; string session_id = 3; }
+message Drain { string reason = 1; }
+message ServerMessage {
+  oneof payload { Welcome welcome = 1; EvalRequest evaluate = 2; Cancel cancel = 3; Drain drain = 4; }
+}

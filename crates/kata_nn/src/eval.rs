@@ -209,12 +209,12 @@ pub struct NnEvaluator {
 /// particular `NnEvaluator` borrow and makes the evaluator safe to move after
 /// threads are spawned (the heap-allocated `SharedState` stays put).
 /// 流水线 serve 循环的在途批（已提交未收尾）。
-/// token = 后端批次令牌（CUDA 槽位号）；`usize::MAX` = 提交失败的
-/// 降级标记（outputs 保持默认，finish 不再走后端）。
+/// token = 后端批次令牌（CUDA 槽位号）；提交失败由 error 显式传回请求方。
 struct ServePending {
     batch: Vec<Arc<EvalRequest>>,
     outputs: Vec<NNOutput>,
     token: usize,
+    error: Option<String>,
 }
 
 struct SharedState {
@@ -222,6 +222,8 @@ struct SharedState {
     nn_cache_table: Option<Arc<NnCacheTable>>,
     is_killed: AtomicBool,
     current_batch_size: AtomicI32,
+    /// Physical backend allocation limit, independent of dispatch target.
+    max_batch_size: usize,
     /// 任一 serve 线程正在 GPU 推理中（fork 的 `serverThreadHasActiveBatch`）。
     gpu_busy: AtomicBool,
     waiting_for_finish: Condvar,
@@ -349,8 +351,9 @@ impl SharedState {
                 continue;
             }
 
-            // 3) 取一个请求进攒批。
-            {
+            // 3) Respect the physical allocation even while both slots are busy.
+            // A worker's in-flight capacity may be much larger than its NN batch.
+            if filling.len() < self.max_batch_size {
                 let mut extra = dummy_request();
                 if self.query_queue.try_pop(&mut extra) {
                     filling.push(extra);
@@ -400,7 +403,7 @@ impl SharedState {
     }
 
     /// 非阻塞提交一批推理，返回在途批（内含默认初始化的 outputs）。
-    /// 提交失败不中断服务：记录降级令牌，outputs 保持默认。
+    /// 提交失败不中断服务，但向请求方报告错误，不能使用默认输出。
     fn pipeline_submit(
         &self,
         batch: Vec<Arc<EvalRequest>>,
@@ -411,6 +414,7 @@ impl SharedState {
         let n = batch.len();
         let outputs: Vec<NNOutput> = (0..n).map(|_| NNOutput::default()).collect();
         let mut token = usize::MAX;
+        let mut error = None;
         if let Some(backend) = backend.as_deref() {
             let handle_guard = handle.lock().unwrap();
             let mut bufs: Vec<parking_lot::MutexGuard<'_, NNResultBuf>> =
@@ -432,14 +436,17 @@ impl SharedState {
                 &mut input_refs,
             ) {
                 Ok(t) => token = t,
-                Err(e) => eprintln!("WARNING: Backend submit_output failed: {e}"),
+                Err(e) => error = Some(format!("Backend submit_output failed: {e}")),
             }
+        } else {
+            error = Some("Backend missing during pipeline submission".to_string());
         }
         self.gpu_busy.store(true, Ordering::Relaxed);
         ServePending {
             batch,
             outputs,
             token,
+            error,
         }
     }
 
@@ -450,6 +457,7 @@ impl SharedState {
             batch,
             mut outputs,
             token,
+            mut error,
         } = pending;
         let n = batch.len();
         if token != usize::MAX {
@@ -470,19 +478,26 @@ impl SharedState {
                         &dummy_buffers
                     }
                 };
-                backend
-                    .finish_output(
-                        handle_guard.as_ref(),
-                        input_buffers,
-                        token,
-                        n as i32,
-                        &mut input_refs,
-                        &mut output_refs,
-                    )
-                    .unwrap_or_else(|e| {
-                        eprintln!("WARNING: Backend finish_output failed: {e}");
-                    });
+                if let Err(e) = backend.finish_output(
+                    handle_guard.as_ref(),
+                    input_buffers,
+                    token,
+                    n as i32,
+                    &mut input_refs,
+                    &mut output_refs,
+                ) {
+                    error = Some(format!("Backend finish_output failed: {e}"));
+                }
+            } else {
+                error = Some("Backend missing during pipeline completion".to_string());
             }
+        }
+
+        if let Some(error) = error {
+            self.fail_batch(&batch, &error);
+            self.gpu_busy.store(false, Ordering::Relaxed);
+            self.waiting_for_finish.notify_all();
+            return;
         }
 
         for (i, mut output) in outputs.into_iter().enumerate() {
@@ -527,7 +542,7 @@ impl SharedState {
             let n = batch.len();
             let mut outputs: Vec<NNOutput> = (0..n).map(|_| NNOutput::default()).collect();
 
-            {
+            let backend_result = {
                 let mut bufs: Vec<parking_lot::MutexGuard<'_, NNResultBuf>> =
                     batch.iter().map(|r| r.buf.lock()).collect();
                 let mut input_refs: Vec<&mut NNResultBuf> =
@@ -550,9 +565,10 @@ impl SharedState {
                         &mut input_refs,
                         &mut output_refs,
                     )
-                    .unwrap_or_else(|e| {
-                        eprintln!("WARNING: Backend get_output failed: {e}");
-                    });
+            };
+            if let Err(error) = backend_result {
+                self.fail_batch(batch, &format!("Backend get_output failed: {error}"));
+                return;
             }
             let p1 = std::time::Instant::now();
 
@@ -623,6 +639,19 @@ impl SharedState {
         }
     }
 
+    /// Wake clients without caching or manufacturing an NN result.
+    fn fail_batch(&self, batch: &[Arc<EvalRequest>], error: &str) {
+        eprintln!("ERROR: {error}");
+        for request in batch {
+            let mut buf = request.buf.lock();
+            buf.result = None;
+            buf.error = Some(error.to_owned());
+            buf.has_result = true;
+            drop(buf);
+            request.result_ready.notify_one();
+        }
+    }
+
     /// Postprocess a raw backend output into probabilities / points.
     ///
     /// Mirrors the postprocessing in C++ `nneval.cpp` (`NNEvaluator::evaluate`):
@@ -688,7 +717,8 @@ impl SharedState {
             let i = policy_size - 1;
             let v = (output.policy_probs[i] - max_policy)
                 .exp()
-                .clamp(1e-20, policy_sum * max_pass_policy_sum_factor);
+                .min(policy_sum * max_pass_policy_sum_factor)
+                .max(1e-20);
             output.policy_probs[i] = v;
             policy_sum += v;
         } else {
@@ -900,6 +930,7 @@ impl NnEvaluator {
             nn_cache_table,
             is_killed: AtomicBool::new(false),
             current_batch_size: AtomicI32::new(max_batch_size),
+            max_batch_size: max_batch_size.max(1) as usize,
             gpu_busy: AtomicBool::new(false),
             waiting_for_finish: Condvar::new(),
             num_rows_processed: AtomicU64::new(0),
@@ -1047,6 +1078,19 @@ impl NnEvaluator {
         self.model_version
     }
 
+    /// Model-declared history defaults, inspected during exclusive worker setup.
+    pub fn model_prefer_pass_alive_under_suicide_rules(&self) -> bool {
+        self.loaded_model.as_ref().is_some_and(|m| {
+            m.model_desc().prefer_pass_alive_under_suicide_rules
+        })
+    }
+
+    pub fn model_prefer_exclude_territory_adjacent_to_atari(&self) -> bool {
+        self.loaded_model.as_ref().is_some_and(|m| {
+            m.model_desc().prefer_exclude_territory_adjacent_to_atari
+        })
+    }
+
     /// Spatial convolution depth of the trunk.
     pub fn trunk_spatial_conv_depth(&self) -> f64 {
         // TODO: derive from ModelDesc once model loading is ported.
@@ -1060,17 +1104,43 @@ impl NnEvaluator {
 
     /// True if the loaded model exposes shortterm-error fields.
     pub fn supports_shortterm_error(&self) -> bool {
-        // TODO: implement once model loading is ported.
-        false
+        self.model_version >= 9
     }
 
     /// Return the nearest ruleset supported by the model.
     ///
-    /// In this skeleton the desired rules are returned unchanged and
-    /// `supported` is set to `false`.
-    pub fn supported_rules(&self, desired_rules: Rules, supported: &mut bool) -> Rules {
-        *supported = false;
-        desired_rules
+    /// Matches KataGo ModelDesc::getSupportedRules for the loaded model version.
+    pub fn supported_rules(&self, mut rules: Rules, supported: &mut bool) -> Rules {
+        use kata_game::rules::{KoRule, ScoringRule, TaxRule};
+        *supported = true;
+        if self.model_version <= 6 {
+            if matches!(rules.ko_rule, KoRule::Simple | KoRule::Spight) {
+                rules.ko_rule = KoRule::Situational;
+                *supported = false;
+            }
+            if rules.scoring_rule == ScoringRule::Territory {
+                rules.scoring_rule = ScoringRule::Area;
+                *supported = false;
+            }
+            if rules.tax_rule != TaxRule::None {
+                rules.tax_rule = TaxRule::None;
+                *supported = false;
+            }
+            if rules.has_button {
+                rules.has_button = false;
+                *supported = false;
+            }
+        } else {
+            if rules.ko_rule == KoRule::Spight {
+                rules.ko_rule = KoRule::Situational;
+                *supported = false;
+            }
+            if rules.has_button && rules.scoring_rule != ScoringRule::Area {
+                rules.has_button = false;
+                *supported = false;
+            }
+        }
+        rules
     }
 
     /// Clear the NN output cache.
@@ -1126,6 +1196,8 @@ impl NnEvaluator {
         include_owner_map: bool,
     ) {
         buf.has_result = false;
+        buf.error = None;
+        buf.result = None;
         // 供 serve 侧/backend 回填判断（finish_output 读
         // `NNResultBuf::include_owner_map`）；此前漏设导致搜索树
         // NNOutput 恒无 ownership（kata-analyze ownership 全 0）。
@@ -1174,6 +1246,10 @@ impl NnEvaluator {
         }
 
         if self.server_threads.is_empty() {
+            assert!(
+                self.backend.is_none() || self.debug_skip_neural_net,
+                "Real NN backend has no running server threads"
+            );
             let output = compute_output(
                 nn_x_len,
                 nn_y_len,
@@ -1312,6 +1388,12 @@ impl NnEvaluator {
         // backend 回填 ownership 的判断依据（finish_output 读该字段）；
         // 从本次请求继承（filled_buf 是新建的，不携带 evaluate 侧设置）。
         filled_buf.include_owner_map = include_owner_map;
+        filled_buf.symmetry = if nn_input_params.symmetry >= 0 {
+            nn_input_params.symmetry
+        } else {
+            self.default_symmetry()
+        };
+        filled_buf.policy_optimism = nn_input_params.policy_optimism;
         Self::fill_nn_input(
             board,
             history,
@@ -1344,7 +1426,10 @@ impl NnEvaluator {
         }
 
         let fa1 = std::time::Instant::now();
-        self.shared.query_queue.wait_push(request.clone());
+        assert!(
+            self.shared.query_queue.wait_push(request.clone()),
+            "NN evaluator request queue is closed"
+        );
 
         let mut req_buf = request.buf.lock();
         req_buf.client_waiting_for_result = true;
@@ -1353,7 +1438,10 @@ impl NnEvaluator {
         // is allowed to flip `has_result` on the request buffers while the
         // result Arc is still pending, so keying the wait on `has_result`
         // alone could let the client leave early with `result == None`.
-        while req_buf.result.is_none() && !self.shared.is_killed.load(Ordering::Relaxed) {
+        while req_buf.result.is_none()
+            && req_buf.error.is_none()
+            && !self.shared.is_killed.load(Ordering::Relaxed)
+        {
             condvar.wait(&mut req_buf);
         }
         let fa2 = std::time::Instant::now();
@@ -1376,25 +1464,17 @@ impl NnEvaluator {
             }
         }
 
-        if req_buf.result.is_some() {
+        if let Some(error) = req_buf.error.clone() {
+            buf.error = Some(error.clone());
+            drop(req_buf);
+            panic!("NN evaluation failed: {error}");
+        } else if req_buf.result.is_some() {
             buf.result = req_buf.result.clone();
             buf.has_result = true;
         } else {
-            // The evaluator was killed while we were waiting. Fall back to a
-            // synchronous compute so the caller still gets a valid result.
+            // A stopped real evaluator must never return synthetic evaluations.
             drop(req_buf);
-            let output = compute_output(
-                self.shared.nn_x_len,
-                self.shared.nn_y_len,
-                self.shared.policy_size,
-                board,
-                history,
-                next_player,
-                nn_input_params,
-                nn_hash,
-                include_owner_map,
-            );
-            self.store_output(output, buf);
+            panic!("NN evaluator stopped before producing a result");
         }
     }
 
@@ -2522,5 +2602,516 @@ mod tests {
         eval.kill_server_threads();
         assert!(eval.num_batches_processed() > 0);
         assert!(eval.num_rows_processed() > 0);
+    }
+}
+
+#[cfg(test)]
+mod worker_failure_tests {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use crate::backend::NeuralNetError;
+    use crate::backend::dummy::{DummyBackend, DummyComputeContext, DummyComputeHandle};
+    use kata_core::config::Config;
+    use kata_core::logger::LoggerOptions;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum FailureStage {
+        Get,
+        Submit,
+        Finish,
+    }
+
+    impl FailureStage {
+        fn operation(self) -> &'static str {
+            match self {
+                Self::Get => "get_output",
+                Self::Submit => "submit_output",
+                Self::Finish => "finish_output",
+            }
+        }
+    }
+
+    /// Only the selected inference boundary fails, and only its first call.
+    /// Setup uses the ordinary dummy model/handles, with no model file or GPU.
+    struct FailsOnceBackend {
+        stage: FailureStage,
+        attempts: AtomicU64,
+        probe: Option<Arc<BackendProbe>>,
+    }
+
+    #[derive(Default)]
+    struct PipelineGate {
+        checks: usize,
+        reached: bool,
+        released: bool,
+        timed_out: bool,
+    }
+
+    #[derive(Default)]
+    struct BackendProbe {
+        inputs: Mutex<Vec<(i32, f64)>>,
+        batches: Mutex<Vec<usize>>,
+        // Zero disables the barrier (for the semantic-input test).
+        checks_before_barrier: usize,
+        gate: Mutex<PipelineGate>,
+        changed: std::sync::Condvar,
+    }
+
+    impl BackendProbe {
+        fn record_inputs(&self, inputs: &[&mut NNResultBuf]) {
+            self.inputs.lock().unwrap().extend(
+                inputs.iter().map(|input| (input.symmetry, input.policy_optimism)),
+            );
+        }
+
+        fn query_done(&self) -> bool {
+            if self.checks_before_barrier == 0 {
+                return true;
+            }
+            let mut gate = self.gate.lock().unwrap();
+            if gate.released {
+                return true;
+            }
+            if self.batches.lock().unwrap().len() < 2 {
+                return false;
+            }
+            gate.checks += 1;
+            if gate.checks < self.checks_before_barrier {
+                return false;
+            }
+            gate.reached = true;
+            self.changed.notify_all();
+            let (mut gate, timed) = self.changed
+                .wait_timeout_while(gate, Duration::from_secs(5), |gate| !gate.released)
+                .unwrap();
+            if timed.timed_out() && !gate.released {
+                // Never strand the server thread when the test itself fails.
+                gate.timed_out = true;
+                gate.released = true;
+            }
+            true
+        }
+    }
+
+    impl FailsOnceBackend {
+        fn attempt(
+            &self,
+            stage: FailureStage,
+            inputs: &mut [&mut NNResultBuf],
+        ) -> Result<(), NeuralNetError> {
+            if self.stage == stage && self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Backends can mark buffers ready before their final error.
+                // has_result alone must not let an awaiting caller escape.
+                for input in inputs {
+                    input.has_result = true;
+                }
+                Err(NeuralNetError(format!("injected {} failure", stage.operation())))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn write_outputs(outputs: &mut [&mut NNOutput]) {
+            for output in outputs {
+                **output = NNOutput {
+                    nn_x_len: 19,
+                    nn_y_len: 19,
+                    white_win_prob: 2.0,
+                    white_loss_prob: -2.0,
+                    white_no_result_prob: -20.0,
+                    ..NNOutput::default()
+                };
+                output.policy_probs[0] = 3.0;
+            }
+        }
+    }
+
+    impl Backend for FailsOnceBackend {
+        fn global_initialize(&self) {}
+        fn global_cleanup(&self) {}
+        fn print_devices(&self) {}
+
+        fn load_model_file(
+            &self,
+            file: &str,
+            expected_sha256: &str,
+        ) -> Result<Box<dyn LoadedModel>, NeuralNetError> {
+            DummyBackend.load_model_file(file, expected_sha256)
+        }
+
+        fn create_compute_context(
+            &self,
+            _gpu_idxs: &[i32],
+            _logger: &Logger,
+            _nn_x_len: i32,
+            _nn_y_len: i32,
+            _home_data_dir_override: &str,
+            _use_fp16_mode: Enabled,
+            _loaded_model: &dyn LoadedModel,
+            _cfg: &Config,
+        ) -> Result<Box<dyn ComputeContext>, NeuralNetError> {
+            Ok(Box::new(DummyComputeContext))
+        }
+
+        fn create_compute_handle(
+            &self,
+            _ctx: &dyn ComputeContext,
+            _loaded_model: &dyn LoadedModel,
+            _logger: &Logger,
+            _max_batch_size: i32,
+            _require_exact_nn_len: bool,
+            _inputs_use_nhwc: bool,
+            _gpu_idx_for_this_thread: i32,
+            _server_thread_idx: i32,
+        ) -> Result<Box<dyn ComputeHandle>, NeuralNetError> {
+            Ok(Box::new(DummyComputeHandle::new()))
+        }
+
+        fn is_using_fp16(&self, _handle: &dyn ComputeHandle) -> bool {
+            false
+        }
+
+        fn set_is_warmup(&self, handle: &mut dyn ComputeHandle, is_warmup: bool) -> bool {
+            handle.set_is_warmup(is_warmup)
+        }
+
+        fn create_input_buffers(
+            &self,
+            _loaded_model: &dyn LoadedModel,
+            _max_batch_size: i32,
+            _nn_x_len: i32,
+            _nn_y_len: i32,
+        ) -> Result<Box<dyn InputBuffers>, NeuralNetError> {
+            Ok(Box::new(DummyInputBuffers))
+        }
+
+        fn get_output(
+            &self,
+            _handle: &dyn ComputeHandle,
+            _buffers: &dyn InputBuffers,
+            _num_batch_elts: i32,
+            inputs: &mut [&mut NNResultBuf],
+            outputs: &mut [&mut NNOutput],
+        ) -> Result<(), NeuralNetError> {
+            if let Some(probe) = &self.probe {
+                probe.record_inputs(inputs);
+            }
+            Self::write_outputs(outputs);
+            self.attempt(FailureStage::Get, inputs)
+        }
+
+        fn supports_async_pipeline(&self) -> bool {
+            self.stage != FailureStage::Get
+        }
+
+        fn submit_output(
+            &self,
+            _handle: &dyn ComputeHandle,
+            _buffers: &dyn InputBuffers,
+            num_batch_elts: i32,
+            inputs: &mut [&mut NNResultBuf],
+        ) -> Result<usize, NeuralNetError> {
+            if let Some(probe) = &self.probe {
+                probe.record_inputs(inputs);
+                probe.batches.lock().unwrap().push(num_batch_elts as usize);
+            }
+            self.attempt(FailureStage::Submit, inputs)?;
+            Ok(0)
+        }
+
+        fn query_output_done(&self, _handle: &dyn ComputeHandle, _token: usize) -> bool {
+            self.probe.as_ref().is_none_or(|probe| probe.query_done())
+        }
+
+        fn finish_output(
+            &self,
+            _handle: &dyn ComputeHandle,
+            _buffers: &dyn InputBuffers,
+            _token: usize,
+            _num_batch_elts: i32,
+            inputs: &mut [&mut NNResultBuf],
+            outputs: &mut [&mut NNOutput],
+        ) -> Result<(), NeuralNetError> {
+            Self::write_outputs(outputs);
+            self.attempt(FailureStage::Finish, inputs)
+        }
+    }
+
+    fn evaluator() -> NnEvaluator {
+        evaluator_with_max_batch(1)
+    }
+
+    #[test]
+    fn passing_hack_handles_nonpass_softmax_underflow() {
+        let eval = evaluator();
+        let board = Board::new(19, 19);
+        let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+        let params = MiscNNInputParams {
+            enable_passing_hacks: true,
+            ..MiscNNInputParams::default()
+        };
+        let mut output = NNOutput::default();
+        output.policy_probs.fill(-1000.0);
+        output.policy_probs[361] = 1000.0;
+        // C++ applies max(floor, min(pass, sum*19)). The floor may exceed
+        // the cap when every non-pass exponent underflows; clamp would panic.
+        eval.shared.postprocess_output(&board, &history, P_BLACK, &params, &mut output);
+        assert_eq!(output.policy_probs[361], 1.0);
+        assert!(output.policy_probs[..361].iter().all(|p| *p == 0.0));
+    }
+
+    fn evaluator_with_max_batch(max_batch: i32) -> NnEvaluator {
+        NnEvaluator::new(
+            "worker-failure-test".into(),
+            "unused-model.bin".into(),
+            String::new(),
+            Arc::new(Logger::new(LoggerOptions::default(), None)),
+            max_batch,
+            19,
+            19,
+            true,
+            false,
+            4,
+            2,
+            false,
+            String::new(),
+            Enabled::False,
+            1,
+            vec![0],
+            "worker-failure-test".into(),
+            false,
+            0,
+            true,
+            &ConfigParser::new(false, false),
+        )
+    }
+
+    fn assert_failed_request_recovers(stage: FailureStage) {
+        // A missing error notification must fail within a deadline, rather than
+        // hanging the entire test process in NnEvaluator::evaluate_async.
+        let (tx, rx) = mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let backend = Arc::new(FailsOnceBackend {
+                    stage,
+                    attempts: AtomicU64::new(0),
+                    probe: None,
+                });
+                let mut eval = evaluator();
+                eval.set_backend(backend.clone());
+                eval.load_model().unwrap();
+                eval.spawn_server_threads();
+                let board = Board::new(19, 19);
+                let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+                let params = MiscNNInputParams::default();
+                let nn_hash = get_hash(&board, &history, P_BLACK, &params);
+                let mut buf = NNResultBuf::new();
+                let failed = catch_unwind(AssertUnwindSafe(|| {
+                    eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, false);
+                }));
+                assert!(failed.is_err(), "{stage:?} error was reported as success");
+                assert!(buf.result.is_none(), "failed backend produced a synthetic result");
+                assert!(!buf.has_result);
+                assert!(buf.error.as_deref().unwrap().contains(stage.operation()));
+                let cache = eval.shared.nn_cache_table.as_ref().unwrap();
+                assert!(cache.get(nn_hash).is_none(), "failed result polluted the input cache");
+                assert!(cache.get(Hash128::new(0, 0)).is_none(), "default output was cached");
+                assert_eq!(backend.attempts.load(Ordering::SeqCst), 1);
+
+                // Reuse both the request and its caller-owned buffer. An old
+                // error/default cache entry must not prevent a genuine retry.
+                eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, false);
+                assert!(buf.has_result);
+                assert!(buf.error.is_none());
+                let output = buf.result.as_ref().expect("retry lost its real output");
+                assert!(output.white_win_prob < 0.1, "retry returned the neutral fallback");
+                assert!(output.policy_probs[0] > output.policy_probs[1]);
+                assert_eq!(backend.attempts.load(Ordering::SeqCst), 2);
+                eval.kill_server_threads();
+            }));
+            let _ = tx.send(outcome);
+        });
+        let outcome = rx.recv_timeout(Duration::from_secs(5))
+            .expect("backend failure did not wake the evaluator client");
+        client.join().unwrap();
+        if let Err(panic) = outcome {
+            resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn get_output_error_wakes_client_without_cache_pollution() {
+        assert_failed_request_recovers(FailureStage::Get);
+    }
+
+    #[test]
+    fn submit_output_error_wakes_client_without_cache_pollution() {
+        assert_failed_request_recovers(FailureStage::Submit);
+    }
+
+    #[test]
+    fn finish_output_error_wakes_client_without_cache_pollution() {
+        assert_failed_request_recovers(FailureStage::Finish);
+    }
+
+    #[test]
+    fn loaded_backend_without_server_threads_never_returns_dummy_output() {
+        let mut eval = evaluator();
+        eval.set_backend(Arc::new(DummyBackend));
+        eval.load_model().unwrap();
+        let board = Board::new(19, 19);
+        let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+        let mut buf = NNResultBuf::new();
+        for killed in [false, true] {
+            if killed {
+                eval.spawn_server_threads();
+                eval.kill_server_threads();
+            }
+            let failed = catch_unwind(AssertUnwindSafe(|| {
+                eval.evaluate(
+                    &board, &history, P_BLACK, &MiscNNInputParams::default(),
+                    &mut buf, true, false,
+                );
+            }));
+            assert!(failed.is_err());
+            assert!(buf.result.is_none());
+            assert!(!buf.has_result);
+        }
+    }
+
+    #[test]
+    fn model_capabilities_distinguish_v8_and_v9_and_preserve_chinese_rules() {
+        let mut eval = evaluator();
+        let chinese = Rules::parse_rules("chinese").unwrap();
+        for (version, shortterm) in [(8, false), (9, true), (15, true)] {
+            eval.model_version = version;
+            assert_eq!(eval.supports_shortterm_error(), shortterm, "model version {version}");
+            let mut supported = false;
+            assert_eq!(eval.supported_rules(chinese, &mut supported), chinese);
+            assert!(supported, "model version {version} rejected Chinese rules");
+            let mut spight = chinese;
+            spight.ko_rule = KoRule::Spight;
+            let normalized = eval.supported_rules(spight, &mut supported);
+            assert!(!supported, "unsupported Spight rules were silently accepted");
+            assert_eq!(normalized.ko_rule, KoRule::Situational);
+        }
+    }
+
+    #[test]
+    fn requested_symmetry_and_optimism_reach_sync_and_pipeline_backends() {
+        for stage in [FailureStage::Get, FailureStage::Submit] {
+            let probe = Arc::new(BackendProbe::default());
+            let backend = Arc::new(FailsOnceBackend {
+                stage,
+                // Start past the failure: this test observes successful inputs.
+                attempts: AtomicU64::new(1),
+                probe: Some(probe.clone()),
+            });
+            let mut eval = evaluator();
+            eval.set_backend(backend);
+            eval.load_model().unwrap();
+            eval.spawn_server_threads();
+            let board = Board::new(19, 19);
+            let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+            let params = MiscNNInputParams {
+                symmetry: 3,
+                policy_optimism: 0.4,
+                ..MiscNNInputParams::default()
+            };
+            let mut buf = NNResultBuf::new();
+            eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, true, false);
+            eval.kill_server_threads();
+            assert!(buf.result.is_some());
+            assert_eq!(*probe.inputs.lock().unwrap(), vec![(3, 0.4)], "{stage:?} inputs");
+        }
+    }
+
+    #[test]
+    fn pipeline_burst_never_exceeds_physical_max_batch() {
+        for (max_batch, request_count) in [(2, 16), (4, 32)] {
+            let probe = Arc::new(BackendProbe {
+                // Each scheduler pass polls the blocked front slot before it
+                // can pull at most one queued row. This many passes lets the
+                // old unbounded implementation absorb the entire burst. Then
+                // a real barrier, rather than a sleep, gives control to us.
+                checks_before_barrier: request_count * 2,
+                ..BackendProbe::default()
+            });
+            let backend = Arc::new(FailsOnceBackend {
+                stage: FailureStage::Submit,
+                attempts: AtomicU64::new(1),
+                probe: Some(probe.clone()),
+            });
+            let mut eval = evaluator_with_max_batch(max_batch);
+            eval.set_backend(backend);
+            eval.load_model().unwrap();
+            let board = Board::new(19, 19);
+            let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+            let requests: Vec<_> = (0..request_count).map(|id| {
+                Arc::new(EvalRequest {
+                    buf: AsyncMutex::new(NNResultBuf::new()),
+                    result_ready: Condvar::new(),
+                    board: board.clone(),
+                    history: history.clone(),
+                    next_player: P_BLACK,
+                    sgf_meta: None,
+                    nn_input_params: MiscNNInputParams::default(),
+                    include_owner_map: false,
+                    nn_hash: Hash128::new(id as u64 + 1, 1),
+                })
+            }).collect();
+
+            // Concurrent producers enqueue a full burst before serving begins,
+            // so the two-slot saturation scenario is independent of scheduling.
+            let producers_ready = std::sync::Barrier::new(request_count + 1);
+            std::thread::scope(|scope| {
+                for request in &requests {
+                    let queue = &eval.shared.query_queue;
+                    let producers_ready = &producers_ready;
+                    scope.spawn(move || {
+                        producers_ready.wait();
+                        assert!(queue.wait_push(request.clone()));
+                    });
+                }
+                producers_ready.wait();
+            });
+            eval.spawn_server_threads();
+
+            let (mut gate, _) = probe.changed.wait_timeout_while(
+                probe.gate.lock().unwrap(), Duration::from_secs(5), |gate| !gate.reached,
+            ).unwrap();
+            let reached = gate.reached && !gate.timed_out;
+            let saturated_batches = probe.batches.lock().unwrap().len();
+            let still_queued = eval.shared.query_queue.size();
+            gate.released = true;
+            probe.changed.notify_all();
+            drop(gate);
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut completed = 0;
+            for request in &requests {
+                let mut buf = request.buf.lock();
+                while buf.result.is_none() && buf.error.is_none() && Instant::now() < deadline {
+                    request.result_ready.wait_for(
+                        &mut buf, deadline.saturating_duration_since(Instant::now()),
+                    );
+                }
+                if buf.result.is_some() && buf.error.is_none() {
+                    completed += 1;
+                }
+            }
+            eval.kill_server_threads();
+            assert!(reached, "scheduler did not reach the two-slot barrier");
+            assert_eq!(saturated_batches, 2, "barrier must hold two physical batches");
+            assert!(still_queued > 0, "two occupied slots absorbed the entire pending queue");
+            let batches = probe.batches.lock().unwrap();
+            assert!(batches.iter().all(|&rows| rows > 0 && rows <= max_batch as usize),
+                "max_batch={max_batch}, submitted batches={batches:?}");
+            assert_eq!(batches.iter().sum::<usize>(), request_count);
+            assert_eq!(completed, request_count, "burst lost a request");
+        }
     }
 }

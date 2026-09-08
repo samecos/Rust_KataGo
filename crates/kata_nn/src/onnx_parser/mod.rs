@@ -201,7 +201,8 @@ pub struct FfnLayer {
     pub residual_add: bool,
 }
 
-/// 逐通道门控 SiLU：`x * sigmoid(x*scale + bias)`（块边界处的 "normactconv" 门）。
+/// 逐通道仿射 + SiLU：`a * sigmoid(a)`，其中 `a = x*scale + bias`
+/// （块边界处的 "normactconv" 门；对应 executor 的 gate_silu kernel）。
 #[derive(Debug, Clone)]
 pub struct GateSiluLayer {
     pub scale: Tensor,

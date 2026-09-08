@@ -13,6 +13,7 @@ pub mod gtp;
 pub mod r#match;
 pub mod misc;
 pub mod nnbench;
+pub mod nnworker;
 pub mod sandbox;
 pub mod selfplay;
 pub mod start_poses;

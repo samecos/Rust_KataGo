@@ -1,0 +1,24 @@
+[package]
+name = "xuanping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "xuanping"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.36"
+kata_core = { path = "../kata_core" }
+kata_game = { path = "../kata_game" }
+kata_nn = { path = "../kata_nn" }
+kata_program = { path = "../kata_program" }
+kata_search = { path = "../kata_search" }
+
+[features]
+# Enables the hand-written CUDA backend (`cudabackend` nnBackend value) for
+# the in-GUI engine; kernels are compiled to PTX by nvcc at build time.
+cuda = ["kata_nn/cuda", "kata_program/cuda"]

@@ -119,6 +119,8 @@ pub trait InputBuffers: Send + Sync {
 /// Mirrors the `NNResultBuf` declared in C++ `nneval.h`.
 #[derive(Debug, Clone)]
 pub struct NNResultBuf {
+    /// An explicit backend failure; never substitute synthetic output for it.
+    pub error: Option<String>,
     pub client_waiting_for_result: bool,
     pub has_result: bool,
     pub include_owner_map: bool,
@@ -144,6 +146,7 @@ impl NNResultBuf {
 impl Default for NNResultBuf {
     fn default() -> Self {
         Self {
+            error: None,
             client_waiting_for_result: false,
             has_result: false,
             include_owner_map: false,

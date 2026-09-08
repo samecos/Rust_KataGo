@@ -9,6 +9,8 @@ members = [
     "crates/kata_book",
     "crates/kata_distributed",
     "crates/katago",
+    "crates/xuanping",
+    "crates/kata_worker",
 ]
 resolver = "3"
 
