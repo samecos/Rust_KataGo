@@ -20,7 +20,7 @@ cargo build -p katago --features cuda --release
 .\target\release\katago-rs.exe nnworker `
   --server 127.0.0.1:50051 --worker-id rustgo-5070ti `
   --model D:/Go/Server/models/kata1-tf3-b11c768-s11001M-d5973M.bin.gz `
-  --config configs/worker_cuda.cfg --capacity 32
+  --config configs/worker_tf3_sm120.cfg --capacity 32
 ```
 
 `--server` 可为 `HOST:PORT` 或 `http://HOST:PORT`。每个同时运行的 Worker 使用不同 ID。
@@ -29,9 +29,36 @@ Server 的 Drain 会让已接纳任务完成并退出，不重新加入。
 
 `capacity` 是在途评估请求上限，包括排队及取消后尚未算完的任务，独立于
 `nnMaxBatchSize`。示例 capacity 32、batch 上限 16，仍由单个 NN 服务消费者凑批。
-GPU、精度、batch 和 tactic 使用常规 NN 配置。`worker_cuda.cfg` 使用 CUDA 默认
-tactic；旧 `best-tactic-plan.json` 绑定 b11fix ONNX，不能用于 TF3。需要启用调优 plan
-时须为 TF3 重新验证，模型/GPU/构建指纹不匹配会明确拒绝启动。
+GPU、精度、batch 和 tactic 使用常规 NN 配置。启动脚本默认使用
+`worker_tf3_sm120.cfg`，加载本机 TF3 专属的 DualFFN + q64-serial 认证 plan。
+脚本先解析用户传入的模型/配置路径，再切换到仓库根目录运行，结束后恢复原目录。
+旧 `best-tactic-plan.json` 绑定 b11fix ONNX，不能用于 TF3；模型/GPU/构建指纹
+不匹配会明确拒绝启动。`worker_cuda.cfg` 仍提供不使用认证 plan 的基础配置。
+
+持续维持 32 个在途请求时，可显式选择独立 C32 配置：
+
+```powershell
+.\scripts\run_go_worker.ps1 -Server 127.0.0.1:50051 `
+  -Config configs/worker_tf3_sm120_c32.cfg -Capacity 32
+```
+
+该配置仍用一个 NN 服务线程、物理 batch 上限 16 和 CUDA Graph，独立 plan
+`worker-tf3-sm120-c32.json` 只在实际 B16 启用 K384 NN 权重布局。
+本机 TF3 持续 C32 的 uncached Worker ABBA 为 1073.48→1093.68 RPC/s
+（+1.88%），已通过最终配置的 TF3 全字段对拍和 top-1 128/128。
+这不是所有负载的默认升级：低并发仍使用原 `worker_tf3_sm120.cfg`。
+
+持续高并发时可显式选择原有双 NN 服务线程配置，capacity 至少为 64：
+
+```powershell
+.\scripts\run_go_worker.ps1 -Server 127.0.0.1:50051 `
+  -Config configs/worker_tf3_sm120_throughput.cfg -Capacity 64
+```
+
+双线程配置关闭 CUDA Graph，按其独立 plan 运行；低并发时可能因 batch 不足而更慢，
+默认配置保持单线程。新布局在双线程 C64 仅 +0.59%，未过 1% 采纳门，因此原
+吞吐配置不变。性能对比、数值门及复现工具见
+[TF3 Worker 性能审计](tf3-worker-performance-audit.md)。
 当前 Worker 的真实推理接入限定为 CUDA；TensorRT 的模型与引擎缓存身份尚未按
 Worker 契约验证，选择该后端会明确报错。
 

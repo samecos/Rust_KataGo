@@ -11,6 +11,9 @@
 //! - `KATAGO_ONNX_MODEL`  (default `D:/code/b11fix.onnx`)
 //! - `KATAGO_DUMP_DIR`    (default `target/nn_io_dump_cuda`)
 //! - `KATAGO_DUMP_POSITIONS` (default 16)
+//! - `KATAGO_DUMP_BATCH` (default 1, integer 1..=64). Inputs retain their
+//!   original position indices; a short final batch repeats its last row but
+//!   writes only real positions. Per-position file formats are unchanged.
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::CudaStream;
@@ -195,6 +198,19 @@ fn cuda_model_smoke() {
 
 #[test]
 fn dump_nn_io_cuda() {
+    // Validate even when the model/CUDA is missing: an invalid explicit batch
+    // must not silently fall back to B1 or turn into a skipped validation.
+    let physical_batch = match std::env::var("KATAGO_DUMP_BATCH") {
+        Ok(value) => value
+            .parse::<usize>()
+            .expect("KATAGO_DUMP_BATCH must be an integer in 1..=64"),
+        Err(std::env::VarError::NotPresent) => 1,
+        Err(error) => panic!("invalid KATAGO_DUMP_BATCH: {error}"),
+    };
+    assert!(
+        (1..=64).contains(&physical_batch),
+        "KATAGO_DUMP_BATCH must be an integer in 1..=64, got {physical_batch}"
+    );
     let Some((rt, model)) = try_load() else {
         return;
     };
@@ -208,39 +224,83 @@ fn dump_nn_io_cuda() {
     std::fs::create_dir_all(&dump_dir).expect("create dump dir");
     let dump_dir = std::path::PathBuf::from(dump_dir);
 
-    for i in 0..num_positions {
-        let (spatial, global) = make_position(i);
-        let out = run_one(&rt, &model, &spatial, &global);
+    const SPATIAL: usize = 22 * 19 * 19;
+    const GLOBAL: usize = 19;
+    const POLICY: usize = 6 * 362;
+    for first in (0..num_positions).step_by(physical_batch) {
+        let real_rows = physical_batch.min(num_positions - first);
+        let mut spatial = Vec::with_capacity(physical_batch * SPATIAL);
+        let mut global = Vec::with_capacity(physical_batch * GLOBAL);
+        for row in 0..physical_batch {
+            // Keep the exact original deterministic position/seed mapping.
+            // Duplicate the last real input only for the physical tail padding.
+            let (position_spatial, position_global) = make_position(first + row.min(real_rows - 1));
+            spatial.extend(position_spatial);
+            global.extend(position_global);
+        }
+        let out = run_dump_batch(&rt, &model, &spatial, &global, physical_batch);
+        assert_eq!(
+            out.policy.len(),
+            physical_batch * POLICY,
+            "policy [B,6,362]"
+        );
+        assert_eq!(out.value.len(), physical_batch * 3, "value [B,3]");
+        assert_eq!(out.misc.len(), physical_batch * 10, "misc [B,10]");
+        assert_eq!(out.moremisc.len(), physical_batch * 8, "moremisc [B,8]");
+        assert_eq!(
+            out.ownership.len(),
+            physical_batch * 361,
+            "ownership [B,361]"
+        );
 
-        write_f32(&dump_dir.join(format!("pos{i}_spatial.bin")), &spatial);
-        write_f32(&dump_dir.join(format!("pos{i}_global.bin")), &global);
-        // 通道 0（基策略）的 362 logits，与 TRT dump（optimism=0）口径一致。
-        write_f32(
-            &dump_dir.join(format!("pos{i}_policy.bin")),
-            &out.policy[..362],
-        );
-        write_f32(&dump_dir.join(format!("pos{i}_value.bin")), &out.value);
-        write_f32(
-            &dump_dir.join(format!("pos{i}_misc.bin")),
-            &[
-                out.misc[0],
-                out.misc[1],
-                out.misc[2],
-                out.misc[3],
-                out.moremisc[0],
-                out.moremisc[1],
-            ],
-        );
-        write_f32(
-            &dump_dir.join(format!("pos{i}_ownership.bin")),
-            &out.ownership,
-        );
+        for row in 0..real_rows {
+            let i = first + row;
+            write_f32(
+                &dump_dir.join(format!("pos{i}_spatial.bin")),
+                &spatial[row * SPATIAL..(row + 1) * SPATIAL],
+            );
+            write_f32(
+                &dump_dir.join(format!("pos{i}_global.bin")),
+                &global[row * GLOBAL..(row + 1) * GLOBAL],
+            );
+            // Preserve the established B1 dump protocol: policy channel 0,
+            // and misc[0..4] followed by moremisc[0..2] in the six-scalar file.
+            write_f32(
+                &dump_dir.join(format!("pos{i}_policy.bin")),
+                &out.policy[row * POLICY..row * POLICY + 362],
+            );
+            write_f32(
+                &dump_dir.join(format!("pos{i}_value.bin")),
+                &out.value[row * 3..(row + 1) * 3],
+            );
+            write_f32(
+                &dump_dir.join(format!("pos{i}_misc.bin")),
+                &[
+                    out.misc[row * 10],
+                    out.misc[row * 10 + 1],
+                    out.misc[row * 10 + 2],
+                    out.misc[row * 10 + 3],
+                    out.moremisc[row * 8],
+                    out.moremisc[row * 8 + 1],
+                ],
+            );
+            write_f32(
+                &dump_dir.join(format!("pos{i}_ownership.bin")),
+                &out.ownership[row * 361..(row + 1) * 361],
+            );
+        }
     }
 
     let model = model_path();
+    let num_batches = num_positions.div_ceil(physical_batch);
     let meta = serde_json::to_string_pretty(&serde_json::json!({
         "model": model,
         "n": num_positions,
+        "physical_batch": physical_batch,
+        "num_batches": num_batches,
+        "physical_rows": num_batches * physical_batch,
+        "padded_rows": num_batches * physical_batch - num_positions,
+        "tail_padding": "repeat_last",
         "spatial_elts": 22 * 19 * 19,
         "global_elts": 19,
         "policy_elts": 362,
@@ -251,6 +311,37 @@ fn dump_nn_io_cuda() {
     .expect("serialize meta");
     std::fs::write(dump_dir.join("meta.json"), meta).expect("write meta");
     println!("dumped {num_positions} positions to {}", dump_dir.display());
+}
+
+/// Dump-only batching; the other tests and their B1 helpers remain unchanged.
+fn run_dump_batch(
+    rt: &CudaRuntime,
+    model: &CudaModel,
+    spatial: &[f32],
+    global: &[f32],
+    physical_batch: usize,
+) -> CudaOutputsHost {
+    if physical_batch == 1 {
+        return run_one(rt, model, spatial, global);
+    }
+    use cudarc::driver::CudaSlice;
+    let stream = rt.device.default_stream();
+    let mut ws = kata_nn::backends::cuda_exec::CudaWorkspace::new(&stream, model, physical_batch)
+        .expect("batched dump workspace");
+    let mut d_spatial: CudaSlice<f32> =
+        unsafe { stream.alloc(spatial.len()) }.expect("alloc batched spatial");
+    let mut d_global: CudaSlice<f32> =
+        unsafe { stream.alloc(global.len()) }.expect("alloc batched global");
+    stream
+        .memcpy_htod(spatial, &mut d_spatial)
+        .expect("htod batched spatial");
+    stream
+        .memcpy_htod(global, &mut d_global)
+        .expect("htod batched global");
+    model
+        .apply(rt, &stream, &mut ws, &d_spatial, &d_global)
+        .expect("batched CudaModel::apply");
+    ws.to_host(&stream).expect("copy batched outputs to host")
 }
 
 /// 与 dump_nn_io.rs 一致的确定性局面：空盘 + i*7%80 步伪随机合法落子。

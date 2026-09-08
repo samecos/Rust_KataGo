@@ -1,8 +1,8 @@
 {
   "schema": 2,
   "kind": "cuda-tactic-plan",
-  "plan_id": "sm120-nvidia-geforce-rtx-5070-ti-q64-windows-20260819-r1",
-  "generated_utc": "2026-08-19T00:00:00Z",
+  "plan_id": "tf3-sm120-5070ti-dualffn-q64-serial-20260908-r1",
+  "generated_utc": "2026-09-08T11:01:43Z",
   "backend_build": {
     "capabilities": {
       "attention_q64": true,
@@ -24,24 +24,23 @@
     "compute_capability": "12.0",
     "sm_count": 70,
     "l2_cache_bytes": 50331648,
-    "model_sha256": "f2fc09fdf58a3e8a4b97addceab0c853874c52709152e61935b6ac6b9f474f94"
+    "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6"
   },
   "apply": {
     "tactic_overrides": {
-      "KATAGO_CUDA_DUALFFN": "1",
-      "KATAGO_CUDA_ATTN_TILE": "q64"
+      "KATAGO_CUDA_ATTN_TILE": "q64-serial",
+      "KATAGO_CUDA_DUALFFN": "1"
     }
   },
   "selection": {
-    "method": "manual candidate promotion after WSL and Windows ABBA",
-    "min_improvement": 0.01,
-    "attention_core_improvement": 0.147,
-    "windows_and_wsl_validated": true
-  },
-  "recertification": {
-    "date": "2026-09-08",
+    "measured_requests_per_run": 8192,
+    "concurrency": 32,
+    "attention_bitwise_cases": 15,
+    "reference_policy_top1": "128/128",
+    "attention_worker_abba_improvement": 0.0353013907613422,
     "evidence": "docs/tf3-worker-performance-audit.md",
-    "numerical_gate": "ONNX ORT FP32 16/16 PASS for each original tile",
-    "reason": "New independent q64-serial entry; original q64/q128 PTX bytes unchanged"
+    "method": "Native TF3 FP32 reference and ONNX ORT numerical gates before sequential Worker ABBA",
+    "physical_max_batch": 16,
+    "min_improvement": 0.01
   }
 }

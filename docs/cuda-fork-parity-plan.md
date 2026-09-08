@@ -7,15 +7,38 @@
 
 ## 1. 目标与验收口径
 
-- **fork 认证成绩**:RTX 5080(84 SM)2836 nnEval/s,拓扑 = 固定物理 B16 +
-  尾批 padding + 2 流(plan `sm120-rtx5080-96c8d332dc452f3d`)。
-- **本机硬件**:RTX 5070 Ti(70 SM,48 MB L2)。per-SM 归一化对齐线 ≈
-  2836 × 70/84 ≈ **2360 nnEval/s**(B16 口径);**绝对超越 2836** 需 kernel
-  代际优势(tcgen05 或 FP8)补 20% 的 SM 数差。
-- **测量口径**:统一用 `katago-rs nnbench`(对齐 C++ `benchmarknn`,固定物理
-  batch 打满,统计物理 nnEval/s)。`--mode eval` = 生产栈全链路;
-  `--mode direct` = `CudaModel::apply` 直连,kernel 下界对照;`--mode kernel`
-  = 纯前向(无拷贝无 graph)。注意:eval 的 `--workers` 默认 2×**当前** batch
+- **当前对标（2026-09-08 核查）**：本机 RTX 5070 Ti（70 SM、48 MiB L2），
+  原生 TF3 模型 `kata1-tf3-b11c768-s11001M-d5973M.bin.gz`，SHA-256
+  `1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6`。
+  fork 已有同 GPU、同 SHA 的固定 B14/S2 认证方案，记录值 **2418.947898**。
+  证据：fork `final-migration/plans/sm120/rtx5070ti-b14-s2/README.md:3`、
+  `best-tactic-plan.json:1240`。这是历史认证参考；本轮同卡、同计时边界的稳定
+  空盘基线已完成，见 §8 G0，精度与输出布局差异仍须单列。
+- **2418.9 的计时边界**：fork 对各并发 lane 的 CUDA event 前向耗时取中位数，
+  再计算 `sum(batch / lane_median_seconds)`；不是 gRPC Worker 吞吐，也不是
+  timed rows 除以统一主机墙钟。H2D 在计时循环外，event 只包围 `apply`。
+  证据：fork `python/sm120_benchmark_metrics.py:17`、
+  `cpp/neuralnet/nneval.cpp:1231`、`cpp/neuralnet/cudabackend.cpp:5481`、`:5519`。
+  `actualWallSeconds` 另含 warmup 等阶段（`nneval.cpp:1224`），不能直接当作
+  剔除预热的生产吞吐。先统一边界再比较，严禁用 2418.9 除 Rust Worker rows/s。
+- **验收分层**：GPU 前向、含拷贝的 direct、evaluator、gRPC Worker、搜索分别报告。
+  每层固定模型 SHA、物理 batch、lane 数、graph、请求/缓存条件和环境；单 GPU
+  顺序 ABBA。G0 先建立同卡、同边界且明确精度差异的参考基线；同精度性能归因
+  另做受控验证，最终以真实 Worker 的 uncached
+  NN rows/s 与延迟验收。旧 RTX 5080 B16/S2 的 2836、`2836×70/84≈2360`
+  和 `2836/2≈1418` 只保留为历史推算，**均不再是验收线或实测单流速度**。
+- **精度边界**：Rust CUDA 已是混合精度：FP16 权重和多处中间存储，GEMM/QK/PV
+  FP32 累加，激活/归约 FP32，主干残差及最终输出 FP32。fork B14 的 `qk16`
+  是 QK FP16 累加、PV FP32 累加，且选中的 linear2 CUTLASS 残差 GEMM 也用
+  FP16 累加（fork `fa4_aot/build_aot.py:150`、`sm120_aot/linear2_residual_cutlass.cu:16`，
+  两者相对 `cpp/neuralnet/`）。其 8192 行认证 top-1 为 99.8046875%，门槛 99.5%
+  （plan `:1179`、`:1230`），不同于本仓库 100% 门；本轮借鉴布局/组织，保留
+  Rust 现有累加与存储边界，不据 fork 认证直接接受降精度。
+- **本仓库测量工具**：`katago-rs nnbench` 固定物理 batch；`--mode eval` =
+  evaluator 链路（不含 gRPC），`--mode direct` = 含拷贝的 `CudaModel::apply`
+  直连，`--mode kernel` = 纯前向(无拷贝无 graph)。kernel 新增
+  `--timing cuda-event --handles 1,2 --input empty`，逐 lane event 中位数已与
+  fork 对齐；独立保留墙钟统计，不混算比例。注意:eval 的 `--workers` 默认 2×**当前** batch
   ——serve_pipelined 的 target 是发射阈值非上限,W/3>target 时 avgBatch 被
   抬到 ~W/3(2026-08-17 实测修复)。
 - **正确性门**(任何性能变更的前置):
@@ -27,9 +50,27 @@
   一律注册为 tactic 候选经 `scripts/autotune.py` 裁决并入
   `plans/best-tactic-plan.json`(fail-closed)。
 
-## 2. 现状快照(2026-08-19)
+## 2. 现状快照(2026-09-08)
 
-### 已落地(详见 cuda-optimization-plan.md 决策组表 G1-G10 全绿)
+### 当前 TF3 Worker：工作区既有成果
+
+下列数字来自本轮 fork 借鉴动工前已有的实现与验证记录，不是 G1–G4 新收益。
+比较对象是本机官方 C++ v1.18.2 Worker；该对象与 fork B14/S2 必须分开标注。
+
+| 口径 | 工作区既有实测 | 证据 |
+|---|---|---|
+| B16、uncached、C32、单线程 Worker ABBA | Rust **882.4 → 1078.2** NN rows/s；最终同轮 C++ **1332.2** | `tf3-worker-performance-audit.md`「比较对象与测量边界」 |
+| B16、uncached、C64、双线程吞吐配置 | Rust **1163.8**，同轮 C++ **1338.1** NN rows/s；单线程默认保留 | 同上，`worker-throughput-final/report.json` |
+| TF3 数值与 attention | DualFFN、q64-serial 已验证；q64-serial 恢复 q128 softmax 顺序，15 组 half bitwise 一致，TF3 top-1 **128/128** | 同文「已确认的原因」及 §8 TF3 追加 |
+| K384 布局受控探针 | 相同 FP32 compute/FP32 out 下 NN 比现有 TN 的部分形状快约 **12–15%**；尚非整网或 Worker 收益 | 同文「C++ 的部分 GEMM 速度来自不同计算/存储路径」 |
+
+本轮 G0–G4 状态见 §8。模型与开关依赖独立 TF3 plan，旧 ONNX plan 不得直接套用。
+SM120 不支持 tcgen05/TMEM 的硬件结论保留；这不意味着 FA4 必须依赖 tcgen05，
+也不能把过去两个本地 FA4 变体失败外推成 attention/FA4 路线永久无收益。
+fork 的 SM120 专用 AOT generator 使用 `FlashAttentionForwardSm120`
+（`cpp/neuralnet/fa4_aot/build_aot.py:71`、`:182`）；具体 FP32 版本仍须本机验证。
+
+### 历史 ONNX 已落地(2026-08-19；详见 cuda-optimization-plan.md 决策组表 G1-G10 全绿)
 
 | 层 | 状态 |
 |---|---|
@@ -39,9 +80,9 @@
 | 调度 | 事件门控流水线(submit/finish 分离 + 双槽 + 完成即投递)+ per-size CUDA graph 缓存;serve=1 单消费者 |
 | batch | 精确尺寸 + nnMaxBatchSize=16 上限(padding 与 B16 凑满已分别证伪,见 §4 关键警示) |
 | autotune | scripts/autotune.py 8 决策组 ABBA + schema 2 plan(JSON 绑定 device/model/CUDA/CUTLASS/kernel build/capabilities,fail-closed) |
-| 精度路线 | FP16 终局(FP8 精度不足/INT8 无厂商路径,三段实验闭环) |
+| 精度路线 | FP16/FP32 混合精度；当时 FP8 精度实验未过门，INT8 无厂商路径 |
 
-### 最新性能数字
+### 历史 ONNX 性能数字（保留原始记录，跨 GPU 推算不作当前验收）
 
 | 口径 | 值 | 出处 |
 |---|---|---|
@@ -64,6 +105,11 @@
 > 「M3-pre」)——SM120 无 tcgen05/TMEM,FP16 GEMM 无代际杠杆;剩余杠杆
 > 重排为 E1(FP8 精度门)/B4/A-lite/WSL(E4)。**
 
+> **2026-09-08 适用范围修订**：上表及下方 §3–§7 保留当时实验与决策史。
+> 其中 5080 每流/per-SM 的“真实差距”、fork 2.0×流间扩展及路线收益上限
+> 都含未验证的跨硬件或计时假设，现已撤回作为当前结论；当前目标和精度门以 §1 为准，
+> 当前执行顺序以 §8 G0–G4 为准。原始本机实测值及已验证收益仍保留。
+
 ## 3. 差距分解(2026-08-17 M0 后修订)
 
 M0 直测后的三组数字:
@@ -83,7 +129,7 @@ FFN 62%);方案 A 降级为 A-lite(仅搜索语境凑批)。**
 
 > **2026-08-17 再修订:C 主线(tcgen05)❌ 硬件证伪**——SM120 物理上无
 > tcgen05/TMEM(ptxas + CUTLASS 4.7 + PTX ISA 9.3 三源互证,优化文档 M3-pre)。
-> B3 亦已于 M2 证伪。kernel 剩余空间 = FP8 mma.sync(E1,精度门先行)与
+> B3 的两个本地变体亦已于 M2 测得负收益（不代表 FA4 全路线证伪）。当时评估的 kernel 剩余空间 = FP8 mma.sync(E1,精度门先行)与
 > 融合微优化(B4);~~fork per-SM 差(20~26%)重归因于时钟/L2/带宽/融合度,
 > 非指令代际~~(2026-08-17 再修订:DUALFFN 断裂修复 + WSL 复测后,
 > **真实 per-SM 差 ~14%**——旧估 20-26% 中有 ~6-12pt 是 DUALFFN 空转
@@ -169,7 +215,7 @@ batch-aware dispatch(攒满 target 才发射、GPU 空闲也发射,fork
 |---|---|---|---|
 | B1 | wide QKV packed GEMM | `wide_qkv-m128-n128-k64-s2-cute-atom4x2-packed`,M=B×361、N=1152,packed 行 `[Q384\|K384\|V384]` | 3 GEMM→1;packed 布局是 FA4 前提 |
 | B2 | dual FFN + SwiGLU epilogue | `dual_ffn-m128-n64-k32-s2-mb3-tanh-half2`(LeftSiLUAndMul) | 省 2304 宽缓冲整趟往返 + 独立 SwiGLU kernel |
-| B3 | FA2→FA4 tile | M128×N64 s1、128 线程、noncausal 无掩码 | attention ~14% 前向(H4 待证),上限 ~7%;**不做 both16**(已证:Hopper 起 FP32/FP16 累加同速,both16 只降精度) |
+| B3 | FA2→FA4 tile | M128×N64 s1、128 线程、noncausal 无掩码 | 当时估 attention ~14% 前向、收益上限 ~7%；本地两个变体测得负收益。保留 FP32 累加；不同累加类型是否同速须按 GPU/形状实测，不能由架构名称推断 |
 | B4 | linear2/outproj beta=1 原位残差 | CUTLASS `GemmShape<128,128,32>` warp<64,64,32> 3 stages,C==D | 已部分有(hgemm_residual);~~CUTLASS 版作候选对照~~ **❌ 门槛证伪(2026-08-17)**:微基准(scripts/b4_residual_probe)全残差形状 CUTLASS 128x128/128x64/128x256 均不赢 cuBLASLt top-8(outproj 0.0251 vs 0.0250 持平;linup +0.9% 噪声;ffn_down -2.6%;B1/B2 慢 19-72%),且现行 hgemm_residual 本就是 cuBLASLt beta=1 原位——fork 战术在我们栈上无对应收益空间,关闭 |
 
 - **前置门槛**:每个融合 kernel 的 GEMM 主循环微基准 ≥ cuBLASLt 同形状,
@@ -234,7 +280,7 @@ WSL / clang-cl / driver-API launcher)。FP8 精度门未过前不动工。
 |---|---|---|---|
 | M0 | Phase 0 测量 + 决策表落档 | ✅ H1-H5 全部裁决(2026-08-17),数据入 cuda-optimization-plan.md | nnbench ✅ 已提交 |
 | M1 | C1 cuBLASLt top-N 计时重排 + C0 经典 cublas nvjet 试探 | C0 证伪(2026-08-17);C1 当时 ABBA +2.55% 采纳,**2026-08-17 晚复审下架**(B2 后边际归零 + 搜索口径净负 -4.3%/-4.4%,见优化文档「M3 追加」) | M0 |
-| M2 | B3 FA4(❌ 证伪:两变体均负,FA2 已是 mma.sync 局部最优)+ B2 dual-FFN(当日 ABBA +29.8%,**但提交源码编译断裂从未生效——2026-08-17 晚修复后重验证 +26.5% eval / +28.0% 搜索,对拍 PASS**) | 修复完成(见优化文档「M3 追加」) | M0 |
+| M2 | B3 FA4(❌ 两个本地变体测得负收益；不能外推整个 FA4 路线)+ B2 dual-FFN(当日 ABBA +29.8%,**但提交源码编译断裂从未生效——2026-08-17 晚修复后重验证 +26.5% eval / +28.0% 搜索,对拍 PASS**) | 修复完成(见优化文档「M3 追加」) | M0 |
 | M3 | ~~C2 tcgen05 主 GEMM 通路~~ ❌ 硬件证伪关闭(2026-08-17);B4 ❌ 门槛证伪(CUTLASS 残差 GEMM 全形状不赢 cuBLASLt top-8);E1 ❌ 精度门不过(官方语义硬失败,FFN-only 仍超门);**M3 收官:三项全证伪**。剩余:A-lite(搜索凑批)、WSL(E4) | ABBA + 对拍(未及——全部在门槛/证伪阶段关闭) | M1 |
 | M4 | 冲击 per-SM 对齐线 2360;评估 E1/E2、A-lite 与官方 `cudarocmopt` 增量 | 🔶 进行中(2026-08-19):E1 ❌ 精度门;双流复活 +9.5%(饱和口径);A-lite/host staging 证伪;布尔 tactic 与 graph UB 已修;**q64 attention 双平台通过并晋级 schema 2**(eval +3%左右,attention core +14.7%)。对齐线仍不可达,但已兑现本轮最后一个可复现 kernel 增量 | M1-M3 |
 
@@ -243,15 +289,79 @@ WSL / clang-cl / driver-API launcher)。FP8 精度门未过前不动工。
 
 ## 8. 进度看板(跨对话对齐用,每次会话结束更新)
 
+### 当前执行顺序：同 SHA TF3 / RTX 5070 Ti（2026-09-08）
+
+下列 G0–G4 是本轮阶段编号，与历史优化文档的决策组 G1–G10 不同。
+G0 的稳定参考基线已完成；G1/G4 已验收独立持续 C32 配置，G2 仍在验证。
+下表区分本轮新证据与此前已落地成果，不声明尚未跑完的新方向收益。
+
+| 阶段 | 工作与验收 | 当前状态 |
+|---|---|---|
+| G0 公平基线 | 同卡同 SHA TF3；固定 B14/S2、80 warmup、1000 iterations、无 graph、同语义空盘；对齐 lane event 中位数，单列精度/工具链/输出形状差异 | ✅ WSL 空盘 ABBA 为 STABLE：Fork 2293.33、Rust 1126.96 event NN rows/s，比例 49.14%；只作 GPU 前向参考，不是 Worker/E2E 比例 |
+| G1 K384 cuBLASLt NN 布局 | 权重在加载期组织为候选布局，FP16 输入/权重、FP32 累加及既有输出/残差边界不变；按 shape 选 tactic，先数值再整图/Worker ABBA | ✅ `nn_k384_b16` 仅采纳于独立持续 C32 单线程配置，1073.48→1093.68 RPC/s（+1.88%）；C16 −0.72%、双线程 C64 +0.59% 均不采纳，旧默认/吞吐配置保留；B8 阈值未采纳 |
+| G2 Attention / RoPE FP32 | 评估独立、跨 batch 共享 RoPE 与 SM120 attention tile/数据组织；QK/PV、激活/归约继续 FP32，维持精确函数与 half 边界 | 🔶 strict r2 已导出、codegen 审计及三组 attention 数值探针通过；含独立 RoPE 合计约 66.7–68.6 微秒，与 q64-serial 接近，下一步评估融合；尚未 TF3/ONNX 整图验收，未生产集成 |
+| G3 B12–B16 联合调优 | 在已过数值门的 G1/G2 候选上联合扫描 B12/13/14/15/16、lane 数、graph 与供数；记录真实 avgBatch、吞吐、延迟；不照抄 fork 的 DualFFN/L2 开关 | ⬜ 待前置候选验收；G0 参考已完成，fork B14 只作候选依据 |
+| G4 数值 + ABBA + plan | TF3 对 C++ FP32、旧 ONNX 对 ORT FP32 整图门，路径标记/失败关闭负例；ABBA 达 ≥1% 才认证，回退慢项，绑定模型/设备/构建与能力指纹 | ✅ G1 独立 C32 profile 验收完成：B16 两配置及最终 plan 反向环境覆盖 TF3 均 128/128；7 tactic case（5×ORT 4 局、2 host revision 拒绝）、16 plan CPU 单测、Python 6+9 回归及旧 binary 拒绝通过；G2 的 G4 验收仍待其数值/性能证据 |
+
+### 本轮证据与裁决（2026-09-08，阶段快照）
+
+- **G0 稳定基线**：`target/fork-parity-20260908/fork-rust-wsl-empty-abba/report.json`
+  保存 Fork/Rust/Rust/Fork 的全部样本。Fork 为 **2231.37 / 2357.02**，
+  Rust 为 **1125.07 / 1128.85** event NN rows/s；各自几何平均为
+  **2293.33 / 1126.96**。重复轮次 spread（`max/min−1`）分别 **5.63% / 0.34%**，
+  低于固定 10% 最大波动门，状态为 `STABLE`。49.14% 是 lane event 吞吐之比，
+  不是 gRPC Worker、evaluator 或端到端速度之比；也不是同精度 kernel 效率之比。
+- **计时与输入**：两侧每次 forward 前后记录 CUDA event，整段入队后同步；
+  先取每 lane 中位数，再求 `sum(14 / median_seconds)`。预热后两 lane 屏障
+  对齐，Fork 使用 `phase-offset-us=0`。19 路空盘、黑先、TrompTaylorish、
+  komi 7.5、symmetry 0、optimism 0 按语义对齐，未验证跨实现特征逐字节一致。
+  Fork `actualWallSeconds` 包含预热等阶段，Rust wall 不含，故不计算 wall 比例。
+- **不可省略的差异**：Fork 是 CUDA 13.0.88/cuDNN 9.24 认证构建，Rust 此轮为
+  CUDA 13.3.73；Fork qk16 及部分残差 GEMM 使用 FP16 累加，Rust 保留 FP32
+  与精确 expf。双方都算 ownership 与完整语义输出；Fork 原生 policy/terminal
+  为 2/9 通道，Rust 兼容布局实际算 6/21，其中 4/12 个通道为零。
+  `partial-c288-g1-v1` 仅合并 G1+V1，P1 仍计算，不是裁掉输出头。
+- **诊断轮次保留**：`fork-rust-wsl-baseline-abba/report.json` 使用不同输入，
+  且 Fork spread 为 **37.06%**。该轮仅供诊断；其中约 55.6% 的比例不得引用为
+  有效基线，不挑其中快样本替换稳定空盘 ABBA。
+- **G1 B8 裁决**：`worker-layout-b8-abba/report.json` 中 C1/C8/C16/C32 的
+  变化分别为 **+0.34% / −0.52% / −0.84% / +1.91%**。C1/C8 实际仍执行 TN，
+  C16 的平均 batch 约 7.99，C32 约 15.97；实际 B8 没有稳定收益，因此未采纳
+  `nn_k384_b8`，转而验证只在 B16 启用 NN 的候选。
+- **G1 最终裁决**：`worker-layout-b16-abba/report.json` 中 C16 为
+  **930.55→923.82（−0.72%）**，C32 为 **1073.48→1093.68（+1.88%）** RPC/s；
+  `worker-layout-b16-throughput-abba/report.json` 的双线程 C64 仅 **+0.59%**，
+  未过 1% 门。只新增 `configs/worker_tf3_sm120_c32.cfg` 和
+  `plans/worker-tf3-sm120-c32.json`，面向持续 C32、单线程、物理 B16、graph；
+  旧默认与双线程吞吐 profile 的 tactic 不变。该收益是同 Rust binary 的 Worker
+  ABBA，不是 G0 Fork 比例的更新；G0 保留当时绑定的原运行二进制 SHA。
+- **G4 B8 留痕**：`layout-tactics-final.log`、`numeric-final-layout-b8.log`、
+  `graph-final-layout-b8.log` 留存 7 组合 ORT 4 局/组合、TF3 全字段与 top-1
+  128/128、graph 首次发射回归通过。
+- **G4 最终配置**：`numeric-layout-b16`、`numeric-layout-b16-throughput` 与
+  `numeric-certified-c32-plan` 的 `comparison.json` 均 PASS、top-1 128/128。
+  最后一组设置相反环境布局 `tn`，日志仍确认 plan 的 `nn_k384_b16` 在 rows=5776
+  生效。`layout-b16-tactics` 通过 7 case，其中 5 个各有 4 局 ORT、2 个验证缺失/
+  错误 host revision 拒绝；16 个 tactic plan CPU 单测及 Python paired 6/6、
+  tactics 9/9 通过。先安装/校验 plan 再上传权重的生命周期修复保留；
+  `host_tactic_revision=1` 令旧 binary 实际因 unknown field 拒绝新布局 plan，
+  证据为 `old-binary-rejects-layout-plan.log`。G1 的 C32 profile 验收完成，
+  不向 G2 或其他未测负载推广。
+
+详细头部工作量、二进制身份和复现命令见
+[TF3 Worker 性能审计](tf3-worker-performance-audit.md)文末「本轮 Fork 对标追加」。
+
+### 历史里程碑（原测量语境保留）
+
 | 项 | 状态 | 备注/链接 |
 |---|---|---|
-| 规划文档 | ✅ 本文档(2026-08-17 M0 后修订) | — |
+| 规划文档 | ✅ 2026-09-08 更新同卡 TF3 基线与 G0–G4；保留 M0 后历史 | §1、§2、§8 |
 | nnbench 工具 | ✅ 已提交已实测(含 workers=2×当前 batch 修复) | crates/katago/src/cmd/nnbench.rs |
 | M0 Phase 0 测量 | ✅ 完成(2026-08-17) | cuda-optimization-plan.md「M0 Phase 0 测量」 |
 | H1-H5 假设 | ✅ 全部裁决 | §5 决策表;H1/H2/H3 证伪,H4 上修,H5 否决 |
 | M1(C0+C1) | C0 证伪;**C1 已落地又于 2026-08-17 晚复审下架**(B2 后边际归零+搜索口径净负);当前 schema 2 plan 为 DUALFFN+q64 | 数据见优化文档「M3 追加」「M4 追加 2」 |
 | 方案 A 拓扑组合 | 🔶 **部分复活(2026-08-18)**:饱和供数双流 +9.5%(serve=2+NOGRAPH+W≥4b,WSL 1112/Windows 1105);搜索语境维持证伪(t=48 灾难 123);PADBATCH 组合永久证伪(259) | 原 -2% 证伪系 DUALFFN 断裂慢 kernel;数据见优化文档「M4 前哨」 |
-| 方案 B1-B4 | B1 ✅ 等价完成;B2 ✅ DualFFN 落地(+26.5% eval/+28.0% 搜索);B3 FA4 ❌ 证伪,但官方不同组织的 q64 FA2 ✅ 采纳(eval +3%左右/core +14.7%);B4 ❌ 门槛证伪 | DualFFN+q64 已入 schema 2 plan;数据见优化文档 M3/M4 追加 |
+| 方案 B1-B4 | B1 ✅ 等价完成;B2 ✅ DualFFN 落地(+26.5% eval/+28.0% 搜索);B3 两个本地 FA4 变体 ❌ 负收益,官方不同组织的 q64 FA2 ✅ 采纳(eval +3%左右/core +14.7%);B4 ❌ 当时门槛未过 | DualFFN+q64 已入 ONNX schema 2 plan；不宣称整个 FA4 路线已证伪；数据见优化文档 M3/M4 追加 |
 | 方案 C tcgen05 | C0 证伪/C1 落地(M1);**C2 ❌ 硬件证伪(2026-08-17)** | ptxas+CUTLASS 4.7+PTX ISA 9.3 三源互证,见优化文档 M3-pre;FP8/sm_120f 工具链留档(D:/code/cutlass4,device ✅,MSVC host C2719 待解) |
 | 方案 D cuDNN | ❌ 搁置 | H5:InitialConv 1.6% < 5% |
 | 方案 E 储备 | E1 ✅ 已裁决(2026-08-17):精度门不过,FP8 封存;E2 host staging/直接 pinned/输出零拷贝 ❌ ABBA 无收益(2026-08-19);E3 未动;**E4 WSL ✅ 已验证**(搜索 +4.6%/eval +2.4%,scripts/wsl_bench.sh) | DUALFFN 修复后 per-SM 差距 ~14%;确定杠杆仅剩 WSL 部署，简单 A-lite 已收口 |
@@ -259,7 +369,29 @@ WSL / clang-cl / driver-API launcher)。FP8 精度门未过前不动工。
 
 状态图例:⬜ 未开始 / 🔶 进行中 / ✅ 已落地 / ❌ 已证伪(须附 ABBA 数据)
 
+### TF3 Worker 追加（2026-09-08，本机 C++ v1.18.2 同卡实测）
+
+以下保留本轮 G0–G4 前的工作区既有实现与验收记录。
+
+- 比较对象改为 Go Server 实际 TF3/B16 Worker，同模型、同请求、同并发。
+  原 C32 ABBA：Rust 882.4、C++ 1325.4 NN rows/s；与上面的旧 ONNX/fork
+  跨 GPU 推算分开，不能混用基线。
+- TF3 补 DualFFN 约 +17.7%；新增 q64-serial 恢复 q128 softmax 顺序，
+  15 组 half bitwise 一致、TF3 128/128 top-1，独立 Worker ABBA +3.53%。
+  普通 q64 在 TF3 只有 126/128，不能照搬旧 ONNX plan。
+- 持续 C64 Worker：双 NN 服务线程、NOGRAPH +7.80%；保留单线程默认，
+  双线程用独立吞吐配置，不向低并发或 GTP 搜索推广。
+- 修复 evaluator 结果漏写请求 hash 导致的缓存失效，以及补 ownership 时
+  保留缓存 policy/value 的语义。队列 placeholder 优化未过 1% 门，已回退。
+- Windows 原 q128/q64 PTX 不变；三个原 ONNX plan 经过 ORT FP32 16/16
+  重验后更新构建指纹。新 TF3 plan 独立绑定模型与 q64-serial 编译能力。
+- 完整阶段耗时、精度/布局受控实验、最终配置与复现命令：
+  [TF3 Worker 性能审计](tf3-worker-performance-audit.md)。
+
 ## 9. 开放问题
+
+> 2026-09-08：以下保留历史问题。第 1 项的除二/per-SM 推算已撤回作为定量结论，
+> 由 §8 G0 的同卡、同计时边界参考及后续同精度受控测量重新回答；不能忽略精度差异。
 
 1. fork 每流 1418 的推算基于"2836 = 2 流均匀",未考虑其双流互相抢占 SM
    的折损——真实单流值可能更高,即我们的 kernel 差距可能比 §3-1 估计的大。

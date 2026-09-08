@@ -247,7 +247,7 @@ def main():
     parser.add_argument("--cpp-worker", type=Path, default=Path("D:/Go/Server/worker/build-windows-CUDA/Release/katago.exe"))
     parser.add_argument("--cpp-config", type=Path, default=ROOT / "configs/worker_cpp_fp32.cfg")
     parser.add_argument("--rust-worker", type=Path, default=ROOT / "target/release/katago-rs.exe")
-    parser.add_argument("--rust-config", type=Path, default=ROOT / "configs/worker_cuda.cfg")
+    parser.add_argument("--rust-config", type=Path, default=ROOT / "configs/worker_tf3_sm120.cfg")
     parser.add_argument("--proto", type=Path, default=ROOT / "crates/kata_worker/proto/worker.proto")
     parser.add_argument("--fixtures", type=Path, default=ROOT / "scripts/fixtures/worker_positions.json")
     parser.add_argument("--output", type=Path, default=ROOT / "target/worker-parity-tf3")

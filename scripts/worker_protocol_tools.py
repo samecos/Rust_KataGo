@@ -73,6 +73,7 @@ class Peer:
 
     def settled(self, completed, seconds=30):
         deadline = time.monotonic() + seconds
+        previous_idle = None
         while time.monotonic() < deadline:
             message = self.receive(max(0.001, deadline - time.monotonic()))
             if not message.HasField("heartbeat"):
@@ -81,7 +82,19 @@ class Peer:
             if heartbeat.completed_requests >= completed and heartbeat.in_flight == 0:
                 if heartbeat.failed_requests != 0:
                     raise AssertionError(("worker failures", heartbeat))
-                return heartbeat
+                # NN counters can be updated just after the final result wakes
+                # its client. One idle heartbeat alone need not contain those
+                # updates. Require two consecutive identical idle snapshots;
+                # this waiting is outside the throughput measurement interval.
+                snapshot = (
+                    heartbeat.completed_requests, heartbeat.failed_requests,
+                    heartbeat.nn_rows, heartbeat.nn_batches,
+                )
+                if snapshot == previous_idle:
+                    return heartbeat
+                previous_idle = snapshot
+            else:
+                previous_idle = None
         raise TimeoutError("worker did not settle")
 
 

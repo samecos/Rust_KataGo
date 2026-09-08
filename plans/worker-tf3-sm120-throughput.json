@@ -1,0 +1,63 @@
+{
+  "schema": 2,
+  "kind": "cuda-tactic-plan",
+  "plan_id": "tf3-sm120-5070ti-dualffn-q64-serial-throughput-20260908-r1",
+  "generated_utc": "2026-09-08T11:01:43Z",
+  "backend_build": {
+    "capabilities": {
+      "attention_q64": true,
+      "attention_q64_serial": true,
+      "dual_ffn": true
+    },
+    "compiled_sm": [
+      "120",
+      "89"
+    ],
+    "cuda_compiler": "13.3.73",
+    "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e",
+    "cutlass_version": "3.9.2",
+    "kernel_build_id": "sha256:f718a55c79787ef0d4c58854f73d20c6e18314c5817975fba8cb3887d4962c40"
+  },
+  "target": {
+    "architecture": "sm_120",
+    "gpu_name": "NVIDIA GeForce RTX 5070 Ti",
+    "compute_capability": "12.0",
+    "sm_count": 70,
+    "l2_cache_bytes": 50331648,
+    "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6"
+  },
+  "apply": {
+    "tactic_overrides": {
+      "KATAGO_CUDA_ATTN_TILE": "q64-serial",
+      "KATAGO_CUDA_DUALFFN": "1",
+      "KATAGO_CUDA_NOGRAPH": "1"
+    }
+  },
+  "selection": {
+    "measured_requests_per_run": 8192,
+    "concurrency": 64,
+    "attention_bitwise_cases": 15,
+    "reference_policy_top1": "128/128",
+    "evidence": "docs/tf3-worker-performance-audit.md",
+    "method": "Native TF3 FP32 reference and ONNX ORT numerical gates before sequential Worker ABBA",
+    "physical_max_batch": 16,
+    "min_improvement": 0.01,
+    "nn_server_threads": 2,
+    "attention_validation": {
+      "concurrency": 32,
+      "improvement": 0.0353013907613422,
+      "candidate": "DualFFN + q64-serial",
+      "baseline": "DualFFN + q128",
+      "nn_server_threads": 1,
+      "evidence": "target/tf3-perf-audit/worker-attention-abba/report.json"
+    },
+    "throughput_validation": {
+      "concurrency": 64,
+      "improvement": 0.078,
+      "candidate": "Two NN threads without CUDA Graph",
+      "baseline": "Single NN thread with CUDA Graph",
+      "nn_server_threads": 2,
+      "evidence": "target/tf3-perf-audit/worker-two-servers-abba/report.json"
+    }
+  }
+}

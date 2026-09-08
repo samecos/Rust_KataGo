@@ -1,0 +1,88 @@
+{
+  "schema": 2,
+  "kind": "cuda-tactic-plan",
+  "plan_id": "tf3-sm120-5070ti-c32-nn-k384-b16-20260908-r1",
+  "generated_utc": "2026-09-08T13:11:55.112273+00:00",
+  "backend_build": {
+    "capabilities": {
+      "attention_q64": true,
+      "attention_q64_serial": true,
+      "dual_ffn": true
+    },
+    "compiled_sm": [
+      "120",
+      "89"
+    ],
+    "cuda_compiler": "13.3.73",
+    "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e",
+    "cutlass_version": "3.9.2",
+    "host_tactic_revision": 1,
+    "kernel_build_id": "sha256:f718a55c79787ef0d4c58854f73d20c6e18314c5817975fba8cb3887d4962c40"
+  },
+  "target": {
+    "architecture": "sm_120",
+    "gpu_name": "NVIDIA GeForce RTX 5070 Ti",
+    "compute_capability": "12.0",
+    "sm_count": 70,
+    "l2_cache_bytes": 50331648,
+    "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6"
+  },
+  "apply": {
+    "tactic_overrides": {
+      "KATAGO_CUDA_ATTN_TILE": "q64-serial",
+      "KATAGO_CUDA_DUALFFN": "1",
+      "KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b16"
+    }
+  },
+  "selection": {
+    "measured_requests_per_run": 8192,
+    "concurrency": 32,
+    "attention_bitwise_cases": 15,
+    "reference_policy_top1": "128/128",
+    "attention_worker_abba_improvement": 0.0353013907613422,
+    "evidence": "docs/tf3-worker-performance-audit.md",
+    "method": "Native TF3 FP32 reference and ONNX ORT numerical gates before sequential Worker ABBA",
+    "physical_max_batch": 16,
+    "min_improvement": 0.01,
+    "layout_validation": {
+      "scope": "Sustained uncached C32 Worker, one NN service thread, physical batch 16, CUDA Graph",
+      "baseline": "Same binary and single-thread config, GEMM layout tn",
+      "candidate": "Same binary and config, GEMM layout nn_k384_b16",
+      "improvement": 0.018821995175624995,
+      "rpc_per_second": {
+        "baseline": {
+          "runs": 2,
+          "rpc_geomean": 1073.4793117528347,
+          "rpc_min": 1072.742074358416,
+          "rpc_max": 1074.2170558104933,
+          "nn_rows_mean": 1073.4795650844546,
+          "average_batch_mean": 15.968810916179336
+        },
+        "rust": {
+          "runs": 2,
+          "rpc_geomean": 1093.6843341797799,
+          "rpc_min": 1093.312806670105,
+          "rpc_max": 1094.055987941238,
+          "nn_rows_mean": 1093.6843973056716,
+          "average_batch_mean": 15.968810916179336
+        }
+      },
+      "measured_requests_per_run": 8192,
+      "order": [
+        "baseline",
+        "rust",
+        "rust",
+        "baseline"
+      ],
+      "tested_binary_sha256": "1d0895baba596c817e192d13445dbca0a154429698c716ba02044a85ec0ab271",
+      "numeric_policy_top1": "128/128",
+      "evidence": "target/fork-parity-20260908/worker-layout-b16-abba/report.json",
+      "numeric_evidence": "target/fork-parity-20260908/numeric-layout-b16/comparison.json",
+      "path_evidence": "target/fork-parity-20260908/layout-b16-tactics/summary.json",
+      "rejected_scopes": {
+        "C16_single_thread": "-0.72%; retain baseline profile",
+        "C64_two_threads": "+0.59%, below the 1% adoption threshold; retain throughput profile"
+      }
+    }
+  }
+}

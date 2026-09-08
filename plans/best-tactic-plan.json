@@ -4,15 +4,19 @@
   "plan_id": "sm120-nvidia-geforce-rtx-5070-ti-q64-windows-20260819-r1",
   "generated_utc": "2026-08-19T00:00:00Z",
   "backend_build": {
-    "kernel_build_id": "sha256:a71cd75003e5f06325f38432d1e6f9f716955c275375c135126ebc67fb3aacf1",
-    "cuda_compiler": "13.3.73",
-    "cutlass_version": "3.9.2",
-    "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e",
-    "compiled_sm": ["120", "89"],
     "capabilities": {
-      "dual_ffn": true,
-      "attention_q64": true
-    }
+      "attention_q64": true,
+      "attention_q64_serial": true,
+      "dual_ffn": true
+    },
+    "compiled_sm": [
+      "120",
+      "89"
+    ],
+    "cuda_compiler": "13.3.73",
+    "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e",
+    "cutlass_version": "3.9.2",
+    "kernel_build_id": "sha256:f718a55c79787ef0d4c58854f73d20c6e18314c5817975fba8cb3887d4962c40"
   },
   "target": {
     "architecture": "sm_120",
@@ -33,5 +37,11 @@
     "min_improvement": 0.01,
     "attention_core_improvement": 0.147,
     "windows_and_wsl_validated": true
+  },
+  "recertification": {
+    "date": "2026-09-08",
+    "evidence": "docs/tf3-worker-performance-audit.md",
+    "numerical_gate": "ONNX ORT FP32 16/16 PASS for each original tile",
+    "reason": "New independent q64-serial entry; original q64/q128 PTX bytes unchanged"
   }
 }

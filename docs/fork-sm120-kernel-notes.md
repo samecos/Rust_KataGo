@@ -3,15 +3,85 @@
 Source repo: `D:/code/KataGomo_fork` (KataGo fork with a dedicated SM120 backend).
 Purpose: extract the exact kernel/tactic/scheduling decisions for Rust_KataGo's M4
 CUDA optimization phase (decision groups G1-G10 in `docs/cuda-optimization-plan.md`).
-All identifiers and shapes below are verbatim from the fork. Line numbers refer to
-the fork files as of 2026-08-13.
+The historical sections retain identifiers and shapes from the fork as inspected
+on 2026-08-13. The following update uses the local fork source on 2026-09-08 and
+supersedes the old hardware/comparison and Rust precision recommendations.
 
-Hardware note: the certified production plan was scanned on an RTX 5080 (SM120,
+## 2026-09-08 update — same-GPU TF3 reference and measurement boundaries
+
+The fork now has a certified **RTX 5070 Ti, exact B14, two-lane** plan in
+`final-migration/plans/sm120/rtx5070ti-b14-s2/`. Its compressed native TF3 model
+SHA-256 is `1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6`,
+the same model used by the Rust Go Server Worker. The directory README (`:3–12`)
+records B12/B13/B14 finalists and a B14 certified value of **2418.947898** from
+two 1000-iteration samples (2416.783039 and 2421.112757; plan `:1235–1245`).
+This replaces the RTX 5080 plan as the current technical reference; the old plan
+and measurements below remain historical evidence.
+
+**The 2418.9 metric is not Worker throughput.** The scan reads
+`combinedNNEvalsPerSec` (`python/sm120_benchmark_metrics.py:15–20`). Each lane runs
+concurrently, collects CUDA-event timings around `apply`, and contributes
+`batch / median(event_seconds)`; the benchmark adds those lane rates
+(`cpp/neuralnet/nneval.cpp:1231–1250`). H2D preparation is outside the timed loop
+(`cpp/neuralnet/cudabackend.cpp:5481–5482`), and event recording/elapsed-time
+collection is at `:5519–5544`. Thus neither comparison with gRPC NN rows/s nor
+division by two produces a measured single-lane or end-to-end rate. The separate
+`actualWallSeconds` includes warmup and other phases (`nneval.cpp:1224–1226`);
+it also requires matching boundaries before comparison. The earlier
+`2836 * 70/84 ≈ 2360` per-SM target and `2836/2 ≈ 1418` estimates are **not current
+acceptance criteria**.
+
+Selected B14 choices differ materially from the archived B16/5080 plan (exact
+selected overrides: `rtx5070ti-b14-s2/best-tactic-plan.json:4`):
+
+| Family | RTX 5070 Ti B14/S2 selection | Rust investigation boundary |
+|---|---|---|
+| Attention | `fa4-b14-s361-h12-d32-tm128-tn96-s1-qk16` | Investigate SM120 tile/data organization with FP32 QK/PV accumulation |
+| RoPE | Standalone fused Q/K, batch-shared and batch-unrolled | Investigate shared work while preserving existing Rust FP32 operations and half rounding |
+| Wide QKV | `wide_qkv-m128-n128-k64-s2-cute-atom4x2-packed` | K384 weight layout and GEMM shape are candidates for same-precision testing |
+| FFN / L2 | `cudaUseFusedFFN=false`; both persisting-L2 windows false | Jointly retune per batch/load; do not replace Rust's validated DualFFN choice by copying flags |
+| Residual | linear2 CUTLASS; outproj `m128-n128-k32-s3-t128-mb3-tilelang-49k` | Layout/fusion mechanisms are references, not permission to change accumulation/storage |
+| RMS / heads / stem | `one-warp-exact`; `partial-c288-g1-v1`; cuDNN `eng47-k2-2-k6-1-k13-1-k14-0-k22-2` | Measure only after hotspot and same-boundary baseline checks |
+
+The batch-unrolled packed RoPE implementation and 361-block/192-thread launch
+remain at `cpp/neuralnet/cudabackend_sm120_kernels.cu:536` and `:577`.
+
+**Precision is a material distinction.** Rust CUDA is already FP16/FP32 mixed
+precision: half weights and many activation buffers, FP32 GEMM/QK/PV accumulation,
+FP32 activation/reduction work, and FP32 trunk residuals and final outputs.
+The fork's `qk16` selects FP16 QK accumulation with FP32 PV accumulation
+(`cpp/neuralnet/fa4_aot/build_aot.py:150–160`, dtype arguments `:195–196`). The
+selected linear2 CUTLASS GEMM also supplies `cutlass::half_t` as its accumulator
+and epilogue compute type (`cpp/neuralnet/sm120_aot/linear2_residual_cutlass.cu:16–30`).
+Its all-head FP32-reference replay reports top-1 **99.8046875%** with a **99.5%**
+threshold (`best-tactic-plan.json:1179`, `:1230`), whereas Rust's current gate is
+100%. The historical notes describing how to reproduce half accumulators below
+document fork behavior; they do **not** authorize adopting it in Rust.
+
+**FA4 remains an implementation direction to evaluate.** The old negative results
+cover two local variants, not the full SM120 FA4 route. SM120 does not support
+tcgen05/TMEM; this hardware fact does not imply that SM120 FA4 requires those
+instructions. The fork explicitly imports `FlashAttentionForwardSm120` in its
+SM120 AOT generator (`cpp/neuralnet/fa4_aot/build_aot.py:71`, construction `:182`).
+No new FP32 attention/RoPE variant or complete G1–G4 path
+has yet been accepted on the evidence in this update.
+
+Current work is staged in `cuda-fork-parity-plan.md` §8: **G0** fair same-GPU,
+same-SHA and same-boundary baseline; **G1** K384 cuBLASLt NN layout; **G2** FP32
+attention/RoPE organization; **G3** B12–B16 joint tuning; **G4** numerical gates,
+ABBA and fail-closed plan certification. The TF3 Worker gains already documented
+in `tf3-worker-performance-audit.md` are pre-existing workspace results, not gains
+from these new directions. In particular, the existing 12–15% same-precision
+K384 microbenchmark differences are not whole-network or Worker speedups.
+
+## Historical hardware note (2026-08-13)
+
+The then-certified production plan was scanned on an RTX 5080 (SM120,
 84 SMs, 64 MB L2) with physical batch B16 and 2 streams. Our target RTX 5070 Ti is
 the same SM120 arch (70 SMs per cuda-fingerprint, 48 MB L2) — kernels transfer, only the persisting-L2
 budget shrinks.
 
-## Certified production plan (B16, S2) — one-glance summary
+## Historical certified production plan (B16, S2) — one-glance summary
 
 File: `final-migration/plans/sm120/rtx5080-b16-s2/best-tactic-plan.json`
 (plan_id `sm120-rtx5080-96c8d332dc452f3d`, `batches:[16]`, `streams:2`,

@@ -510,7 +510,11 @@ impl SharedState {
                 &batch[i].nn_input_params,
                 &mut output,
             );
-            let output = Arc::new(output);
+            let output = Arc::new(finalize_output(
+                output,
+                batch[i].nn_hash,
+                batch[i].result_without_owner_map.as_deref(),
+            ));
             if let Some(cache) = &self.nn_cache_table {
                 cache.set(&output);
             }
@@ -582,7 +586,11 @@ impl SharedState {
                     &batch[i].nn_input_params,
                     &mut output,
                 );
-                let output = Arc::new(output);
+                let output = Arc::new(finalize_output(
+                    output,
+                    batch[i].nn_hash,
+                    batch[i].result_without_owner_map.as_deref(),
+                ));
                 if let Some(cache) = &self.nn_cache_table {
                     cache.set(&output);
                 }
@@ -626,7 +634,11 @@ impl SharedState {
                     request.nn_hash,
                     request.include_owner_map,
                 );
-                let output = Arc::new(output);
+                let output = Arc::new(finalize_output(
+                    output,
+                    request.nn_hash,
+                    request.result_without_owner_map.as_deref(),
+                ));
                 if let Some(cache) = &self.nn_cache_table {
                     cache.set(&output);
                 }
@@ -880,6 +892,28 @@ struct EvalRequest {
     nn_input_params: MiscNNInputParams,
     include_owner_map: bool,
     nn_hash: Hash128,
+    /// A cache hit that needs only ownership, retaining its policy and values.
+    result_without_owner_map: Option<Arc<NNOutput>>,
+}
+
+/// Complete an already-postprocessed result before publishing it or caching it.
+/// Backends know tensors, not the position hash. Like C++ NNEvaluator::evaluate,
+/// the evaluator must attach the request hash itself. If only ownership was
+/// missing, retain the earlier policy/value even when the new inference used a
+/// different random symmetry, so successive searches keep coherent weights.
+fn finalize_output(
+    mut output: NNOutput,
+    nn_hash: Hash128,
+    result_without_owner_map: Option<&NNOutput>,
+) -> NNOutput {
+    if let Some(previous) = result_without_owner_map {
+        debug_assert_eq!(previous.nn_hash, nn_hash);
+        let owner_map = output.white_owner_map.take();
+        output = previous.clone();
+        output.white_owner_map = owner_map;
+    }
+    output.nn_hash = nn_hash;
+    output
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1233,6 +1267,7 @@ impl NnEvaluator {
             nn_hash ^= sgf_meta.get_hash(next_player);
         }
 
+        let mut result_without_owner_map = None;
         if let Some(cache) = &self.shared.nn_cache_table {
             if !skip_cache {
                 if let Some(cached) = cache.get(nn_hash) {
@@ -1241,6 +1276,7 @@ impl NnEvaluator {
                         buf.has_result = true;
                         return;
                     }
+                    result_without_owner_map = Some(cached);
                 }
             }
         }
@@ -1261,7 +1297,10 @@ impl NnEvaluator {
                 nn_hash,
                 include_owner_map,
             );
-            self.store_output(output, buf);
+            self.store_output(
+                finalize_output(output, nn_hash, result_without_owner_map.as_deref()),
+                buf,
+            );
         } else {
             self.evaluate_async(
                 board,
@@ -1270,6 +1309,7 @@ impl NnEvaluator {
                 sgf_meta,
                 &nn_input_params,
                 nn_hash,
+                result_without_owner_map,
                 buf,
                 include_owner_map,
             );
@@ -1378,6 +1418,7 @@ impl NnEvaluator {
         sgf_meta: Option<&SgfMetadata>,
         nn_input_params: &MiscNNInputParams,
         nn_hash: Hash128,
+        result_without_owner_map: Option<Arc<NNOutput>>,
         buf: &mut NNResultBuf,
         include_owner_map: bool,
     ) {
@@ -1417,6 +1458,7 @@ impl NnEvaluator {
             nn_input_params: *nn_input_params,
             include_owner_map,
             nn_hash,
+            result_without_owner_map,
         });
 
         {
@@ -1756,9 +1798,8 @@ impl NnEvaluator {
 
     /// Spawn server threads.
     ///
-    /// For this slice a single server thread is spawned regardless of the
-    /// configured number of threads. It reads pending requests from
-    /// `query_queue`, evaluates them, and signals waiting clients.
+    /// Spawn one consumer for each configured compute handle. Consumers share
+    /// `query_queue`, evaluate batches on their own handles, and signal clients.
     pub fn spawn_server_threads(&mut self) {
         if self.shared.is_killed.load(Ordering::Relaxed) || !self.server_threads.is_empty() {
             return;
@@ -1972,6 +2013,7 @@ fn dummy_request() -> Arc<EvalRequest> {
         nn_input_params: MiscNNInputParams::default(),
         include_owner_map: false,
         nn_hash: Hash128::new(0, 0),
+        result_without_owner_map: None,
     })
 }
 
@@ -2714,17 +2756,26 @@ mod worker_failure_tests {
             }
         }
 
-        fn write_outputs(outputs: &mut [&mut NNOutput]) {
-            for output in outputs {
+        fn write_outputs(inputs: &[&mut NNResultBuf], outputs: &mut [&mut NNOutput]) {
+            for (input, output) in inputs.iter().zip(outputs) {
+                // Deliberately vary raw logits with orientation. A cache lookup
+                // ignores symmetry, and an ownership-only refill must retain
+                // the original postprocessed policy and values.
+                let orientation = input.symmetry as f32 * 0.1;
                 **output = NNOutput {
                     nn_x_len: 19,
                     nn_y_len: 19,
-                    white_win_prob: 2.0,
+                    white_win_prob: 2.0 + orientation,
                     white_loss_prob: -2.0,
                     white_no_result_prob: -20.0,
+                    white_score_mean: orientation,
+                    white_lead: orientation,
+                    white_owner_map: input.include_owner_map.then(|| {
+                        vec![0.25 + orientation; 19 * 19].into_boxed_slice()
+                    }),
                     ..NNOutput::default()
                 };
-                output.policy_probs[0] = 3.0;
+                output.policy_probs[0] = 3.0 + orientation;
             }
         }
     }
@@ -2799,7 +2850,7 @@ mod worker_failure_tests {
             if let Some(probe) = &self.probe {
                 probe.record_inputs(inputs);
             }
-            Self::write_outputs(outputs);
+            Self::write_outputs(inputs, outputs);
             self.attempt(FailureStage::Get, inputs)
         }
 
@@ -2835,7 +2886,7 @@ mod worker_failure_tests {
             inputs: &mut [&mut NNResultBuf],
             outputs: &mut [&mut NNOutput],
         ) -> Result<(), NeuralNetError> {
-            Self::write_outputs(outputs);
+            Self::write_outputs(inputs, outputs);
             self.attempt(FailureStage::Finish, inputs)
         }
     }
@@ -2957,6 +3008,175 @@ mod worker_failure_tests {
         assert_failed_request_recovers(FailureStage::Finish);
     }
 
+    fn cache_evaluator(stage: FailureStage) -> (NnEvaluator, Arc<FailsOnceBackend>, Arc<BackendProbe>) {
+        let probe = Arc::new(BackendProbe::default());
+        let backend = Arc::new(FailsOnceBackend {
+            stage,
+            attempts: AtomicU64::new(1),
+            probe: Some(probe.clone()),
+        });
+        let mut eval = evaluator();
+        eval.set_backend(backend.clone());
+        eval.load_model().unwrap();
+        eval.spawn_server_threads();
+        (eval, backend, probe)
+    }
+
+    #[test]
+    fn real_backend_cache_hits_use_request_hash_and_skip_cache_forces_inference() {
+        for stage in [FailureStage::Get, FailureStage::Submit] {
+            let (mut eval, _, probe) = cache_evaluator(stage);
+            let board = Board::new(19, 19);
+            let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+            let mut params = MiscNNInputParams { symmetry: 1, ..MiscNNInputParams::default() };
+            let expected_hash = get_hash(&board, &history, P_BLACK, &params);
+            assert_ne!(expected_hash, Hash128::default());
+            let mut buf = NNResultBuf::new();
+            eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, false);
+            let first = buf.result.take().unwrap();
+            assert_eq!(first.nn_hash, expected_hash, "{stage:?}: backend default hash escaped");
+            assert!(eval.shared.nn_cache_table.as_ref().unwrap().get(Hash128::default()).is_none());
+
+            // A different requested symmetry intentionally shares the same key,
+            // as in C++, unless the caller explicitly bypasses lookup.
+            params.symmetry = 6;
+            for _ in 0..3 {
+                eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, false);
+                assert!(Arc::ptr_eq(buf.result.as_ref().unwrap(), &first));
+            }
+            assert_eq!(probe.inputs.lock().unwrap().len(), 1);
+            eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, true, false);
+            let refreshed = buf.result.take().unwrap();
+            assert_eq!(refreshed.nn_hash, expected_hash);
+            assert!(!Arc::ptr_eq(&first, &refreshed));
+            assert_ne!(first.policy_probs[0], refreshed.policy_probs[0]);
+            eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, false);
+            assert!(Arc::ptr_eq(buf.result.as_ref().unwrap(), &refreshed));
+            eval.kill_server_threads();
+            assert_eq!(probe.inputs.lock().unwrap().len(), 2);
+            assert_eq!(eval.num_rows_processed(), 2);
+        }
+    }
+
+    fn assert_same_nonownership(first: &NNOutput, completed: &NNOutput) {
+        assert_eq!(first.nn_hash, completed.nn_hash);
+        assert_eq!(first.policy_probs, completed.policy_probs);
+        assert_eq!(first.policy_optimism_used, completed.policy_optimism_used);
+        assert_eq!((first.nn_x_len, first.nn_y_len), (completed.nn_x_len, completed.nn_y_len));
+        assert_eq!(
+            [first.white_win_prob, first.white_loss_prob, first.white_no_result_prob,
+             first.white_score_mean, first.white_score_mean_sq, first.white_lead,
+             first.var_time_left, first.shortterm_winloss_error, first.shortterm_score_error],
+            [completed.white_win_prob, completed.white_loss_prob, completed.white_no_result_prob,
+             completed.white_score_mean, completed.white_score_mean_sq, completed.white_lead,
+             completed.var_time_left, completed.shortterm_winloss_error, completed.shortterm_score_error],
+        );
+    }
+
+    #[test]
+    fn real_backend_ownership_refill_preserves_cached_policy_and_value() {
+        for stage in [FailureStage::Get, FailureStage::Submit] {
+            let (mut eval, _, probe) = cache_evaluator(stage);
+            let board = Board::new(19, 19);
+            let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+            let mut params = MiscNNInputParams { symmetry: 1, ..MiscNNInputParams::default() };
+            let mut buf = NNResultBuf::new();
+            eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, false);
+            let first = buf.result.take().unwrap();
+            assert!(first.white_owner_map.is_none());
+
+            params.symmetry = 6;
+            eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, true);
+            let completed = buf.result.take().unwrap();
+            assert_same_nonownership(&first, &completed);
+            let owner = completed.white_owner_map.as_ref().unwrap();
+            assert_eq!(owner.len(), 361);
+            assert!(owner.iter().all(|value| (*value - -0.85f32.tanh()).abs() < 1e-6));
+            assert!(first.white_owner_map.is_none(), "refill mutated an earlier shared result");
+            for ownership in [true, false, true] {
+                eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, ownership);
+                assert!(Arc::ptr_eq(buf.result.as_ref().unwrap(), &completed));
+            }
+            eval.kill_server_threads();
+            assert_eq!(probe.inputs.lock().unwrap().len(), 2, "ownership should refill exactly once");
+            assert_eq!(eval.num_rows_processed(), 2);
+        }
+    }
+
+    #[test]
+    fn real_backend_cache_separates_semantic_parameters() {
+        for stage in [FailureStage::Get, FailureStage::Submit] {
+            let (mut eval, _, probe) = cache_evaluator(stage);
+            let board = Board::new(19, 19);
+            // Draw-equivalence changes input komi only when a draw is possible.
+            let mut rules = Rules::default();
+            rules.set_komi(7.0);
+            let history = BoardHistory::new(board.clone(), P_BLACK, rules, 0);
+            let base = MiscNNInputParams { symmetry: 0, ..MiscNNInputParams::default() };
+            let params = [
+                base,
+                MiscNNInputParams { nn_policy_temperature: 2.0, ..base },
+                MiscNNInputParams { policy_optimism: 0.5, ..base },
+                MiscNNInputParams { playout_doubling_advantage: 0.5, ..base },
+                MiscNNInputParams { draw_equivalent_wins_for_white: 0.25, ..base },
+                MiscNNInputParams { max_history: 0, ..base },
+                MiscNNInputParams { avoid_mytdagger_hack: true, ..base },
+            ];
+            let mut hashes = Vec::new();
+            let mut results = Vec::new();
+            let mut buf = NNResultBuf::new();
+            for params in &params {
+                let hash = get_hash(&board, &history, P_BLACK, params);
+                assert!(!hashes.contains(&hash), "fixture parameters must produce distinct keys");
+                hashes.push(hash);
+                eval.evaluate(&board, &history, P_BLACK, params, &mut buf, false, false);
+                let output = buf.result.take().unwrap();
+                assert_eq!(output.nn_hash, hash);
+                eval.evaluate(&board, &history, P_BLACK, params, &mut buf, false, false);
+                assert!(Arc::ptr_eq(buf.result.as_ref().unwrap(), &output));
+                results.push(output);
+            }
+            assert!(results[1].policy_probs[0] < results[0].policy_probs[0],
+                "temperature change must reach postprocessing, not return stale cached policy");
+            eval.kill_server_threads();
+            assert_eq!(probe.inputs.lock().unwrap().len(), params.len());
+            assert_eq!(eval.num_rows_processed(), params.len() as u64);
+        }
+    }
+
+    #[test]
+    fn failed_ownership_refill_keeps_prior_cache_entry_and_allows_retry() {
+        for stage in [FailureStage::Get, FailureStage::Submit, FailureStage::Finish] {
+            let (mut eval, backend, probe) = cache_evaluator(stage);
+            let board = Board::new(19, 19);
+            let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+            let params = MiscNNInputParams { symmetry: 0, ..MiscNNInputParams::default() };
+            let mut buf = NNResultBuf::new();
+            eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, false);
+            let first = buf.result.take().unwrap();
+            backend.attempts.store(0, Ordering::SeqCst);
+            let failed = catch_unwind(AssertUnwindSafe(|| {
+                eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, true);
+            }));
+            assert!(failed.is_err());
+            assert!(buf.result.is_none());
+            assert!(!buf.has_result);
+            let cached = eval.shared.nn_cache_table.as_ref().unwrap().get(first.nn_hash).unwrap();
+            assert!(Arc::ptr_eq(&first, &cached), "failed refill replaced a valid partial entry");
+            eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, false);
+            assert!(buf.error.is_none());
+            assert!(Arc::ptr_eq(buf.result.as_ref().unwrap(), &first));
+            eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, true);
+            let completed = buf.result.take().unwrap();
+            assert_same_nonownership(&first, &completed);
+            assert!(completed.white_owner_map.is_some());
+            eval.evaluate(&board, &history, P_BLACK, &params, &mut buf, false, true);
+            assert!(Arc::ptr_eq(buf.result.as_ref().unwrap(), &completed));
+            eval.kill_server_threads();
+            assert_eq!(probe.inputs.lock().unwrap().len(), 3);
+        }
+    }
+
     #[test]
     fn loaded_backend_without_server_threads_never_returns_dummy_output() {
         let mut eval = evaluator();
@@ -3061,6 +3281,7 @@ mod worker_failure_tests {
                     nn_input_params: MiscNNInputParams::default(),
                     include_owner_map: false,
                     nn_hash: Hash128::new(id as u64 + 1, 1),
+                    result_without_owner_map: None,
                 })
             }).collect();
 

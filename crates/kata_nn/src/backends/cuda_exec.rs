@@ -6,9 +6,15 @@
 //! - 所有权重（GEMM 用）在 `load` 期 f32 → f16（round-to-nearest-even）上传设备；
 //!   K 维 pad 到 16 的倍数（pad 列恒零）。RoPE 表与逐通道参数（scale/bias/BN）
 //!   元素量小，保留 f32 精度。
-//! - 中间激活一律 NHWC 行主序 `[B*S, C]`，存 f16；GEMM 输出 f32，进入下一层
-//!   前转 f16（`f32_to_half_kernel` / 带激活的融合 kernel）。残差加回时
-//!   f16 残差流转 f32 与 GEMM 输出相加再舍入回 f16（对齐官方 half 存储边界）。
+//! - 中间激活按 NHWC 行主序 `[B*S, C]` 排列。GEMM 使用 FP32 累加；
+//!   trunk/bottleneck 残差流 (`act768`/`act384`) 持续存 FP32，beta=1 原位加回。
+//!   GEMM 输入、packed QKV、SwiGLU 输出与 attention P/output 在既有边界存
+//!   half；小头部仍有 FP32 路径，不能把它们一概改成 half 残差或累加。
+//! - 默认 GEMM 权重 `[N,K]` 不变。实验 `KATAGO_CUDA_GEMM_LAYOUT=nn_k384`
+//!   仅在加载时为 K384 加一份 `[K,N]` half 转置，cuBLASLt 改用 NN 描述符；
+//!   原权重仍供 DualFFN/手写回退，激活、输出和残差的存储边界不变。
+//!   `nn_k384_b8` 是另一默认关闭候选：仅物理 batch >=8 时用 NN，小批用 TN。
+//!   `nn_k384_b16` 将范围收窄到 batch >=16；B8 未测得稳定 Worker 收益。
 //! - **GEMM A 缓冲的列 stride 必须等于该 GEMM 的 K**（`hgemm` 内核按单 stride
 //!   同时读 A/B）。因此各 GEMM 的 A 源要么是精确尺寸的专用缓冲（cols=208、
 //!   p96/p192、pooled/vec 的紧凑前缀），要么是 stride 恰好等于 K 的流缓冲
@@ -33,7 +39,7 @@
 //! 调试开关：`KATAGO_CUDA_DEBUG_LAYER=<i>` 逐层 dump、`KATAGO_CUDA_PROFILE=1`
 //! 逐层耗时、`KATAGO_CUDA_DUMP_INPUT=<dir>` 输入 dump（见 cuda.rs）。
 
-use crate::backends::cuda::{CudaRuntime, f16_to_f32_bits, f32_to_f16_bits};
+use crate::backends::cuda::{CublasLtWeightLayout, CudaRuntime, f16_to_f32_bits, f32_to_f16_bits};
 use crate::onnx_parser::{Layer, LayerGraph, Tensor, TensorData};
 use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use std::cell::RefCell;
@@ -88,9 +94,109 @@ pub fn set_capturing(v: bool) {
 /// GEMM 权重（设备侧）：out-first `[n, kp]` f16 行主序，K 已 pad 到 16 的倍数。
 pub struct WeightBuf {
     pub data: CudaSlice<u16>,
+    /// Optional [K,N] copy for cuBLASLt NN. Never used by hand-written kernels
+    /// or DualFFN, whose original [N,K] contracts remain intact.
+    nn_data: Option<NnWeightBuf>,
     pub n: usize,
     pub k: usize,
     pub kp: usize,
+}
+
+/// Load-time tactic selection; the GEMM hot path only compares its row count.
+struct NnWeightBuf {
+    data: CudaSlice<u16>,
+    min_rows: usize,
+    requested: &'static str,
+}
+
+impl WeightBuf {
+    fn cublaslt_weights(&self, rows: usize) -> (&CudaSlice<u16>, CublasLtWeightLayout) {
+        match &self.nn_data {
+            Some(nn) if rows >= nn.min_rows => (&nn.data, CublasLtWeightLayout::Nn),
+            _ => (&self.data, CublasLtWeightLayout::Tn),
+        }
+    }
+}
+
+fn nn_k384_requested() -> Result<Option<(&'static str, usize)>, String> {
+    match crate::tactic_plan::tactic_var("KATAGO_CUDA_GEMM_LAYOUT") {
+        Ok(value) if value == "tn" => Ok(None),
+        Ok(value) if value == "nn_k384" => Ok(Some(("nn_k384", 0))),
+        Ok(value) if value == "nn_k384_b8" => Ok(Some(("nn_k384_b8", 8 * 361))),
+        Ok(value) if value == "nn_k384_b16" => Ok(Some(("nn_k384_b16", 16 * 361))),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        value => Err(format!(
+            "invalid KATAGO_CUDA_GEMM_LAYOUT {value:?}; expected tn, nn_k384, nn_k384_b8 or nn_k384_b16"
+        )),
+    }
+}
+
+/// The load-time layout selection, used by backend context creation to reject
+/// reuse of already-uploaded weights under a different plan/environment.
+pub(crate) fn selected_gemm_layout() -> Result<&'static str, String> {
+    Ok(nn_k384_requested()?.map(|(name, _)| name).unwrap_or("tn"))
+}
+
+/// Transpose already-rounded half bits on the CPU once, before graph capture.
+/// No extra rounding, per-forward copies or workspace changes are introduced.
+fn upload_nn_weights(
+    stream: &StreamRef,
+    host: &[u16],
+    n: usize,
+    k: usize,
+    kp: usize,
+) -> Result<Option<NnWeightBuf>, String> {
+    let Some((requested, min_rows)) = nn_k384_requested()? else {
+        return Ok(None);
+    };
+    if k != 384 || kp != k {
+        return Ok(None);
+    }
+    let mut transposed = vec![0u16; n * k];
+    for row in 0..n {
+        for col in 0..k {
+            transposed[col * n + row] = host[row * kp + col];
+        }
+    }
+    let mut data = unsafe { stream.alloc(transposed.len()) }.map_err(|e| e.to_string())?;
+    stream
+        .memcpy_htod(transposed.as_slice(), &mut data)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(NnWeightBuf {
+        data,
+        min_rows,
+        requested,
+    }))
+}
+
+fn report_gemm_layout(weight: &WeightBuf, rows: usize, layout: CublasLtWeightLayout) {
+    static NN_REPORT: OnceLock<()> = OnceLock::new();
+    static TN_REPORT: OnceLock<()> = OnceLock::new();
+    static B8_NN_REPORT: OnceLock<()> = OnceLock::new();
+    static B8_TN_REPORT: OnceLock<()> = OnceLock::new();
+    static B16_NN_REPORT: OnceLock<()> = OnceLock::new();
+    static B16_TN_REPORT: OnceLock<()> = OnceLock::new();
+    // This tactic only selects K384 GEMMs. Avoid reporting unrelated shapes
+    // as a requested TN tactic when the model selected a conditional NN path.
+    if weight.k != 384 {
+        return;
+    }
+    let (requested, min_rows) = weight
+        .nn_data
+        .as_ref()
+        .map(|nn| (nn.requested, nn.min_rows))
+        .unwrap_or(("tn", 0));
+    let (slot, effective) = match (layout, requested) {
+        (CublasLtWeightLayout::Nn, "nn_k384_b8") => (&B8_NN_REPORT, "nn_k384"),
+        (CublasLtWeightLayout::Nn, "nn_k384_b16") => (&B16_NN_REPORT, "nn_k384"),
+        (CublasLtWeightLayout::Nn, _) => (&NN_REPORT, "nn_k384"),
+        (CublasLtWeightLayout::Tn, "nn_k384_b8") => (&B8_TN_REPORT, "tn"),
+        (CublasLtWeightLayout::Tn, "nn_k384_b16") => (&B16_TN_REPORT, "tn"),
+        (CublasLtWeightLayout::Tn, _) => (&TN_REPORT, "tn"),
+    };
+    slot.get_or_init(|| {
+        eprintln!("[cuda-tactic] name=gemm_layout launch={effective} effective={effective} k=384 requested={requested} min_rows={min_rows} rows={rows}");
+    });
 }
 
 /// f32 参数向量（设备侧，长度 `len`）。
@@ -273,6 +379,7 @@ static DUAL_FFN_RUNTIME_STATE: AtomicU8 = AtomicU8::new(DUAL_FFN_UNKNOWN);
 static DUAL_FFN_UNFUSED_REPORT: OnceLock<()> = OnceLock::new();
 static ATTENTION_FA2_REPORT: OnceLock<()> = OnceLock::new();
 static ATTENTION_FA2_Q64_REPORT: OnceLock<()> = OnceLock::new();
+static ATTENTION_FA2_Q64_SERIAL_REPORT: OnceLock<()> = OnceLock::new();
 static ATTENTION_Q64_FALLBACK_REPORT: OnceLock<()> = OnceLock::new();
 static ATTENTION_V3_REPORT: OnceLock<()> = OnceLock::new();
 // GEMM 引擎/瓦片、split-K、fusion、RMS 的一次性路径确认标记
@@ -301,7 +408,10 @@ pub(crate) fn report_tactic_once(slot: &'static OnceLock<()>, msg: &str) {
 
 /// cuBLASLt 启发式首选标记（供 validate_cuda_tactics.py 断言 rank 引擎）。
 pub(crate) fn report_cublaslt_rank_heuristic_once() {
-    report_tactic_once(&CUBLASLT_RANK_HEUR_REPORT, "name=cublaslt_rank engine=heuristic");
+    report_tactic_once(
+        &CUBLASLT_RANK_HEUR_REPORT,
+        "name=cublaslt_rank engine=heuristic",
+    );
 }
 
 #[inline]
@@ -565,7 +675,10 @@ impl CudaModel {
             // 供 autotune 按组合实测选择。
             let fusion_mode = crate::tactic_plan::tactic_var("KATAGO_CUDA_FUSION")
                 .unwrap_or_else(|_| "none".to_string());
-            report_tactic_once(&FUSION_MODE_REPORT, &format!("name=fusion mode={fusion_mode}"));
+            report_tactic_once(
+                &FUSION_MODE_REPORT,
+                &format!("name=fusion mode={fusion_mode}"),
+            );
             let fuse_up = fusion_mode == "all" || fusion_mode == "up";
             let fuse_down = fusion_mode == "all" || fusion_mode == "down";
             let skip_next = match lb {
@@ -749,10 +862,16 @@ impl CudaModel {
                             );
                         });
                     } else {
-                        let q64_requested = crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN_TILE")
-                            .as_deref()
-                            == Ok("q64");
-                        let q64_compiled = crate::backends::cuda::attention_q64_available();
+                        let attention_tile =
+                            crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN_TILE");
+                        let serial_requested = attention_tile.as_deref() == Ok("q64-serial");
+                        let q64_requested =
+                            serial_requested || attention_tile.as_deref() == Ok("q64");
+                        let q64_compiled = if serial_requested {
+                            crate::backends::cuda::attention_q64_serial_available()
+                        } else {
+                            crate::backends::cuda::attention_q64_available()
+                        };
                         let use_q64 = if q64_requested && !q64_compiled {
                             // A diagnostic env override may be used with a
                             // binary built without the optional q64 PTX. A
@@ -760,7 +879,8 @@ impl CudaModel {
                             // plan validation rejects the missing capability.
                             ATTENTION_Q64_FALLBACK_REPORT.get_or_init(|| {
                                 eprintln!(
-                                    "WARNING: [cuda-tactic] name=attention requested=q64 compiled=0 effective=q128 fallback=q128"
+                                    "WARNING: [cuda-tactic] name=attention requested={} compiled=0 effective=q128 fallback=q128",
+                                    if serial_requested { "q64-serial" } else { "q64" }
                                 );
                             });
                             false
@@ -782,9 +902,16 @@ impl CudaModel {
                                 scale,
                                 lh,
                                 use_q64,
+                                use_q64 && serial_requested,
                             )
                         );
-                        if use_q64 {
+                        if use_q64 && serial_requested {
+                            ATTENTION_FA2_Q64_SERIAL_REPORT.get_or_init(|| {
+                                eprintln!(
+                                    "[cuda-tactic] name=attention requested=fa2 launch=fa2 effective=fa2 tile=q64-serial"
+                                );
+                            });
+                        } else if use_q64 {
                             ATTENTION_FA2_Q64_REPORT.get_or_init(|| {
                                 eprintln!(
                                     "[cuda-tactic] name=attention requested=fa2 launch=fa2 effective=fa2 tile=q64"
@@ -1254,6 +1381,7 @@ fn upload_weight(stream: &StreamRef, t: &Tensor, n: usize, k: usize) -> Result<W
         .map_err(|e| e.to_string())?;
     Ok(WeightBuf {
         data: dev,
+        nn_data: upload_nn_weights(stream, &host, n, k, kp)?,
         n,
         k,
         kp,
@@ -1289,6 +1417,7 @@ fn upload_weight_concat2(
         .map_err(|e| e.to_string())?;
     Ok(WeightBuf {
         data: dev,
+        nn_data: upload_nn_weights(stream, &host, 2 * n_each, k, kp)?,
         n: 2 * n_each,
         k,
         kp,
@@ -1329,6 +1458,7 @@ fn upload_weight_concat3(
         .map_err(|e| e.to_string())?;
     Ok(WeightBuf {
         data: dev,
+        nn_data: upload_nn_weights(stream, &host, total_n, k, kp)?,
         n: total_n,
         k,
         kp,
@@ -1428,8 +1558,13 @@ fn hgemm(
     let stream = active_stream(rt);
     // cuBLASLt 旁路(KATAGO_CUDA_CUBLASLT=1,仅非 pad 的 f32 输出 GEMM)。
     if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
-        if rt.cublaslt_gemm(&stream, a, &b.data, c, m, b.n, b.k, 0.0)? {
-            report_tactic_once(&GEMM_LT_PLAIN_REPORT, "name=gemm kind=plain engine=cublaslt");
+        let (weights, layout) = b.cublaslt_weights(m);
+        if rt.cublaslt_gemm_with_layout(&stream, a, weights, c, m, b.n, b.k, 0.0, layout)? {
+            report_gemm_layout(b, m, layout);
+            report_tactic_once(
+                &GEMM_LT_PLAIN_REPORT,
+                "name=gemm kind=plain engine=cublaslt",
+            );
             return Ok(());
         }
     }
@@ -1482,8 +1617,13 @@ fn hgemm_f16(
     // cuBLASLt f16 输出旁路（KATAGO_CUDA_CUBLASLT=1）。
     if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         let stream0 = active_stream(rt);
-        if rt.cublaslt_gemm_f16out(&stream0, a, &b.data, c, m, b.n, b.k)? {
-            report_tactic_once(&GEMM_LT_F16OUT_REPORT, "name=gemm kind=f16out engine=cublaslt");
+        let (weights, layout) = b.cublaslt_weights(m);
+        if rt.cublaslt_gemm_f16out_with_layout(&stream0, a, weights, c, m, b.n, b.k, layout)? {
+            report_gemm_layout(b, m, layout);
+            report_tactic_once(
+                &GEMM_LT_F16OUT_REPORT,
+                "name=gemm kind=f16out engine=cublaslt",
+            );
             return Ok(());
         }
     }
@@ -1555,8 +1695,13 @@ fn hgemm_residual(
     let stream = active_stream(rt);
     // cuBLASLt 旁路(KATAGO_CUDA_CUBLASLT=1,beta=1 残差)。
     if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
-        if rt.cublaslt_gemm(&stream, a, &b.data, c, m, b.n, b.k, 1.0)? {
-            report_tactic_once(&GEMM_LT_RESIDUAL_REPORT, "name=gemm kind=residual engine=cublaslt");
+        let (weights, layout) = b.cublaslt_weights(m);
+        if rt.cublaslt_gemm_with_layout(&stream, a, weights, c, m, b.n, b.k, 1.0, layout)? {
+            report_gemm_layout(b, m, layout);
+            report_tactic_once(
+                &GEMM_LT_RESIDUAL_REPORT,
+                "name=gemm kind=residual engine=cublaslt",
+            );
             return Ok(());
         }
     }
@@ -2404,10 +2549,13 @@ fn attention_fa2(
     scale: f32,
     heads: usize,
     use_q64: bool,
+    serial_sum: bool,
 ) -> Result<(), String> {
     assert!(s <= 512, "attention_fa2 要求 S <= 512");
     assert_eq!(d, 32, "attention_fa2 要求 D=32");
-    let f = rt.get_func(if use_q64 {
+    let f = rt.get_func(if use_q64 && serial_sum {
+        "attention_fa2_q64_serial_kernel"
+    } else if use_q64 {
         "attention_fa2_q64_kernel"
     } else {
         "attention_fa2_kernel"

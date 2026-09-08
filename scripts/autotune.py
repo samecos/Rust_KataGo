@@ -49,6 +49,18 @@ DECISION_GROUPS = [
         ],
     },
     {
+        # Fork-inspired K384 weight layout; FP32 compute and half boundaries
+        # remain unchanged. Full-model numerical acceptance is a prerequisite.
+        "name": "gemm_layout",
+        "candidates": [
+            {},
+            {"KATAGO_CUDA_GEMM_LAYOUT": "tn"},
+            {"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384"},
+            {"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b8"},
+            {"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b16"},
+        ],
+    },
+    {
         # kernel 融合族（up/down 投影 + FFN gatesilu epilogue）。
         # 历史结论（手写 GEMM 时代）：融合 +5%；cuBLASLt 接管后（2026-08-15
         # autotune 复测）默认已改 none——融合 epilogue 绕过 cuBLASLt 反而

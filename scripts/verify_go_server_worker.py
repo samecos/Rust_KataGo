@@ -71,7 +71,7 @@ def main():
         model = str(args.model.resolve())
         with open(model, "rb") as stream:
             model_hash = hashlib.file_digest(stream, "sha256").hexdigest()
-        config = args.config or ROOT / "configs/worker_cuda.cfg"
+        config = args.config or ROOT / "configs/worker_tf3_sm120.cfg"
     else:
         model = "/dev/null"
         model_hash = hashlib.sha256(b"Rust_KataGo synthetic dummy worker v1").hexdigest()

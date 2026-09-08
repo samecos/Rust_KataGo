@@ -21,9 +21,11 @@ Example:
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -45,8 +47,8 @@ class Case:
     exit_code: int = 0
     # 数值门（--with-numeric）：跑 dump+compare 的组合开关；None = 跳过。
     numeric: bool = False
-    # nnbench 固定物理 batch（默认 1；padbatch 等路径需 n>1 才触发）。
-    batch: int = 1
+    # Sweep dispatch targets; nnbench allocates the largest as physical capacity.
+    batch: int | tuple[int, ...] = 1
     # nnbench worker/迭代数（凑批路径需足够并发才能合并出 n>1 的批）。
     workers: int = 2
     iterations: int = 2
@@ -79,7 +81,7 @@ def schema2_plan(fp: dict, plan_id: str, overrides: dict[str, str]) -> dict:
         "schema": 2,
         "kind": "cuda-tactic-plan",
         "plan_id": plan_id,
-        "backend_build": fp["backend_build"],
+        "backend_build": copy.deepcopy(fp["backend_build"]),
         "target": {
             "architecture": fp["architecture"],
             "gpu_name": fp["gpu_name"],
@@ -96,6 +98,79 @@ def schema2_plan(fp: dict, plan_id: str, overrides: dict[str, str]) -> dict:
 def write_plan(path: Path, value: dict) -> Path:
     path.write_text(json.dumps(value, indent=2), encoding="utf-8")
     return path
+
+
+def has_marker(log: str, marker: str) -> bool:
+    # Tactic values are tokens: q64 must not also accept q64-serial. Keep
+    # punctuation legal around error-message fragments used by negative cases.
+    return re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(marker) + r"(?![A-Za-z0-9_.-])", log) is not None
+
+
+def numeric_environment(case: Case) -> dict[str, str]:
+    # The raw CUDA dump test does not install a production config plan itself.
+    # Mirror the already-validated plan's precedence for numerical inference,
+    # particularly the cases that intentionally supply a conflicting env value.
+    overrides = dict(case.env)
+    if case.plan is not None:
+        plan = json.loads(case.plan.read_text(encoding="utf-8"))
+        overrides.update(plan["apply"]["tactic_overrides"])
+    return clean_env(overrides)
+
+
+def q64_serial_cases(fp: dict, plan: Path) -> list[Case]:
+    serial_marker = "name=attention requested=fa2 launch=fa2 effective=fa2 tile=q64-serial"
+    available = fp["backend_build"]["capabilities"].get("attention_q64_serial", False)
+    if available:
+        return [
+            Case(
+                "attention-q64-serial",
+                env={"KATAGO_CUDA_DUALFFN": "0", "KATAGO_CUDA_ATTN_TILE": "q64-serial"},
+                expect=(serial_marker,),
+                forbid=("tile=q64", "tile=q128", "fallback=q128"),
+                numeric=True,
+            ),
+            Case(
+                "schema2-q64-serial-plan-priority",
+                env={"KATAGO_CUDA_ATTN_TILE": "q128"},
+                plan=plan,
+                expect=(serial_marker,),
+                forbid=("tile=q64", "tile=q128", "fallback=q128"),
+                numeric=True,
+            ),
+        ]
+    # Use the binary's actual capability, never a forged fingerprint. A build
+    # with ordinary q64 but without the separate serial TU must still reject
+    # this certified plan, while diagnostic env selection reports its fallback.
+    return [
+        Case(
+            "attention-q64-serial-unavailable-env",
+            env={"KATAGO_CUDA_DUALFFN": "0", "KATAGO_CUDA_ATTN_TILE": "q64-serial"},
+            expect=("name=attention requested=q64-serial compiled=0 effective=q128 fallback=q128",
+                    "name=attention requested=fa2 launch=fa2 effective=fa2 tile=q128"),
+            forbid=(serial_marker, "tile=q64"),
+        ),
+        Case(
+            "schema2-q64-serial-missing-capability",
+            plan=plan,
+            expect=("backend capability attention_q64_serial=false",),
+            forbid=(serial_marker, "nnEvals/s"),
+            exit_code=1,
+        ),
+    ]
+
+
+def padbatch_case() -> Case:
+    # With physicalMax=2, neither possible row count pads: n=1 is exempt and
+    # n=2 is full. Sweep 3,4 to allocate four real rows, but use only three
+    # concurrent clients so actual two/three-row batches can pad within capacity.
+    return Case(
+        "padbatch-on",
+        env={"KATAGO_CUDA_DUALFFN": "0", "KATAGO_CUDA_PADBATCH": "1"},
+        expect=("name=padbatch launch=on phys=4", "physicalMax 4"),
+        batch=(3, 4),
+        workers=3,
+        iterations=32,
+    )
 
 
 def run_case(binary: Path, model: Path, out_dir: Path, case: Case) -> list[str]:
@@ -119,7 +194,7 @@ def run_case(binary: Path, model: Path, out_dir: Path, case: Case) -> list[str]:
             "--mode",
             "eval",
             "--batch",
-            str(case.batch),
+            ",".join(map(str, case.batch)) if isinstance(case.batch, tuple) else str(case.batch),
             "--workers",
             str(case.workers),
             "--warmup",
@@ -157,10 +232,10 @@ def run_case(binary: Path, model: Path, out_dir: Path, case: Case) -> list[str]:
     if proc.returncode != case.exit_code:
         errors.append(f"exit {proc.returncode}, expected {case.exit_code}")
     for marker in case.expect:
-        if marker not in log:
+        if not has_marker(log, marker):
             errors.append(f"missing marker: {marker}")
     for marker in case.forbid:
-        if marker in log:
+        if has_marker(log, marker):
             errors.append(f"forbidden marker present: {marker}")
     return errors
 
@@ -175,7 +250,7 @@ def run_numeric_gate(
     misc 1e-2 / ownership 5e-3 / top-1 100%）。
     """
     dump_dir = out_dir / f"{case.name}-numeric"
-    env = clean_env(case.env)
+    env = numeric_environment(case)
     env["KATAGO_DUMP_DIR"] = str(dump_dir)
     env["KATAGO_DUMP_POSITIONS"] = "4"
     env["KATAGO_ONNX_MODEL"] = str(model)
@@ -200,16 +275,26 @@ def run_numeric_gate(
         env=env,
         cwd=ROOT,
     )
-    (out_dir / f"{case.name}-numeric-dump.log").write_text(proc.stdout + proc.stderr, encoding="utf-8")
+    dump_log = proc.stdout + proc.stderr
+    (out_dir / f"{case.name}-numeric-dump.log").write_text(dump_log, encoding="utf-8")
     if proc.returncode != 0 or not (dump_dir / "meta.json").exists():
         return [f"numeric dump failed (exit {proc.returncode})"]
+    # The dump is a separate test executable. Verify the changed kernel/layout
+    # there too: a correct baseline dump cannot certify an unexecuted candidate.
+    for marker in case.expect:
+        for name in ("attention", "gemm_layout", "dual_ffn"):
+            if marker.startswith(f"name={name} ") and not has_marker(dump_log, marker):
+                return [f"numeric dump missing {name} marker: {marker}"]
+    for marker in case.forbid:
+        if marker.startswith("name=gemm_layout ") and has_marker(dump_log, marker):
+            return [f"numeric dump forbidden layout marker: {marker}"]
 
     cmp_proc = subprocess.run(
         [str(python), str(compare_script), str(dump_dir), "--model", str(model)],
         capture_output=True,
         text=True,
         timeout=600,
-        env=clean_env(case.env),
+        env=numeric_environment(case),
         cwd=ROOT,
     )
     log = cmp_proc.stdout + cmp_proc.stderr
@@ -228,6 +313,8 @@ def main() -> int:
     )
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--plan", type=Path, default=DEFAULT_PLAN)
+    parser.add_argument("--case", action="append", default=[], metavar="NAME",
+                        help="Run only this named case; repeatable (default: all cases)")
     parser.add_argument(
         "--with-numeric",
         action="store_true",
@@ -264,6 +351,29 @@ def main() -> int:
 
     valid = schema2_plan(fp, "v1-schema2-positive", {"KATAGO_CUDA_DUALFFN": "1"})
     valid_path = write_plan(out_dir / "valid-schema2.json", valid)
+
+    serial_plan = schema2_plan(fp, "v1-q64-serial", {
+        "KATAGO_CUDA_DUALFFN": "0", "KATAGO_CUDA_ATTN_TILE": "q64-serial",
+    })
+    serial_plan_path = write_plan(out_dir / "q64-serial-schema2.json", serial_plan)
+
+    nn_layout_plan = schema2_plan(fp, "v1-gemm-nn-k384", {
+        "KATAGO_CUDA_DUALFFN": "1", "KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b16",
+    })
+    nn_layout_plan["target"]["max_batch_size"] = 16
+    nn_layout_plan_path = write_plan(out_dir / "nn-k384-schema2.json", nn_layout_plan)
+
+    missing_layout_revision = copy.deepcopy(nn_layout_plan)
+    missing_layout_revision["backend_build"].pop("host_tactic_revision", None)
+    missing_layout_revision_path = write_plan(out_dir / "layout-missing-host-revision.json", missing_layout_revision)
+    wrong_layout_revision = copy.deepcopy(nn_layout_plan)
+    wrong_layout_revision["backend_build"]["host_tactic_revision"] = 999
+    wrong_layout_revision_path = write_plan(out_dir / "layout-wrong-host-revision.json", wrong_layout_revision)
+
+    tn_layout_plan = schema2_plan(fp, "v1-gemm-tn", {
+        "KATAGO_CUDA_DUALFFN": "1", "KATAGO_CUDA_GEMM_LAYOUT": "tn",
+    })
+    tn_layout_plan_path = write_plan(out_dir / "tn-schema2.json", tn_layout_plan)
 
     bad_value = schema2_plan(fp, "v1-bad-value", {"KATAGO_CUDA_DUALFFN": "bogus"})
     bad_value_path = write_plan(out_dir / "bad-value.json", bad_value)
@@ -384,6 +494,97 @@ def main() -> int:
             numeric=True,
         ),
         Case(
+            "gemm-layout-missing-host-revision",
+            plan=missing_layout_revision_path,
+            expect=("requires backend_build.host_tactic_revision",),
+            forbid=("nnEvals/s",),
+            exit_code=1,
+        ),
+        Case(
+            "gemm-layout-wrong-host-revision",
+            plan=wrong_layout_revision_path,
+            expect=("host_tactic_revision mismatch",),
+            forbid=("nnEvals/s",),
+            exit_code=1,
+        ),
+        Case(
+            "gemm-nn-k384-b16-smallbatch",
+            env={"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b16", "KATAGO_DUMP_BATCH": "8"},
+            expect=("name=gemm_layout launch=tn effective=tn k=384 requested=nn_k384_b16",),
+            forbid=("name=gemm_layout launch=nn_k384",),
+            batch=8, workers=16, iterations=16,
+            numeric=True,
+        ),
+        Case(
+            "gemm-nn-k384-b16-largebatch",
+            env={"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b16", "KATAGO_DUMP_BATCH": "16"},
+            expect=("name=gemm_layout launch=nn_k384 effective=nn_k384 k=384 requested=nn_k384_b16",),
+            batch=16, workers=32, iterations=16,
+            numeric=True,
+        ),
+        Case(
+            "gemm-nn-k384-b8-smallbatch",
+            env={"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b8"},
+            expect=("name=gemm_layout launch=tn effective=tn k=384 requested=nn_k384_b8",),
+            forbid=("name=gemm_layout launch=nn_k384",),
+            numeric=True,
+        ),
+        Case(
+            "gemm-nn-k384-b8-largebatch",
+            env={"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b8", "KATAGO_DUMP_BATCH": "8"},
+            expect=("name=gemm_layout launch=nn_k384 effective=nn_k384 k=384 requested=nn_k384_b8",),
+            batch=8, workers=16, iterations=16,
+            numeric=True,
+        ),
+        Case(
+            "gemm-nn-k384",
+            env={"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384", "KATAGO_CUDA_DUALFFN": "0"},
+            expect=("name=gemm_layout launch=nn_k384 effective=nn_k384 k=384",),
+            numeric=True,
+        ),
+        Case(
+            "gemm-nn-k384-plan-priority",
+            env={"KATAGO_CUDA_GEMM_LAYOUT": "tn", "KATAGO_DUMP_BATCH": "16"},
+            plan=nn_layout_plan_path,
+            expect=("name=gemm_layout launch=nn_k384 effective=nn_k384 k=384",
+                    "name=dual_ffn launch=fused"),
+            batch=16, workers=32, iterations=16,
+            numeric=True,
+        ),
+        Case(
+            "gemm-nn-k384-plan-smallbatch",
+            env={"KATAGO_CUDA_GEMM_LAYOUT": "tn", "KATAGO_DUMP_BATCH": "8"},
+            plan=nn_layout_plan_path,
+            expect=("name=gemm_layout launch=tn effective=tn k=384 requested=nn_k384_b16",),
+            forbid=("name=gemm_layout launch=nn_k384",),
+            batch=8, workers=16, iterations=16,
+            numeric=True,
+        ),
+        Case(
+            "gemm-tn-plan-priority",
+            env={"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b16", "KATAGO_DUMP_BATCH": "16"},
+            plan=tn_layout_plan_path,
+            expect=("name=gemm_layout launch=tn effective=tn k=384 requested=tn",),
+            forbid=("name=gemm_layout launch=nn_k384",),
+            batch=16, workers=32, iterations=16,
+            numeric=True,
+        ),
+        Case(
+            "gemm-nn-k384-handwritten-fallback",
+            env={"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384", "KATAGO_CUDA_DUALFFN": "0",
+                 "KATAGO_CUDA_CUBLASLT": "0"},
+            expect=("name=gemm kind=f16out engine=handwritten",
+                    "name=gemm kind=residual engine=handwritten"),
+            forbid=("name=gemm_layout launch=nn_k384", "engine=cublaslt"),
+            numeric=True,
+        ),
+        Case(
+            "gemm-nn-k384-rank-time",
+            env={"KATAGO_CUDA_GEMM_LAYOUT": "nn_k384", "KATAGO_CUDA_CUBLASLT_RANK": "time"},
+            expect=("name=gemm_layout launch=nn_k384", "name=cublaslt_rank engine=time"),
+            numeric=True,
+        ),
+        Case(
             "gemm-cublaslt-rank-time",
             env={"KATAGO_CUDA_DUALFFN": "0", "KATAGO_CUDA_CUBLASLT_RANK": "time"},
             expect=("name=cublaslt_rank engine=time",),
@@ -415,18 +616,7 @@ def main() -> int:
             forbid=("name=rms launch=v1",),
             numeric=True,
         ),
-        Case(
-            "padbatch-on",
-            env={"KATAGO_CUDA_DUALFFN": "0", "KATAGO_CUDA_PADBATCH": "1"},
-            # pad 只在 n>1 且未满 batch 时触发，需足够并发把行合并成批
-            # （workers=2×iter=2 时 avgBatch=1，永远单行）。pad×graph 组合
-            # 会打出 graph 重放 INVALID_VALUE WARNING——已知证伪组合
-            # （ABBA 259），此处仅验证 pad 路径确实接管 + 进程不崩。
-            expect=("name=padbatch launch=on",),
-            batch=2,
-            workers=8,
-            iterations=32,
-        ),
+        padbatch_case(),
         Case(
             "explicit-zero",
             env=bool_zero,
@@ -465,6 +655,23 @@ def main() -> int:
         ),
     ]
 
+    cases.extend(q64_serial_cases(fp, serial_plan_path))
+    if args.case:
+        requested = set(args.case)
+        unknown = requested - {case.name for case in cases}
+        if unknown:
+            parser.error(f"unknown --case: {', '.join(sorted(unknown))}")
+        cases = [case for case in cases if case.name in requested]
+    serial_available = fp["backend_build"]["capabilities"].get("attention_q64_serial", False)
+    skipped = []
+    if serial_available and any("q64-serial" in case.name for case in cases):
+        skipped.append("q64-serial missing-capability runtime case: this binary includes the kernel; "
+                       "run this script with an actual serial-disabled CUDA build to cover rejection")
+    elif not serial_available and any("q64-serial" in case.name for case in cases):
+        skipped.append("q64-serial positive launch/numeric cases: this binary lacks the kernel")
+    for reason in skipped:
+        print(f"SKIP {reason}")
+
     failures = 0
     for case in cases:
         errors = run_case(binary, model, out_dir, case)
@@ -483,7 +690,9 @@ def main() -> int:
         "model": str(model),
         "plan": str(plan),
         "cases": len(cases),
+        "requested_cases": args.case,
         "failures": failures,
+        "skipped_capability_cases": skipped,
     }
     (out_dir / "summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"

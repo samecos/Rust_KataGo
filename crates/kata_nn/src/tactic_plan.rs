@@ -28,6 +28,7 @@ pub const ALLOWED_TACTIC_KEYS: &[&str] = &[
     "KATAGO_CUDA_CUBLASLT_RANK",
     "KATAGO_CUDA_DUALFFN",
     "KATAGO_CUDA_FUSION",
+    "KATAGO_CUDA_GEMM_LAYOUT",
     "KATAGO_CUDA_NOGRAPH",
     "KATAGO_CUDA_NOPIPELINE",
     "KATAGO_CUDA_PADBATCH",
@@ -53,10 +54,18 @@ pub struct DeviceFingerprint {
 pub struct BackendCapabilities {
     pub dual_ffn: bool,
     pub attention_q64: bool,
+    #[serde(default)]
+    pub attention_q64_serial: bool,
 }
 
-/// Device-code and native CUDA wrapper identity embedded by `build.rs`.
-/// Schema 2 plans compare this value exactly before installing any tactic.
+/// Host-side tactic contract, independent of the CUDA device-code build hash.
+/// Revision 1 installs the plan before preparing GEMM layout-specific weights.
+/// Bump this when a host-side change invalidates certification of these tactics.
+pub const CUDA_HOST_TACTIC_REVISION: u32 = 1;
+
+/// CUDA build identity and the separately versioned host-side tactic contract.
+/// Schema 2 plans compare the CUDA build fields exactly. Legacy plans may omit
+/// the host revision only when they do not control a tactic that requires it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackendBuildFingerprint {
@@ -66,6 +75,8 @@ pub struct BackendBuildFingerprint {
     pub cutlass_commit: String,
     pub compiled_sm: Vec<String>,
     pub capabilities: BackendCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_tactic_revision: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,12 +159,15 @@ fn validate_value(key: &str, value: &str) -> Result<(), String> {
         | "KATAGO_CUDA_T64N32" => value == "0" || value == "1",
         // 旧路径回退开关
         "KATAGO_CUDA_ATTN" => value == "v3",
-        // FA2 query tile: production q128 or the 4-warp q64 candidate.
-        "KATAGO_CUDA_ATTN_TILE" => matches!(value, "q64" | "q128"),
+        // q64-serial retains q64's layout and uses q128's reduction order.
+        "KATAGO_CUDA_ATTN_TILE" => matches!(value, "q64" | "q128" | "q64-serial"),
         "KATAGO_CUDA_RMS" => value == "v1",
         "KATAGO_CUDA_FUSION" => matches!(value, "none" | "up" | "down" | "all"),
         // cuBLASLt 算法选择策略:heuristic=首选(默认),time=top-N 计时重排
         "KATAGO_CUDA_CUBLASLT_RANK" => matches!(value, "heuristic" | "time"),
+        "KATAGO_CUDA_GEMM_LAYOUT" => {
+            matches!(value, "tn" | "nn_k384" | "nn_k384_b8" | "nn_k384_b16")
+        }
         // 微秒窗口
         "KATAGO_NN_BATCH_WINDOW_US" => value
             .parse::<u64>()
@@ -196,14 +210,7 @@ pub fn load_and_install(
         }
         validate_value(key, value).map_err(&ctx)?;
     }
-    if plan.schema == 2 {
-        let expected = plan
-            .backend_build
-            .as_ref()
-            .ok_or_else(|| ctx("schema 2 requires backend_build".to_string()))?;
-        validate_backend_build(expected, backend_build).map_err(&ctx)?;
-    }
-    validate_required_capabilities(&plan.apply.tactic_overrides, backend_build).map_err(&ctx)?;
+    validate_plan_backend(&plan, backend_build).map_err(&ctx)?;
     let t = &plan.target;
     if t.gpu_name != device.gpu_name {
         return Err(ctx(format!(
@@ -236,6 +243,40 @@ pub fn load_and_install(
         )));
     }
     install(plan.plan_id.clone(), plan.apply.tactic_overrides).map_err(ctx)
+}
+
+fn validate_plan_backend(plan: &PlanFile, actual: &BackendBuildFingerprint) -> Result<(), String> {
+    if plan.schema == 2 {
+        let expected = plan
+            .backend_build
+            .as_ref()
+            .ok_or_else(|| "schema 2 requires backend_build".to_string())?;
+        validate_backend_build(expected, actual)?;
+    }
+    let expected_revision = plan
+        .backend_build
+        .as_ref()
+        .and_then(|build| build.host_tactic_revision);
+    // This applies to both schemas and to an explicit TN override as well:
+    // negative overrides also rely on installing the plan before weight upload.
+    if plan
+        .apply
+        .tactic_overrides
+        .contains_key("KATAGO_CUDA_GEMM_LAYOUT")
+        && expected_revision.is_none()
+    {
+        return Err(
+            "plan controls KATAGO_CUDA_GEMM_LAYOUT but requires backend_build.host_tactic_revision"
+                .to_string(),
+        );
+    }
+    if expected_revision.is_some() && expected_revision != actual.host_tactic_revision {
+        return Err(format!(
+            "backend build host_tactic_revision mismatch: plan '{expected_revision:?}' vs actual '{:?}'",
+            actual.host_tactic_revision
+        ));
+    }
+    validate_required_capabilities(&plan.apply.tactic_overrides, actual)
 }
 
 fn validate_backend_build(
@@ -278,6 +319,13 @@ fn validate_required_capabilities(
         return Err(
             "plan requests KATAGO_CUDA_ATTN_TILE=q64 but backend capability attention_q64=false"
                 .to_string(),
+        );
+    }
+    if overrides.get("KATAGO_CUDA_ATTN_TILE").map(String::as_str) == Some("q64-serial")
+        && !backend_build.capabilities.attention_q64_serial
+    {
+        return Err(
+            "plan requests KATAGO_CUDA_ATTN_TILE=q64-serial but backend capability attention_q64_serial=false".to_string(),
         );
     }
     Ok(())
@@ -359,7 +407,9 @@ mod tests {
             capabilities: BackendCapabilities {
                 dual_ffn: true,
                 attention_q64: false,
+                attention_q64_serial: false,
             },
+            host_tactic_revision: Some(CUDA_HOST_TACTIC_REVISION),
         }
     }
 
@@ -390,6 +440,19 @@ mod tests {
         value["schema"] = serde_json::json!(2);
         value["backend_build"] = serde_json::to_value(build).unwrap();
         serde_json::to_string_pretty(&value).unwrap()
+    }
+
+    fn backend_plan(
+        schema: u32,
+        overrides: &str,
+        build: Option<&BackendBuildFingerprint>,
+    ) -> PlanFile {
+        let mut value: serde_json::Value = serde_json::from_str(&plan_json(overrides)).unwrap();
+        value["schema"] = serde_json::json!(schema);
+        if let Some(build) = build {
+            value["backend_build"] = serde_json::to_value(build).unwrap();
+        }
+        serde_json::from_value(value).unwrap()
     }
 
     fn write_plan(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
@@ -425,6 +488,16 @@ mod tests {
     }
 
     #[test]
+    fn gemm_layout_accepts_only_implemented_contracts() {
+        for value in ["tn", "nn_k384", "nn_k384_b8", "nn_k384_b16"] {
+            assert!(validate_value("KATAGO_CUDA_GEMM_LAYOUT", value).is_ok());
+        }
+        for value in ["", "nn", "fp16", "NN_K384"] {
+            assert!(validate_value("KATAGO_CUDA_GEMM_LAYOUT", value).is_err());
+        }
+    }
+
+    #[test]
     fn rejects_device_mismatch() {
         let dir = std::env::temp_dir().join("kata_tactic_plan_test_3");
         std::fs::create_dir_all(&dir).unwrap();
@@ -455,6 +528,104 @@ mod tests {
     }
 
     #[test]
+    fn legacy_plans_without_host_revision_accept_original_tactics() {
+        let actual = backend_build();
+        let mut legacy = actual.clone();
+        legacy.host_tactic_revision = None;
+        let legacy_json = serde_json::to_value(&legacy).unwrap();
+        assert!(legacy_json.get("host_tactic_revision").is_none());
+        let overrides = r#"{ "KATAGO_CUDA_DUALFFN": "1", "KATAGO_CUDA_CUBLASLT": "1" }"#;
+        validate_plan_backend(&backend_plan(1, overrides, None), &actual).unwrap();
+        for schema in [1, 2] {
+            let plan = backend_plan(schema, overrides, Some(&legacy));
+            assert_eq!(
+                plan.backend_build.as_ref().unwrap().host_tactic_revision,
+                None
+            );
+            validate_plan_backend(&plan, &actual).unwrap();
+        }
+        // Omitting the host revision must not weaken schema 2's original gates.
+        legacy.kernel_build_id = "different-device-code".into();
+        let err =
+            validate_plan_backend(&backend_plan(2, overrides, Some(&legacy)), &actual).unwrap_err();
+        assert!(err.contains("kernel_build_id mismatch"), "{err}");
+    }
+
+    #[test]
+    fn every_layout_override_requires_host_revision_in_both_schemas() {
+        let actual = backend_build();
+        let mut legacy = actual.clone();
+        legacy.host_tactic_revision = None;
+        for schema in [1, 2] {
+            for layout in ["tn", "nn_k384", "nn_k384_b8", "nn_k384_b16"] {
+                let overrides = format!(r#"{{ "KATAGO_CUDA_GEMM_LAYOUT": "{layout}" }}"#);
+                let err = validate_plan_backend(
+                    &backend_plan(schema, &overrides, Some(&legacy)),
+                    &actual,
+                )
+                .unwrap_err();
+                assert!(
+                    err.contains("requires backend_build.host_tactic_revision"),
+                    "schema={schema} layout={layout}: {err}"
+                );
+                let err = validate_plan_backend(&backend_plan(schema, &overrides, None), &actual)
+                    .unwrap_err();
+                assert!(err.contains("requires backend_build"), "{err}");
+                // An explicit JSON null is the same absence, not a version match.
+                let mut value: serde_json::Value =
+                    serde_json::from_str(&plan_json_v2(&overrides, &actual)).unwrap();
+                value["schema"] = serde_json::json!(schema);
+                value["backend_build"]["host_tactic_revision"] = serde_json::Value::Null;
+                let plan = serde_json::from_value(value).unwrap();
+                let err = validate_plan_backend(&plan, &actual).unwrap_err();
+                assert!(
+                    err.contains("requires backend_build.host_tactic_revision"),
+                    "{err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matched_host_revision_accepts_layouts_in_both_schemas() {
+        let actual = backend_build();
+        assert_eq!(actual.host_tactic_revision, Some(1));
+        let fingerprint_json = serde_json::to_value(&actual).unwrap();
+        assert_eq!(
+            fingerprint_json["host_tactic_revision"],
+            serde_json::json!(1)
+        );
+        for schema in [1, 2] {
+            for layout in ["tn", "nn_k384", "nn_k384_b8", "nn_k384_b16"] {
+                let overrides = format!(r#"{{ "KATAGO_CUDA_GEMM_LAYOUT": "{layout}" }}"#);
+                validate_plan_backend(&backend_plan(schema, &overrides, Some(&actual)), &actual)
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_host_revision_requires_exact_match_even_for_legacy_tactics() {
+        let expected = backend_build();
+        for schema in [1, 2] {
+            for overrides in [
+                r#"{ "KATAGO_CUDA_DUALFFN": "1" }"#,
+                r#"{ "KATAGO_CUDA_GEMM_LAYOUT": "tn" }"#,
+                r#"{ "KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b8" }"#,
+                r#"{ "KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b16" }"#,
+            ] {
+                let plan = backend_plan(schema, overrides, Some(&expected));
+                for revision in [None, Some(0), Some(2)] {
+                    let mut actual = expected.clone();
+                    actual.host_tactic_revision = revision;
+                    let err = validate_plan_backend(&plan, &actual).unwrap_err();
+                    assert!(err.contains("host_tactic_revision mismatch"), "{err}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn schema2_rejects_backend_build_mismatches() {
         let dir = std::env::temp_dir().join("kata_tactic_plan_test_schema2_build");
         std::fs::create_dir_all(&dir).unwrap();
@@ -475,6 +646,14 @@ mod tests {
                     ..expected.clone()
                 },
                 "cutlass_version",
+            ),
+            (
+                "host-tactic-revision",
+                BackendBuildFingerprint {
+                    host_tactic_revision: Some(2),
+                    ..expected.clone()
+                },
+                "host_tactic_revision mismatch",
             ),
             (
                 "capabilities",
@@ -524,6 +703,27 @@ mod tests {
         );
         let err = load_and_install(&p, &device(), &"aa".repeat(32), &backend_build()).unwrap_err();
         assert!(err.contains("capability attention_q64=false"), "{err}");
+    }
+
+    #[test]
+    fn q64_serial_requires_its_own_compiled_capability() {
+        validate_value("KATAGO_CUDA_ATTN_TILE", "q64-serial").unwrap();
+        let overrides = HashMap::from([(
+            "KATAGO_CUDA_ATTN_TILE".to_string(),
+            "q64-serial".to_string(),
+        )]);
+        let mut actual = backend_build();
+        actual.capabilities.attention_q64 = true;
+        let err = validate_required_capabilities(&overrides, &actual).unwrap_err();
+        assert!(
+            err.contains("capability attention_q64_serial=false"),
+            "{err}"
+        );
+        let ordinary_q64 =
+            HashMap::from([("KATAGO_CUDA_ATTN_TILE".to_string(), "q64".to_string())]);
+        validate_required_capabilities(&ordinary_q64, &actual).unwrap();
+        actual.capabilities.attention_q64_serial = true;
+        validate_required_capabilities(&overrides, &actual).unwrap();
     }
 
     // 注意：成功路径会写入进程级 OnceLock。cargo 默认并行跑测试，凡触及

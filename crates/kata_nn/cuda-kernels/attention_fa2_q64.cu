@@ -15,6 +15,15 @@
 #define FA64_D 32
 #define FA64_ST (FA64_D + 8)
 
+// The separate q64-serial translation unit selects only the softmax reduction
+// order. Keep the established q64 entry and its arithmetic unchanged.
+#ifndef FA64_SERIAL_SUM
+#define FA64_SERIAL_SUM 0
+#endif
+#ifndef FA64_KERNEL_NAME
+#define FA64_KERNEL_NAME attention_fa2_q64_kernel
+#endif
+
 __device__ __forceinline__ void fa64_mma(float c[4], const uint32_t a[4],
                                          const uint32_t b[2]) {
     asm volatile(
@@ -67,7 +76,7 @@ __device__ __forceinline__ void fa64_cp_wait_all() {
 }
 
 extern "C" __global__ void __launch_bounds__(FA64_THREADS)
-attention_fa2_q64_kernel(const __half* __restrict__ qkv,
+FA64_KERNEL_NAME(const __half* __restrict__ qkv,
                          const float* __restrict__ rope_cos,
                          const float* __restrict__ rope_sin,
                          __half* __restrict__ out, int s, int d, float scale,
@@ -214,6 +223,9 @@ attention_fa2_q64_kernel(const __half* __restrict__ qkv,
         }
 
         float part_max0[nt_s], part_max1[nt_s];
+#if FA64_SERIAL_SUM
+        float serial_max0 = -1e30f, serial_max1 = -1e30f;
+#endif
         const int key_start = tile * FA64_BKV;
 #pragma unroll
         for (int n = 0; n < nt_s; ++n) {
@@ -230,7 +242,15 @@ attention_fa2_q64_kernel(const __half* __restrict__ qkv,
             score[n][3] = s3;
             part_max0[n] = fmaxf(s0, s1);
             part_max1[n] = fmaxf(s2, s3);
+#if FA64_SERIAL_SUM
+            serial_max0 = fmaxf(serial_max0, part_max0[n]);
+            serial_max1 = fmaxf(serial_max1, part_max1[n]);
+#endif
         }
+#if FA64_SERIAL_SUM
+        float tile_max0 = serial_max0;
+        float tile_max1 = serial_max1;
+#else
 #pragma unroll
         for (int width = nt_s / 2; width >= 1; width >>= 1) {
 #pragma unroll
@@ -241,6 +261,7 @@ attention_fa2_q64_kernel(const __half* __restrict__ qkv,
         }
         float tile_max0 = part_max0[0];
         float tile_max1 = part_max1[0];
+#endif
         tile_max0 = fmaxf(tile_max0,
                           __shfl_xor_sync(0xffffffffu, tile_max0, 1));
         tile_max0 = fmaxf(tile_max0,
@@ -258,6 +279,14 @@ attention_fa2_q64_kernel(const __half* __restrict__ qkv,
         row_max[1] = next_max1;
 
         float part_sum0[nt_s], part_sum1[nt_s];
+#if FA64_SERIAL_SUM
+        // Match q128's chronological arithmetic, including the separate scale
+        // and add of the previous normalizer. Do not introduce approximate
+        // exponentials, change the half P boundary, or reorder the PV MMAs.
+        float tile_sum0 = 0.0f, tile_sum1 = 0.0f;
+        row_sum[0] = row_sum[0] * alpha0;
+        row_sum[1] = row_sum[1] * alpha1;
+#endif
 #pragma unroll
         for (int n = 0; n < nt_s; ++n) {
             const float p0 = expf(score[n][0] - next_max0);
@@ -270,7 +299,12 @@ attention_fa2_q64_kernel(const __half* __restrict__ qkv,
             score[n][3] = p3;
             part_sum0[n] = p0 + p1;
             part_sum1[n] = p2 + p3;
+#if FA64_SERIAL_SUM
+            tile_sum0 += part_sum0[n];
+            tile_sum1 += part_sum1[n];
+#endif
         }
+#if !FA64_SERIAL_SUM
 #pragma unroll
         for (int width = nt_s / 2; width >= 1; width >>= 1) {
 #pragma unroll
@@ -281,12 +315,18 @@ attention_fa2_q64_kernel(const __half* __restrict__ qkv,
         }
         float tile_sum0 = part_sum0[0];
         float tile_sum1 = part_sum1[0];
+#endif
         tile_sum0 += __shfl_xor_sync(0xffffffffu, tile_sum0, 1);
         tile_sum0 += __shfl_xor_sync(0xffffffffu, tile_sum0, 2);
         tile_sum1 += __shfl_xor_sync(0xffffffffu, tile_sum1, 1);
         tile_sum1 += __shfl_xor_sync(0xffffffffu, tile_sum1, 2);
+#if FA64_SERIAL_SUM
+        row_sum[0] += tile_sum0;
+        row_sum[1] += tile_sum1;
+#else
         row_sum[0] = row_sum[0] * alpha0 + tile_sum0;
         row_sum[1] = row_sum[1] * alpha1 + tile_sum1;
+#endif
 
 #pragma unroll
         for (int n = 0; n < nt_o; ++n) {

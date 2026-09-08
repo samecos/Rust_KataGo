@@ -14,13 +14,22 @@ if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
     throw "Build first: cargo build -p katago --features cuda --release"
 }
 if ([string]::IsNullOrEmpty($Config)) {
-    $Config = Join-Path $repoRoot "configs/worker_cuda.cfg"
+    $Config = Join-Path $repoRoot "configs/worker_tf3_sm120.cfg"
 }
 if (-not (Test-Path -LiteralPath $Model -PathType Leaf)) { throw "Model not found: $Model" }
 if (-not (Test-Path -LiteralPath $Config -PathType Leaf)) { throw "Config not found: $Config" }
+$Model = (Resolve-Path -LiteralPath $Model).Path
+$Config = (Resolve-Path -LiteralPath $Config).Path
 $workerArgs = @("nnworker", "--server", $Server, "--worker-id", $WorkerId,
     "--model", $Model, "--config", $Config, "--capacity", "$Capacity")
 if ($ModelSha256) { $workerArgs += @("--model-sha256", $ModelSha256) }
 if ($Once) { $workerArgs += "--once" }
-& $binary @workerArgs
-exit $LASTEXITCODE
+$workerExitCode = 0
+Push-Location -LiteralPath $repoRoot
+try {
+    & $binary @workerArgs
+    $workerExitCode = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+exit $workerExitCode

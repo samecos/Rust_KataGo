@@ -31,7 +31,9 @@ mod imp {
             capabilities: crate::tactic_plan::BackendCapabilities {
                 dual_ffn: CUDA_CAP_DUAL_FFN,
                 attention_q64: CUDA_CAP_ATTENTION_Q64,
+                attention_q64_serial: CUDA_CAP_ATTENTION_Q64_SERIAL,
             },
+            host_tactic_revision: Some(crate::tactic_plan::CUDA_HOST_TACTIC_REVISION),
         }
     }
 
@@ -40,6 +42,41 @@ mod imp {
     /// is intentionally reserved for plan validation and diagnostics.
     pub fn attention_q64_available() -> bool {
         CUDA_CAP_ATTENTION_Q64
+    }
+
+    /// Independent capability: q64 may be present without the serial entry.
+    pub fn attention_q64_serial_available() -> bool {
+        CUDA_CAP_ATTENTION_Q64_SERIAL
+    }
+
+    /// The same logical W[N,K], stored either row-major (TN) or transposed
+    /// row-major [K,N] (NN). Only storage/descriptor layout changes; both use
+    /// FP32 compute and the caller's existing output and residual types.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum CublasLtWeightLayout {
+        Tn,
+        Nn,
+    }
+
+    impl CublasLtWeightLayout {
+        fn descriptor(self, n: usize, k: usize) -> (u32, u64, u64, i64) {
+            match self {
+                Self::Tn => (1, k as u64, n as u64, k as i64),
+                Self::Nn => (0, n as u64, k as u64, n as i64),
+            }
+        }
+    }
+
+    /// Output type, residual mode and weight layout must have separate cache
+    /// fields: FP16 output is not interchangeable with FP32 beta=1 output.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct CublasLtAlgoKey {
+        m: usize,
+        n: usize,
+        k: usize,
+        f16out: bool,
+        residual: bool,
+        layout: CublasLtWeightLayout,
     }
 
     /// cudarc 0.19 models graph instantiate bitflags as an enum without a zero
@@ -99,7 +136,10 @@ mod imp {
         pub device: Arc<CudaContext>,
         pub target_id: String,
         modules: Vec<(String, Arc<CudaModule>)>,
-        /// cuBLASLt GEMM(f16 输入 f32 累加输出),按 (m,n,k) 缓存启发式算法。
+        /// Modules are immutable after construction; cloned functions retain
+        /// their owning module through cudarc's Arc<CudaModule>.
+        functions: Mutex<HashMap<String, CudaFunction>>,
+        /// cuBLASLt GEMM,按形状、输出类型、残差模式和权重布局缓存算法。
         /// graph capture 前需 warmup(第一次调用完成算法选择)。
         cublaslt: Option<CublasLtState>,
     }
@@ -112,9 +152,7 @@ mod imp {
         /// different streams. Keep one allocation per stream while retaining
         /// the single runtime/model shared by all benchmark handles.
         workspaces: Mutex<HashMap<usize, CudaSlice<u8>>>,
-        algo_cache: Mutex<
-            HashMap<(usize, usize, usize, bool), cudarc::cublaslt::sys::cublasLtMatmulAlgo_t>,
-        >,
+        algo_cache: Mutex<HashMap<CublasLtAlgoKey, cudarc::cublaslt::sys::cublasLtMatmulAlgo_t>>,
     }
     // cuBLASLt handle 是 opaque 指针,create 后可跨线程使用(文档:线程安全)。
     unsafe impl Send for CublasLtState {}
@@ -196,6 +234,7 @@ mod imp {
                 device,
                 target_id: target_id.to_string(),
                 modules,
+                functions: Mutex::new(HashMap::new()),
                 cublaslt,
             })
         }
@@ -235,15 +274,40 @@ mod imp {
             k: usize,
             beta: f32,
         ) -> Result<bool, String> {
+            self.cublaslt_gemm_with_layout(stream, a, b, c, m, n, k, beta, CublasLtWeightLayout::Tn)
+        }
+
+        /// Explicit layout variant used by the opt-in K384 candidate and its
+        /// diagnostic. `b` must have the storage declared by `layout`.
+        #[allow(clippy::too_many_arguments)]
+        pub fn cublaslt_gemm_with_layout(
+            &self,
+            stream: &Arc<cudarc::driver::CudaStream>,
+            a: &CudaSlice<u16>,
+            b: &CudaSlice<u16>,
+            c: &mut CudaSlice<f32>,
+            m: usize,
+            n: usize,
+            k: usize,
+            beta: f32,
+            layout: CublasLtWeightLayout,
+        ) -> Result<bool, String> {
             let Some(st) = &self.cublaslt else {
                 return Ok(false);
             };
-            let key = (m, n, k, beta != 0.0);
+            let key = CublasLtAlgoKey {
+                m,
+                n,
+                k,
+                f16out: false,
+                residual: beta != 0.0,
+                layout,
+            };
             let cached = st.algo_cache.lock().unwrap().get(&key).copied();
             let algo = match cached {
                 Some(a) => Some(a),
                 None => {
-                    let cands = self.cublaslt_select_algos(st, m, n, k, false)?;
+                    let cands = self.cublaslt_select_algos(st, m, n, k, false, layout)?;
                     if cands.is_empty() {
                         None
                     } else if cublaslt_rank_time() && !crate::backends::cuda_exec::capturing() {
@@ -253,8 +317,7 @@ mod imp {
                             &crate::backends::cuda_exec::CUBLASLT_RANK_TIME_REPORT,
                             "name=cublaslt_rank engine=time",
                         );
-                        let tstream = crate::backends::cuda_exec::active_stream_clone()
-                            .unwrap_or_else(|| self.device.default_stream());
+                        let tstream = stream.clone();
                         let mut scratch: CudaSlice<f32> = unsafe { tstream.alloc(c.len()) }
                             .map_err(|e| format!("rank scratch alloc: {e}"))?;
                         let pick = self
@@ -268,6 +331,7 @@ mod imp {
                                 m,
                                 n,
                                 k,
+                                layout,
                             )
                             .unwrap_or(cands[0]);
                         st.algo_cache.lock().unwrap().insert(key, pick);
@@ -284,7 +348,7 @@ mod imp {
                 }
             };
             let Some(algo) = algo else { return Ok(false) };
-            self.cublaslt_exec(st, stream, &algo, a, b, c, m, n, k, beta)?;
+            self.cublaslt_exec(st, stream, &algo, a, b, c, m, n, k, beta, layout)?;
             Ok(true)
         }
 
@@ -301,15 +365,47 @@ mod imp {
             n: usize,
             k: usize,
         ) -> Result<bool, String> {
+            self.cublaslt_gemm_f16out_with_layout(
+                stream,
+                a,
+                b,
+                c,
+                m,
+                n,
+                k,
+                CublasLtWeightLayout::Tn,
+            )
+        }
+
+        /// FP32 compute, FP16 output, with an explicit weight storage layout.
+        #[allow(clippy::too_many_arguments)]
+        pub fn cublaslt_gemm_f16out_with_layout(
+            &self,
+            stream: &Arc<cudarc::driver::CudaStream>,
+            a: &CudaSlice<u16>,
+            b: &CudaSlice<u16>,
+            c: &mut CudaSlice<u16>,
+            m: usize,
+            n: usize,
+            k: usize,
+            layout: CublasLtWeightLayout,
+        ) -> Result<bool, String> {
             let Some(st) = &self.cublaslt else {
                 return Ok(false);
             };
-            let key = (m, n, k, true); // f16out 用 beta=true 槽位区分
+            let key = CublasLtAlgoKey {
+                m,
+                n,
+                k,
+                f16out: true,
+                residual: false,
+                layout,
+            };
             let cached = st.algo_cache.lock().unwrap().get(&key).copied();
             let algo = match cached {
                 Some(a) => Some(a),
                 None => {
-                    let cands = self.cublaslt_select_algos(st, m, n, k, true)?;
+                    let cands = self.cublaslt_select_algos(st, m, n, k, true, layout)?;
                     if cands.is_empty() {
                         None
                     } else if cublaslt_rank_time() && !crate::backends::cuda_exec::capturing() {
@@ -317,8 +413,7 @@ mod imp {
                             &crate::backends::cuda_exec::CUBLASLT_RANK_TIME_REPORT,
                             "name=cublaslt_rank engine=time",
                         );
-                        let tstream = crate::backends::cuda_exec::active_stream_clone()
-                            .unwrap_or_else(|| self.device.default_stream());
+                        let tstream = stream.clone();
                         let mut scratch: CudaSlice<u16> = unsafe { tstream.alloc(c.len()) }
                             .map_err(|e| format!("rank scratch alloc: {e}"))?;
                         let pick = self
@@ -332,6 +427,7 @@ mod imp {
                                 m,
                                 n,
                                 k,
+                                layout,
                             )
                             .unwrap_or(cands[0]);
                         st.algo_cache.lock().unwrap().insert(key, pick);
@@ -346,7 +442,7 @@ mod imp {
                 }
             };
             let Some(algo) = algo else { return Ok(false) };
-            self.cublaslt_exec_f16(st, stream, &algo, a, b, c, m, n, k)?;
+            self.cublaslt_exec_f16(st, stream, &algo, a, b, c, m, n, k, layout)?;
             Ok(true)
         }
 
@@ -364,6 +460,7 @@ mod imp {
             m: usize,
             n: usize,
             k: usize,
+            layout: CublasLtWeightLayout,
         ) -> Option<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t> {
             let mut best: Option<(f64, cudarc::cublaslt::sys::cublasLtMatmulAlgo_t)> = None;
             let mut first_ms = f64::NAN;
@@ -371,7 +468,7 @@ mod imp {
                 let mut failed = false;
                 for _ in 0..3 {
                     if self
-                        .cublaslt_exec(st, stream, cand, a, b, scratch, m, n, k, 0.0)
+                        .cublaslt_exec(st, stream, cand, a, b, scratch, m, n, k, 0.0, layout)
                         .is_err()
                     {
                         failed = true;
@@ -384,7 +481,7 @@ mod imp {
                 let t0 = std::time::Instant::now();
                 for _ in 0..12 {
                     if self
-                        .cublaslt_exec(st, stream, cand, a, b, scratch, m, n, k, 0.0)
+                        .cublaslt_exec(st, stream, cand, a, b, scratch, m, n, k, 0.0, layout)
                         .is_err()
                     {
                         failed = true;
@@ -427,6 +524,7 @@ mod imp {
             m: usize,
             n: usize,
             k: usize,
+            layout: CublasLtWeightLayout,
         ) -> Option<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t> {
             let mut best: Option<(f64, cudarc::cublaslt::sys::cublasLtMatmulAlgo_t)> = None;
             let mut first_ms = f64::NAN;
@@ -434,7 +532,7 @@ mod imp {
                 let mut failed = false;
                 for _ in 0..3 {
                     if self
-                        .cublaslt_exec_f16(st, stream, cand, a, b, scratch, m, n, k)
+                        .cublaslt_exec_f16(st, stream, cand, a, b, scratch, m, n, k, layout)
                         .is_err()
                     {
                         failed = true;
@@ -447,7 +545,7 @@ mod imp {
                 let t0 = std::time::Instant::now();
                 for _ in 0..12 {
                     if self
-                        .cublaslt_exec_f16(st, stream, cand, a, b, scratch, m, n, k)
+                        .cublaslt_exec_f16(st, stream, cand, a, b, scratch, m, n, k, layout)
                         .is_err()
                     {
                         failed = true;
@@ -486,6 +584,7 @@ mod imp {
             n: usize,
             k: usize,
             f16out: bool,
+            layout: CublasLtWeightLayout,
         ) -> Result<Vec<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t>, String> {
             use cudarc::cublaslt::sys;
             unsafe {
@@ -495,7 +594,7 @@ mod imp {
                     sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
                     sys::cudaDataType_t::CUDA_R_32F,
                 );
-                let transa: u32 = 1; // CUBLAS_OP_T
+                let (transa, weight_rows, weight_cols, weight_ld) = layout.descriptor(n, k);
                 let transb: u32 = 0; // CUBLAS_OP_N
                 sys::cublasLtMatmulDescSetAttribute(
                     desc,
@@ -509,7 +608,8 @@ mod imp {
                     &transb as *const _ as *const _,
                     std::mem::size_of_val(&transb),
                 );
-                // 布局(列主序映射):A_cm=B 内存 [k,n] ld=k;B_cm=A 内存 [k,m] ld=k;C [n,m] ld=n
+                // C_cm[N,M] = op(W_cm) @ X_cm[K,M]. TN uses W_cm[K,N],
+                // NN uses the load-time transposed W_cm[N,K]; X/C are unchanged.
                 let cdtype = if f16out {
                     sys::cudaDataType_t::CUDA_R_16F
                 } else {
@@ -521,9 +621,9 @@ mod imp {
                 sys::cublasLtMatrixLayoutCreate(
                     &mut a_lay,
                     sys::cudaDataType_t::CUDA_R_16F,
-                    k as u64,
-                    n as u64,
-                    k as i64,
+                    weight_rows,
+                    weight_cols,
+                    weight_ld,
                 );
                 sys::cublasLtMatrixLayoutCreate(
                     &mut b_lay,
@@ -587,6 +687,7 @@ mod imp {
             n: usize,
             k: usize,
             beta: f32,
+            layout: CublasLtWeightLayout,
         ) -> Result<(), String> {
             use cudarc::cublaslt::sys;
             use cudarc::driver::{DevicePtr, DevicePtrMut};
@@ -597,7 +698,7 @@ mod imp {
                     sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
                     sys::cudaDataType_t::CUDA_R_32F,
                 );
-                let transa: u32 = 1; // CUBLAS_OP_T
+                let (transa, weight_rows, weight_cols, weight_ld) = layout.descriptor(n, k);
                 let transb: u32 = 0; // CUBLAS_OP_N
                 sys::cublasLtMatmulDescSetAttribute(
                     desc,
@@ -617,9 +718,9 @@ mod imp {
                 sys::cublasLtMatrixLayoutCreate(
                     &mut a_lay,
                     sys::cudaDataType_t::CUDA_R_16F,
-                    k as u64,
-                    n as u64,
-                    k as i64,
+                    weight_rows,
+                    weight_cols,
+                    weight_ld,
                 );
                 sys::cublasLtMatrixLayoutCreate(
                     &mut b_lay,
@@ -685,6 +786,7 @@ mod imp {
             m: usize,
             n: usize,
             k: usize,
+            layout: CublasLtWeightLayout,
         ) -> Result<(), String> {
             use cudarc::cublaslt::sys;
             use cudarc::driver::{DevicePtr, DevicePtrMut};
@@ -695,7 +797,7 @@ mod imp {
                     sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
                     sys::cudaDataType_t::CUDA_R_32F,
                 );
-                let transa: u32 = 1;
+                let (transa, weight_rows, weight_cols, weight_ld) = layout.descriptor(n, k);
                 let transb: u32 = 0;
                 sys::cublasLtMatmulDescSetAttribute(
                     desc,
@@ -715,9 +817,9 @@ mod imp {
                 sys::cublasLtMatrixLayoutCreate(
                     &mut a_lay,
                     sys::cudaDataType_t::CUDA_R_16F,
-                    k as u64,
-                    n as u64,
-                    k as i64,
+                    weight_rows,
+                    weight_cols,
+                    weight_ld,
                 );
                 sys::cublasLtMatrixLayoutCreate(
                     &mut b_lay,
@@ -773,10 +875,22 @@ mod imp {
 
         /// 按名字查找 kernel 函数。
         pub fn get_func(&self, name: &str) -> Result<CudaFunction, String> {
+            if let Some(f) = self.functions.lock().unwrap().get(name).cloned() {
+                // cudarc load_function performs no context binding; the launch
+                // still binds its stream's context, including on another thread.
+                return Ok(f);
+            }
+            // Keep Driver calls outside the cache lock and retain module order.
             for (kname, module) in &self.modules {
                 if let Ok(f) = module.load_function(name) {
                     let _ = kname;
-                    return Ok(f);
+                    return Ok(self
+                        .functions
+                        .lock()
+                        .unwrap()
+                        .entry(name.to_owned())
+                        .or_insert(f)
+                        .clone());
                 }
             }
             Err(format!("kernel {name} not found"))
@@ -1255,8 +1369,8 @@ impl CudaRuntime {
 
 #[cfg(feature = "cuda")]
 pub use imp::{
-    CudaRuntime, attention_q64_available, backend_build_fingerprint, f16_to_f32_bits,
-    f32_to_f16_bits, graph_instantiate_flags,
+    CublasLtWeightLayout, CudaRuntime, attention_q64_available, attention_q64_serial_available,
+    backend_build_fingerprint, f16_to_f32_bits, f32_to_f16_bits, graph_instantiate_flags,
 };
 
 // ---------------------------------------------------------------------------
@@ -1342,10 +1456,21 @@ mod backend_impl {
         Ok(())
     }
 
-    /// 已加载模型：层图权重常驻设备 + 运行时（设备/模块）。
+    /// GPU weights are uploaded only after the context's certified plan is
+    /// installed. The parsed graph is discarded after the successful upload.
+    enum CudaModelLoadState {
+        Parsed(crate::onnx_parser::LayerGraph),
+        Uploaded {
+            model: Arc<CudaModel>,
+            gemm_layout: &'static str,
+        },
+    }
+
+    /// Parsed model and CUDA runtime. Context creation completes the deferred
+    /// upload, before any compute handle, warmup, graph capture or serve thread.
     pub struct CudaLoadedModel {
         model_desc: ModelDesc,
-        model: Arc<CudaModel>,
+        model: Mutex<CudaModelLoadState>,
         rt: Arc<CudaRuntime>,
         /// 模型文件路径（cudaTacticPlan 指纹校验时算 SHA-256 用）。
         model_path: String,
@@ -1949,8 +2074,9 @@ mod backend_impl {
                 // Parse the exact bytes that were verified above. The worker
                 // and tactic plan retain the original file's identity; this
                 // in-memory lowering never substitutes an exported model.
-                let desc = crate::model_parser::load_model_from_bytes(&bytes, binary, compressed)
-                    .map_err(|e| NeuralNetError(format!("native model parse failed: {e}")))?;
+                let desc =
+                    crate::model_parser::load_model_from_bytes(&bytes, binary, compressed)
+                        .map_err(|e| NeuralNetError(format!("native model parse failed: {e}")))?;
                 let graph = crate::native_model::lower_model(&desc)
                     .map_err(|e| NeuralNetError(format!("native CUDA model unsupported: {e}")))?;
                 (desc, graph)
@@ -1958,21 +2084,13 @@ mod backend_impl {
             let rt = Arc::new(
                 CudaRuntime::new().map_err(|e| NeuralNetError(format!("CUDA init failed: {e}")))?,
             );
-            // 权重上传用独立流，完成后设备级同步，保证后续任意流可见。
-            let load_stream = rt
-                .device
-                .new_stream()
-                .map_err(|e| NeuralNetError(format!("CUDA stream create failed: {e}")))?;
-            let model = Arc::new(
-                CudaModel::load(&graph, &rt, &load_stream)
-                    .map_err(|e| NeuralNetError(format!("CUDA model upload failed: {e}")))?,
-            );
-            rt.device
-                .synchronize()
-                .map_err(|e| NeuralNetError(format!("CUDA sync failed: {e}")))?;
+            // cudaTacticPlan is unavailable until create_compute_context.
+            // Reading load-time tactics here would bind the environment first,
+            // defeating both plan NN/env TN and plan TN/env NN precedence.
+            // Retain the parsed graph and defer all weight uploads instead.
             Ok(Box::new(CudaLoadedModel {
                 model_desc,
-                model,
+                model: Mutex::new(CudaModelLoadState::Parsed(graph)),
                 rt,
                 model_path: file.to_string(),
             }))
@@ -2017,9 +2135,50 @@ mod backend_impl {
                     crate::tactic_plan::installed_plan_id().unwrap_or("?")
                 ));
             }
-            ensure_requested_cuda_capabilities(&model.model).map_err(NeuralNetError)?;
+            let gemm_layout =
+                crate::backends::cuda_exec::selected_gemm_layout().map_err(NeuralNetError)?;
+            let uploaded_model = {
+                let mut state = model.model.lock().map_err(|_| {
+                    NeuralNetError("CUDA model upload state was poisoned".to_string())
+                })?;
+                match &*state {
+                    CudaModelLoadState::Uploaded {
+                        model,
+                        gemm_layout: uploaded_layout,
+                    } => {
+                        if *uploaded_layout != gemm_layout {
+                            return Err(NeuralNetError(format!(
+                                "CUDA model weights were prepared for GEMM layout '{uploaded_layout}', but this context requests '{gemm_layout}'; reload the model before changing its load-time layout"
+                            )));
+                        }
+                        model.clone()
+                    }
+                    CudaModelLoadState::Parsed(graph) => {
+                        // An independent stream plus a device sync makes the
+                        // finished weights visible to every later handle.
+                        let load_stream = model.rt.device.new_stream().map_err(|e| {
+                            NeuralNetError(format!("CUDA stream create failed: {e}"))
+                        })?;
+                        let uploaded =
+                            Arc::new(CudaModel::load(graph, &model.rt, &load_stream).map_err(
+                                |e| NeuralNetError(format!("CUDA model upload failed: {e}")),
+                            )?);
+                        model
+                            .rt
+                            .device
+                            .synchronize()
+                            .map_err(|e| NeuralNetError(format!("CUDA sync failed: {e}")))?;
+                        *state = CudaModelLoadState::Uploaded {
+                            model: uploaded.clone(),
+                            gemm_layout,
+                        };
+                        uploaded
+                    }
+                }
+            };
+            ensure_requested_cuda_capabilities(&uploaded_model).map_err(NeuralNetError)?;
             Ok(Box::new(CudaComputeContext {
-                model: model.model.clone(),
+                model: uploaded_model,
                 rt: model.rt.clone(),
                 nn_x_len,
                 nn_y_len,

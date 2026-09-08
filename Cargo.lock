@@ -2423,6 +2423,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "cudarc",
  "env_logger",
  "kata_book",
  "kata_core",
