@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_plans_without_library_version_keep_original_contract() {
+    fn revalidated_plans_without_library_version_keep_optional_library_contract() {
         let actual = backend_build();
         let mut legacy = actual.clone();
         legacy.cublaslt_version = None;
@@ -689,10 +689,10 @@ mod tests {
                 validate_plan_backend(&plan, &actual).unwrap();
             }
         }
-        validate_plan_backend(&backend_plan(1, "{}", None), &actual).unwrap();
         assert_eq!(actual.host_tactic_revision, Some(1));
-        // Only omission preserves the legacy contract; an explicit fingerprint
-        // field must match even if this plan never enables the new preset.
+        // The FP16 contract is already present. Only omission preserves this
+        // optional library contract; an explicit library field must match even
+        // if this plan never enables the new preset.
         let mut other_library = actual.clone();
         other_library.cublaslt_version = Some(130500);
         validate_plan_backend(&backend_plan(2, "{}", Some(&legacy)), &other_library).unwrap();
@@ -737,11 +737,6 @@ mod tests {
                     .contains("requires backend_build.cublaslt_version")
             );
         }
-        assert!(
-            validate_plan_backend(&backend_plan(1, overrides, None), &actual)
-                .unwrap_err()
-                .contains("requires backend_build.cublaslt_version")
-        );
     }
 
     #[test]
@@ -856,24 +851,43 @@ mod tests {
     }
 
     #[test]
-    fn schema2_requires_backend_build() {
-        let dir = std::env::temp_dir().join("kata_tactic_plan_test_schema2_missing");
+    fn all_schemas_reject_missing_encoding_contract_before_installation() {
+        let dir = std::env::temp_dir().join("kata_tactic_plan_test_missing_encoding");
         std::fs::create_dir_all(&dir).unwrap();
-        let body = plan_json("{}").replacen("\"schema\": 1", "\"schema\": 2", 1);
-        let p = write_plan(&dir, "missing.json", &body);
-        let err = load_and_install(&p, &device(), &"aa".repeat(32), &backend_build()).unwrap_err();
-        assert!(err.contains("schema 2 requires backend_build"), "{err}");
+        for schema in [1, 2] {
+            for missing_build in [false, true] {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(&plan_json("{}")).unwrap();
+                value["schema"] = serde_json::json!(schema);
+                if missing_build {
+                    value.as_object_mut().unwrap().remove("backend_build");
+                } else {
+                    value["backend_build"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("fp16_encoding_revision");
+                }
+                let p = write_plan(
+                    &dir,
+                    &format!("schema{schema}-missing-build-{missing_build}.json"),
+                    &serde_json::to_string(&value).unwrap(),
+                );
+                let err =
+                    load_and_install(&p, &device(), &"aa".repeat(32), &backend_build()).unwrap_err();
+                assert!(err.contains("requires backend_build.fp16_encoding_revision"), "{err}");
+                assert!(err.contains("rerun numerical validation and migrate the plan"), "{err}");
+            }
+        }
     }
 
     #[test]
-    fn legacy_plans_without_host_revision_accept_original_tactics() {
+    fn revalidated_plans_without_host_revision_accept_original_tactics() {
         let actual = backend_build();
         let mut legacy = actual.clone();
         legacy.host_tactic_revision = None;
         let legacy_json = serde_json::to_value(&legacy).unwrap();
         assert!(legacy_json.get("host_tactic_revision").is_none());
         let overrides = r#"{ "KATAGO_CUDA_DUALFFN": "1", "KATAGO_CUDA_CUBLASLT": "1" }"#;
-        validate_plan_backend(&backend_plan(1, overrides, None), &actual).unwrap();
         for schema in [1, 2] {
             let plan = backend_plan(schema, overrides, Some(&legacy));
             assert_eq!(
