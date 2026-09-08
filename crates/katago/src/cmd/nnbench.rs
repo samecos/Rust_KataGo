@@ -344,6 +344,8 @@ fn direct_sweep(
     let model_sha256 = kata_core::hash::sha2::sha256_hex(&bytes);
     let graph = direct_layer_graph(&model_file, &bytes)?;
     let rt = CudaRuntime::new().map_err(|e| format!("CUDA runtime: {e}"))?;
+    rt.validate_residual_algo_request()
+        .map_err(|e| format!("CUDA residual tactic: {e}"))?;
     let stream = rt.device.default_stream();
     let model = Arc::new(
         CudaModel::load(&graph, &rt, &stream).map_err(|e| format!("load CudaModel: {e}"))?,

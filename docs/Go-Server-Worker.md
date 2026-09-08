@@ -1,5 +1,7 @@
 # RustGo 接入 Go Server
 
+首次部署请先读 [TF3 权重适配、调优与 Worker 部署](TF3权重适配与Worker部署.md)：包含原生权重支持范围、是否需要 autotune、三套 profile 选择、Server/Worker 两端命令及验收。本文保留协议契约与详细历史记录。
+
 RustGo 提供原生 `katago-rs nnworker` 命令，实现 Go Server 的
 `goeval.v1.WorkerService/Connect` 双向 gRPC 协议。Server 维护规则状态和搜索图；
 RustGo 重放局面、调用 `NnEvaluator` 并返回后处理后的 policy/value/ownership。

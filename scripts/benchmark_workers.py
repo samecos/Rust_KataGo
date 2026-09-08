@@ -14,6 +14,8 @@ warmup, final heartbeat collection, Drain and report writing are not timed.
 RPC requests/s and actual NN rows/s are separate. --workload cached deliberately
 reuses the fixed positions with the cache enabled; it is not a pure NN benchmark.
 No worker processes overlap. Run only when other GPU benchmarks/builds are idle.
+Workload PASS is separate from performance_status: comparisons require at least
+two samples per side and the predeclared maximum relative spread on both sides.
 """
 import argparse
 from dataclasses import dataclass
@@ -376,10 +378,39 @@ def check_batch_size(path):
         raise ValueError(f"{path}: benchmark requires exactly one explicit nnMaxBatchSize = 16 and no per-model override")
 
 
-def summarize(runs):
+def relative_spread_limit(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("maximum-relative-spread must be finite in 0..0.1") from None
+    if not math.isfinite(value) or not 0 <= value <= 0.1:
+        raise argparse.ArgumentTypeError("maximum-relative-spread must be finite in 0..0.1")
+    return value
+
+
+def combined_performance_status(statuses):
+    statuses = list(statuses)
+    if "UNSTABLE_DIAGNOSTIC_ONLY" in statuses:
+        return "UNSTABLE_DIAGNOSTIC_ONLY"
+    if not statuses or any(status != "STABLE" for status in statuses):
+        return "INSUFFICIENT_REPEATS_DIAGNOSTIC_ONLY"
+    return "STABLE"
+
+
+def create_report(path, report):
+    # Exclusive creation also prevents simultaneous invocations from replacing
+    # the same evidence. Later writes update only this invocation's report.
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2)
+        stream.write("\n")
+
+
+def summarize(runs, maximum_relative_spread=0.05):
+    maximum_relative_spread = relative_spread_limit(maximum_relative_spread)
     summaries = []
     for concurrency in sorted({run["concurrency"] for run in runs}):
-        entry = dict(concurrency=concurrency, workers={})
+        entry = dict(concurrency=concurrency, maximum_relative_spread=maximum_relative_spread,
+                     workers={}, comparisons={})
         for flavor in ("cpp", "baseline", "rust"):
             group = [run["measurement"] for run in runs
                      if run["concurrency"] == concurrency and run["worker"] == flavor and run["status"] == "PASS"]
@@ -390,6 +421,7 @@ def summarize(runs):
             entry["workers"][flavor] = dict(
                 runs=len(group), rpc_geomean=statistics.geometric_mean(rates),
                 rpc_min=min(rates), rpc_max=max(rates),
+                rpc_relative_spread=max(rates) / min(rates) - 1,
                 nn_rows_mean=statistics.fmean(nn_rates),
                 average_batch_mean=statistics.fmean([run["average_nn_batch"] for run in group
                                                     if run["average_nn_batch"] is not None])
@@ -397,7 +429,20 @@ def summarize(runs):
             )
         for reference in ("cpp", "baseline"):
             if reference in entry["workers"] and "rust" in entry["workers"]:
-                entry[f"rust_over_{reference}_rpc_ratio"] = entry["workers"]["rust"]["rpc_geomean"] / entry["workers"][reference]["rpc_geomean"]
+                candidate = entry["workers"]["rust"]
+                baseline = entry["workers"][reference]
+                if min(candidate["runs"], baseline["runs"]) < 2:
+                    status = "INSUFFICIENT_REPEATS_DIAGNOSTIC_ONLY"
+                elif any(side["rpc_max"] > side["rpc_min"] * (1 + maximum_relative_spread)
+                         for side in (candidate, baseline)):
+                    status = "UNSTABLE_DIAGNOSTIC_ONLY"
+                else:
+                    status = "STABLE"
+                entry["comparisons"][reference] = dict(performance_status=status)
+                prefix = "" if status == "STABLE" else "diagnostic_only_"
+                entry[f"{prefix}rust_over_{reference}_rpc_ratio"] = candidate["rpc_geomean"] / baseline["rpc_geomean"]
+        entry["performance_status"] = combined_performance_status(
+            comparison["performance_status"] for comparison in entry["comparisons"].values())
         summaries.append(entry)
     return summaries
 
@@ -427,6 +472,8 @@ def main():
     parser.add_argument("--gpu-index", type=int, default=0, help="GPU for optional sampling only; worker configs select devices")
     parser.add_argument("--startup-timeout", type=float, default=300)
     parser.add_argument("--task-timeout", type=float, default=120)
+    parser.add_argument("--maximum-relative-spread", type=relative_spread_limit, default=0.05,
+                        help="Predeclared max/min - 1 limit for each comparison side (default 0.05)")
     args = parser.parse_args()
     try:
         concurrencies = [int(value) for value in args.concurrency.split(",")]
@@ -455,8 +502,9 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     fixture = json.loads(args.fixtures.read_text(encoding="utf-8"))
     warmup_count = max(args.warmup, 128, max(concurrencies))
-    protocol = Protocol(args.proto)
-    report = dict(status="RUNNING", model_sha256=args.model_sha256, schema_sha256=file_hash(args.proto),
+    report = dict(status="RUNNING", performance_status="RUNNING",
+                  maximum_relative_spread=args.maximum_relative_spread,
+                  model_sha256=args.model_sha256, schema_sha256=file_hash(args.proto),
                   fixtures_sha256=file_hash(args.fixtures), concurrency=concurrencies, order=order,
                   workload=args.workload, ownership=args.ownership, physical_max_batch=16,
                   warmup_requests=warmup_count, measured_requests=args.requests,
@@ -467,7 +515,11 @@ def main():
                             "steady_rpc_requests_per_second trims first/last concurrency completions. "
                             "Optional resource sampling may perturb performance and is reported explicitly.",
                   sample_gpu=args.sample_gpu)
+    report_path = args.output / "report.json"
+    create_report(report_path, report)
+    protocol = None
     try:
+        protocol = Protocol(args.proto)
         warmup, measured, digest, template_count = prepare_requests(
             protocol, fixture, args.model_sha256, warmup_count, args.requests, args.workload, args.ownership)
         report.update(requests_sha256=digest, semantic_templates=template_count)
@@ -488,22 +540,30 @@ def main():
                       f"{measurement['nn_rows_per_second']:10.1f} {batch_text:>10s} "
                       f"{rtt['p50'] / 1000:7.2f}/{rtt['p95'] / 1000:7.2f} "
                       f"{evaluator_text:>12s}", flush=True)
-                report["summaries"] = summarize(report["runs"])
-                write_json(args.output / "report.json", report)
+                report["summaries"] = summarize(report["runs"], args.maximum_relative_spread)
+                report["performance_status"] = combined_performance_status(
+                    summary["performance_status"] for summary in report["summaries"])
+                write_json(report_path, report)
         report["status"] = "PASS"
     except Exception as error:
-        report.update(status="FAIL", error=str(error))
+        report.update(status="FAIL", performance_status="NOT_COMPLETED", error=str(error))
         raise
     finally:
-        protocol.close()
-        write_json(args.output / "report.json", report)
+        if protocol is not None:
+            protocol.close()
+        write_json(report_path, report)
     for summary in report["summaries"]:
         for reference, label in (("cpp", "C++"), ("baseline", "Rust baseline")):
             key = f"rust_over_{reference}_rpc_ratio"
             if key in summary:
                 print(f"C={summary['concurrency']}: Rust/{label} geometric-mean RPC throughput "
                       f"{summary[key]:.4f}x", flush=True)
-    print(f"RESULT: PASS; {args.output / 'report.json'}", flush=True)
+            diagnostic_key = f"diagnostic_only_{key}"
+            if diagnostic_key in summary:
+                print(f"C={summary['concurrency']}: diagnostic_only Rust/{label} geometric-mean RPC throughput "
+                      f"{summary[diagnostic_key]:.4f}x; "
+                      f"{summary['comparisons'][reference]['performance_status']}", flush=True)
+    print(f"RESULT: PASS; performance_status={report['performance_status']}; {report_path}", flush=True)
 
 
 if __name__ == "__main__":

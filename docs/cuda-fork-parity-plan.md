@@ -347,6 +347,17 @@ G0 的稳定参考基线已完成；G1/G4 已验收独立持续 C32 配置，G2 
   `host_tactic_revision=1` 令旧 binary 实际因 unknown field 拒绝新布局 plan，
   证据为 `old-binary-rejects-layout-plan.log`。G1 的 C32 profile 验收完成，
   不向 G2 或其他未测负载推广。
+- **主机函数缓存已撤回**：整网数值、128 输出一致性及 graph 回归通过，但
+  `function-cache-forward-abba-r2` 的同 Rust WSL 前向变化为 −0.77%，
+  `function-cache-worker-throughput-abba-r2` 的 C64 变化为 −0.76%，未达 1% 门。
+  初轮大幅波动的全部样本保留为诊断，不使用其中虚高收益；脚本正常串行，
+  尚未确定异常原因。G1 布局保留，后续优先验证 TF3 残差 GEMM 的 FP32
+  分块与 strict attention 的 RoPE 融合，不能以静态 Driver 调用数量推断收益。
+- **残差算子与剖析**：TF3 四形状/三 tile 的 FP32 残差 CUTLASS 探针数值门
+  通过；128×64×32 在 B16 FFN down/outproj 独立 ABBA 为 +9.26%/+15.67%，
+  B14 无对应收益，尚未生产采纳。Lt top-8 诊断有接近候选，先做固定算法
+  配对复测。另修复 profile 子段覆盖层起点的问题；实际三次前向的层/子段
+  关系及 128/128 整网数值门通过。插桩耗时不用于 G0 性能比例。
 
 详细头部工作量、二进制身份和复现命令见
 [TF3 Worker 性能审计](tf3-worker-performance-audit.md)文末「本轮 Fork 对标追加」。

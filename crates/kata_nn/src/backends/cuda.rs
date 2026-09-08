@@ -13,14 +13,14 @@ mod imp {
         CudaContext, CudaFunction, CudaModule, CudaSlice, LaunchConfig, PushKernelArg,
     };
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     // 由 build.rs 生成的 PTX 表：`(target_id, compute_capability, [(kernel_name, ptx_bytes)])`。
     include!(concat!(env!("OUT_DIR"), "/cuda_kernels.rs"));
     // 由 build.rs 生成的构建指纹和编译能力表。
     include!(concat!(env!("OUT_DIR"), "/cuda_build.rs"));
 
-    /// 构建期 CUDA 后端指纹，供认证 plan 和 `cuda-fingerprint` 共用。
+    /// CUDA build and loaded-library fingerprint, shared by plans and diagnostics.
     pub fn backend_build_fingerprint() -> crate::tactic_plan::BackendBuildFingerprint {
         crate::tactic_plan::BackendBuildFingerprint {
             kernel_build_id: CUDA_KERNEL_BUILD_ID.to_string(),
@@ -34,6 +34,7 @@ mod imp {
                 attention_q64_serial: CUDA_CAP_ATTENTION_Q64_SERIAL,
             },
             host_tactic_revision: Some(crate::tactic_plan::CUDA_HOST_TACTIC_REVISION),
+            cublaslt_version: Some(unsafe { cudarc::cublaslt::sys::cublasLtGetVersion() } as u64),
         }
     }
 
@@ -77,6 +78,166 @@ mod imp {
         f16out: bool,
         residual: bool,
         layout: CublasLtWeightLayout,
+        /// Do not reuse a heuristic/time choice when a fixed preset is enabled,
+        /// or a preset choice for beta != 1 on the same residual shape.
+        residual_preset: bool,
+    }
+
+    fn tf3_residual_candidate_index(
+        m: usize,
+        n: usize,
+        k: usize,
+        beta: f32,
+        layout: CublasLtWeightLayout,
+    ) -> Option<usize> {
+        if beta != 1.0 || layout != CublasLtWeightLayout::Tn {
+            return None;
+        }
+        match (m, n, k) {
+            (5054, 384, 1152) => Some(1),
+            (5776, 384, 1152) => Some(3),
+            (5776, 384, 384) => Some(2),
+            _ => None,
+        }
+    }
+
+    // Exact opaque data of the three pre-registered candidates, not a portable
+    // algorithm ID. Accepted only with the measured GPU and Lt 130600. These
+    // are u64 values decoded from the little-endian bytes in
+    // target/fork-parity-20260908/tf3-residual-lt-abba-report.json
+    // SHA256 62a331f20a511dcd6d4b69f6b83b204ecac92f6d4cfca61b182455b9a6cb97e2.
+    const TF3_RESIDUAL_ALGO_DATA: [u64; 8] = [
+        0x0000000f00000015,
+        0x000000010000000c,
+        0,
+        0,
+        0x0001fe2800000001,
+        0x0000000200000002,
+        0x0000004400000000,
+        0,
+    ];
+
+    fn fixed_residual_candidate(
+        candidates: &[cudarc::cublaslt::sys::cublasLtMatmulAlgo_t],
+        index: usize,
+    ) -> Result<cudarc::cublaslt::sys::cublasLtMatmulAlgo_t, String> {
+        let candidate = candidates.get(index).ok_or_else(|| format!(
+            "tf3_5070ti_r1 requires filtered heuristic index {index}, only {} candidates available",
+            candidates.len()
+        ))?;
+        if candidate.data != TF3_RESIDUAL_ALGO_DATA {
+            return Err(format!(
+                "tf3_5070ti_r1 algorithm identity mismatch at filtered heuristic index {index}: actual {:x?}",
+                candidate.data
+            ));
+        }
+        Ok(*candidate)
+    }
+
+    static RESIDUAL_B14_DOWN_REPORT: OnceLock<()> = OnceLock::new();
+    static RESIDUAL_B16_DOWN_REPORT: OnceLock<()> = OnceLock::new();
+    static RESIDUAL_B16_OUT_REPORT: OnceLock<()> = OnceLock::new();
+
+    fn report_residual_preset(m: usize, n: usize, k: usize, index: usize) {
+        let slot = match (m, n, k) {
+            (5054, 384, 1152) => &RESIDUAL_B14_DOWN_REPORT,
+            (5776, 384, 1152) => &RESIDUAL_B16_DOWN_REPORT,
+            (5776, 384, 384) => &RESIDUAL_B16_OUT_REPORT,
+            _ => return,
+        };
+        slot.get_or_init(|| {
+            eprintln!(
+                "[cuda-tactic] name=residual_algo engine=tf3_5070ti_r1 m={m} n={n} k={k} layout=tn output=f32 beta=1 filtered_index={index} cublaslt_version={} algorithm_identity=matched",
+                crate::tactic_plan::TF3_RESIDUAL_CUBLASLT_VERSION
+            );
+        });
+    }
+
+    #[cfg(test)]
+    mod residual_algo_tests {
+        use super::*;
+
+        #[test]
+        fn residual_preset_is_limited_to_measured_tn_beta_one_shapes() {
+            for (m, n, k, index) in [
+                (5054, 384, 1152, 1),
+                (5776, 384, 1152, 3),
+                (5776, 384, 384, 2),
+            ] {
+                assert_eq!(
+                    tf3_residual_candidate_index(m, n, k, 1.0, CublasLtWeightLayout::Tn),
+                    Some(index)
+                );
+                assert_eq!(
+                    tf3_residual_candidate_index(m, n, k, 1.0, CublasLtWeightLayout::Nn),
+                    None
+                );
+                for beta in [0.0, -1.0, 0.5, 2.0, f32::NAN] {
+                    assert_eq!(
+                        tf3_residual_candidate_index(m, n, k, beta, CublasLtWeightLayout::Tn),
+                        None
+                    );
+                }
+            }
+            for (m, n, k) in [
+                (5054, 384, 384),
+                (2888, 384, 1152),
+                (5776, 768, 1152),
+                (5776, 384, 2304),
+                (5775, 384, 1152),
+            ] {
+                assert_eq!(
+                    tf3_residual_candidate_index(m, n, k, 1.0, CublasLtWeightLayout::Tn),
+                    None
+                );
+            }
+        }
+
+        #[test]
+        fn fixed_residual_candidate_rejects_missing_or_changed_algorithm() {
+            use cudarc::cublaslt::sys::cublasLtMatmulAlgo_t;
+            let expected = cublasLtMatmulAlgo_t {
+                data: TF3_RESIDUAL_ALGO_DATA,
+            };
+            let mut candidates = vec![expected; 4];
+            assert_eq!(fixed_residual_candidate(&candidates, 3).unwrap(), expected);
+            assert!(
+                fixed_residual_candidate(&candidates[..3], 3)
+                    .unwrap_err()
+                    .contains("only 3 candidates")
+            );
+            candidates[3].data[0] ^= 1;
+            assert!(
+                fixed_residual_candidate(&candidates, 3)
+                    .unwrap_err()
+                    .contains("identity mismatch")
+            );
+            // Never search another index for the expected data after a mismatch.
+            assert_eq!(fixed_residual_candidate(&candidates, 1).unwrap(), expected);
+        }
+
+        #[test]
+        fn residual_preset_cache_does_not_alias_existing_choices() {
+            let base = CublasLtAlgoKey {
+                m: 5776,
+                n: 384,
+                k: 1152,
+                f16out: false,
+                residual: true,
+                layout: CublasLtWeightLayout::Tn,
+                residual_preset: false,
+            };
+            let preset = CublasLtAlgoKey {
+                residual_preset: true,
+                ..base
+            };
+            let mut cache = HashMap::new();
+            cache.insert(base, 0);
+            assert_eq!(cache.get(&preset), None);
+            cache.insert(preset, 3);
+            assert_eq!(cache.get(&base), Some(&0));
+            assert_eq!(cache.get(&preset), Some(&3));
+        }
     }
 
     /// cudarc 0.19 models graph instantiate bitflags as an enum without a zero
@@ -136,9 +297,6 @@ mod imp {
         pub device: Arc<CudaContext>,
         pub target_id: String,
         modules: Vec<(String, Arc<CudaModule>)>,
-        /// Modules are immutable after construction; cloned functions retain
-        /// their owning module through cudarc's Arc<CudaModule>.
-        functions: Mutex<HashMap<String, CudaFunction>>,
         /// cuBLASLt GEMM,按形状、输出类型、残差模式和权重布局缓存算法。
         /// graph capture 前需 warmup(第一次调用完成算法选择)。
         cublaslt: Option<CublasLtState>,
@@ -168,6 +326,26 @@ mod imp {
     }
 
     impl CudaRuntime {
+        /// Call after plan installation, before preparing inference. Direct
+        /// callers also validate on the first matching GEMM cache miss.
+        pub fn validate_residual_algo_request(&self) -> Result<(), String> {
+            if !crate::tactic_plan::residual_preset_requested()? {
+                return Ok(());
+            }
+            let st = self
+                .cublaslt
+                .as_ref()
+                .ok_or_else(|| "tf3_5070ti_r1 requires an available cuBLASLt handle".to_string())?;
+            if st.workspace_len != 32 * 1024 * 1024 {
+                return Err(
+                    "tf3_5070ti_r1 requires the measured 32 MiB workspace preference".into(),
+                );
+            }
+            let device = super::device_fingerprint(&self.device)?;
+            let version = unsafe { cudarc::cublaslt::sys::cublasLtGetVersion() } as u64;
+            crate::tactic_plan::validate_tf3_residual_target(&device, Some(version))
+        }
+
         /// cublasLt 句柄（实验/测试路径用；生产 GEMM 走 cublaslt_gemm*）。
         #[doc(hidden)]
         pub fn cublaslt_handle(&self) -> Option<cudarc::cublaslt::sys::cublasLtHandle_t> {
@@ -234,7 +412,6 @@ mod imp {
                 device,
                 target_id: target_id.to_string(),
                 modules,
-                functions: Mutex::new(HashMap::new()),
                 cublaslt,
             })
         }
@@ -292,7 +469,14 @@ mod imp {
             beta: f32,
             layout: CublasLtWeightLayout,
         ) -> Result<bool, String> {
+            let preset_index = match tf3_residual_candidate_index(m, n, k, beta, layout) {
+                Some(index) if crate::tactic_plan::residual_preset_requested()? => Some(index),
+                _ => None,
+            };
             let Some(st) = &self.cublaslt else {
+                if preset_index.is_some() {
+                    return Err("tf3_5070ti_r1 requires an available cuBLASLt handle".into());
+                }
                 return Ok(false);
             };
             let key = CublasLtAlgoKey {
@@ -302,13 +486,22 @@ mod imp {
                 f16out: false,
                 residual: beta != 0.0,
                 layout,
+                residual_preset: preset_index.is_some(),
             };
             let cached = st.algo_cache.lock().unwrap().get(&key).copied();
             let algo = match cached {
                 Some(a) => Some(a),
                 None => {
                     let cands = self.cublaslt_select_algos(st, m, n, k, false, layout)?;
-                    if cands.is_empty() {
+                    if let Some(index) = preset_index {
+                        // No timing, precision changes, or fallback: the fixed
+                        // choice wins over global rank=time only for this key.
+                        self.validate_residual_algo_request()?;
+                        let pick = fixed_residual_candidate(&cands, index)
+                            .map_err(|e| format!("residual GEMM ({m},{n},{k}): {e}"))?;
+                        st.algo_cache.lock().unwrap().insert(key, pick);
+                        Some(pick)
+                    } else if cands.is_empty() {
                         None
                     } else if cublaslt_rank_time() && !crate::backends::cuda_exec::capturing() {
                         // C1 计时重排:在当前活跃流上逐候选计时(scratch 承载输出,
@@ -349,6 +542,9 @@ mod imp {
             };
             let Some(algo) = algo else { return Ok(false) };
             self.cublaslt_exec(st, stream, &algo, a, b, c, m, n, k, beta, layout)?;
+            if let Some(index) = preset_index {
+                report_residual_preset(m, n, k, index);
+            }
             Ok(true)
         }
 
@@ -400,6 +596,7 @@ mod imp {
                 f16out: true,
                 residual: false,
                 layout,
+                residual_preset: false,
             };
             let cached = st.algo_cache.lock().unwrap().get(&key).copied();
             let algo = match cached {
@@ -875,22 +1072,10 @@ mod imp {
 
         /// 按名字查找 kernel 函数。
         pub fn get_func(&self, name: &str) -> Result<CudaFunction, String> {
-            if let Some(f) = self.functions.lock().unwrap().get(name).cloned() {
-                // cudarc load_function performs no context binding; the launch
-                // still binds its stream's context, including on another thread.
-                return Ok(f);
-            }
-            // Keep Driver calls outside the cache lock and retain module order.
             for (kname, module) in &self.modules {
                 if let Ok(f) = module.load_function(name) {
                     let _ = kname;
-                    return Ok(self
-                        .functions
-                        .lock()
-                        .unwrap()
-                        .entry(name.to_owned())
-                        .or_insert(f)
-                        .clone());
+                    return Ok(f);
                 }
             }
             Err(format!("kernel {name} not found"))
@@ -2135,6 +2320,10 @@ mod backend_impl {
                     crate::tactic_plan::installed_plan_id().unwrap_or("?")
                 ));
             }
+            model
+                .rt
+                .validate_residual_algo_request()
+                .map_err(NeuralNetError)?;
             let gemm_layout =
                 crate::backends::cuda_exec::selected_gemm_layout().map_err(NeuralNetError)?;
             let uploaded_model = {

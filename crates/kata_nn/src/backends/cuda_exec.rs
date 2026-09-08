@@ -620,30 +620,39 @@ impl CudaModel {
         let out_ownership = &mut ws.out_ownership;
 
         // --- 逐层执行 ----------------------------------------------------
-        // per-layer 剖析（KATAGO_CUDA_PROFILE=1）：每层一对事件计时。
+        // per-layer 剖析（KATAGO_CUDA_PROFILE=1）：层与子段使用独立事件对，
+        // 每次 forward 各分配一次并复用，避免子段重录覆盖整层的起点。
         // capture 模式下跳过（事件同步会破坏 graph capture）。
         let profiling = !capturing() && std::env::var("KATAGO_CUDA_PROFILE").is_ok();
         let mut layer_times: Vec<(i64, &'static str, f32)> = Vec::new();
-        let (ev_start, ev_end) = if profiling {
+        let mut layer_sub_times: Vec<(usize, &'static str, Vec<(&'static str, f32)>)> = Vec::new();
+        let (layer_events, sub_events) = if profiling {
             let f = Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT);
             (
-                Some(rt.device.new_event(f).map_err(|e| format!("event: {e}"))?),
-                Some(rt.device.new_event(f).map_err(|e| format!("event: {e}"))?),
+                Some((
+                    rt.device.new_event(f).map_err(|e| format!("event: {e}"))?,
+                    rt.device.new_event(f).map_err(|e| format!("event: {e}"))?,
+                )),
+                Some((
+                    rt.device.new_event(f).map_err(|e| format!("event: {e}"))?,
+                    rt.device.new_event(f).map_err(|e| format!("event: {e}"))?,
+                )),
             )
         } else {
             (None, None)
         };
-        if profiling {
-            let _ = ev_start.as_ref().unwrap().record(&stream);
+        if let Some((start, _)) = &layer_events {
+            start
+                .record(&stream)
+                .map_err(|e| format!("profile layer start: {e}"))?;
         }
         im2col(rt, spatial, cols, batch, s)?;
-        if profiling {
-            let _ = ev_end.as_ref().unwrap().record(&stream);
-            let ms = ev_start
-                .as_ref()
-                .unwrap()
-                .elapsed_ms(ev_end.as_ref().unwrap())
-                .unwrap_or(-1.0);
+        if let Some((start, end)) = &layer_events {
+            end.record(&stream)
+                .map_err(|e| format!("profile layer end: {e}"))?;
+            let ms = start
+                .elapsed_ms(end)
+                .map_err(|e| format!("profile layer elapsed: {e}"))?;
             layer_times.push((-1, "im2col", ms));
         }
         // split-K 状态：Some(beta) 表示上一个 GEMM 是 split-K partial，
@@ -664,8 +673,30 @@ impl CudaModel {
                 LayerBuf::PolicyHead { .. } => "PolicyHead",
                 LayerBuf::ValueHead { .. } => "ValueHead",
             };
-            if profiling {
-                let _ = ev_start.as_ref().unwrap().record(&stream);
+            if let Some((start, _)) = &layer_events {
+                start
+                    .record(&stream)
+                    .map_err(|e| format!("profile layer start: {e}"))?;
+            }
+            let mut sub_times: Vec<(&'static str, f32)> = Vec::new();
+            macro_rules! timed {
+                ($name:expr, $body:expr) => {{
+                    if let Some((start, _)) = &sub_events {
+                        start
+                            .record(&stream)
+                            .map_err(|e| format!("profile sub start: {e}"))?;
+                    }
+                    let value = ($body)?;
+                    if let Some((start, end)) = &sub_events {
+                        end.record(&stream)
+                            .map_err(|e| format!("profile sub end: {e}"))?;
+                        let ms = start
+                            .elapsed_ms(end)
+                            .map_err(|e| format!("profile sub elapsed: {e}"))?;
+                        sub_times.push(($name, ms));
+                    }
+                    value
+                }};
             }
             // 融合前瞻：返回 true 表示已把下一层（GateSilu）一并消费。
             // KATAGO_CUDA_FUSION=none|up|down|all。默认 none：融合 epilogue
@@ -810,25 +841,6 @@ impl CudaModel {
                 } => {
                     let (lh, ld, ls) = (*lh, *ld, *ls);
                     assert_eq!((lh, ld, ls), (h, d, s), "attention 结构参数不符");
-                    let sub_profile = profiling;
-                    let mut sub_times: Vec<(&'static str, f32)> = Vec::new();
-                    macro_rules! timed {
-                        ($name:expr, $body:expr) => {
-                            if sub_profile {
-                                let _ = ev_start.as_ref().unwrap().record(&stream);
-                            }
-                            $body?;
-                            if sub_profile {
-                                let _ = ev_end.as_ref().unwrap().record(&stream);
-                                let ms = ev_start
-                                    .as_ref()
-                                    .unwrap()
-                                    .elapsed_ms(ev_end.as_ref().unwrap())
-                                    .unwrap_or(-1.0);
-                                sub_times.push(($name, ms));
-                            }
-                        };
-                    }
                     let scale = qk_scale * qk_scale; // 导出图 q、k 各乘 1/∜d
                     // FA2：qkv GEMM f16 packed([M,1152] 复用 act1152)→
                     // attention 内部加载时做 RoPE（省独立 rope kernel）。
@@ -928,21 +940,13 @@ impl CudaModel {
                     // 输出投影 beta=1 残差进 act384。split-K partial（reduce
                     // 由后续 RmsNorm 融合）。KATAGO_CUDA_SPLITK=1 启用。
                     if splitk_on {
-                        hgemm_splitk2_partial(rt, normed, out, c_partial, m)?;
+                        timed!(
+                            "outproj_splitk_partial",
+                            hgemm_splitk2_partial(rt, normed, out, c_partial, m)
+                        );
                         pending_splitk_beta = Some(1.0);
                     } else {
                         timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
-                    }
-                    if sub_profile {
-                        let total: f32 = sub_times.iter().map(|t| t.1.max(0.0)).sum();
-                        eprintln!(
-                            "[cuda-profile] attention l{li} total {total:.3} ms: {}",
-                            sub_times
-                                .iter()
-                                .map(|(n, t)| format!("{n}={t:.3}"))
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        );
                     }
                     false
                 }
@@ -953,20 +957,26 @@ impl CudaModel {
                     // epilogue 一步出 act1152,省 act2304 往返 + swiglu kernel。
                     // 数值与两 kernel 路径逐位一致(中间 half 舍入在 epilogue
                     // 内复刻)。不可用/未启用时走现有路径。
-                    #[cfg(katago_dualffn)]
-                    let dual_done = match &self.dual_ffn {
-                        Some(st) => dual_ffn_run(st, rt, normed, dual, act1152, m)?,
-                        None => false,
-                    };
-                    #[cfg(not(katago_dualffn))]
-                    let dual_done = false;
-                    if !dual_done {
-                        DUAL_FFN_UNFUSED_REPORT.get_or_init(|| {
-                            eprintln!("[cuda-tactic] name=dual_ffn launch=unfused effective=0");
-                        });
-                        // dual FFN:gate|up 单 GEMM(N=2304,f16 直出)→ dual SwiGLU
-                        hgemm_f16(rt, normed, dual, act2304, m)?;
-                        swiglu_dual(rt, act2304, act1152, m, hidden)?;
+                    let dual_done = timed!("up_swiglu_unfused", {
+                        #[cfg(katago_dualffn)]
+                        let dual_done = match &self.dual_ffn {
+                            Some(st) => dual_ffn_run(st, rt, normed, dual, act1152, m)?,
+                            None => false,
+                        };
+                        #[cfg(not(katago_dualffn))]
+                        let dual_done = false;
+                        if !dual_done {
+                            DUAL_FFN_UNFUSED_REPORT.get_or_init(|| {
+                                eprintln!("[cuda-tactic] name=dual_ffn launch=unfused effective=0");
+                            });
+                            // dual FFN:gate|up 单 GEMM(N=2304,f16 直出)→ dual SwiGLU
+                            hgemm_f16(rt, normed, dual, act2304, m)?;
+                            swiglu_dual(rt, act2304, act1152, m, hidden)?;
+                        }
+                        Ok::<bool, String>(dual_done)
+                    });
+                    if profiling && dual_done {
+                        sub_times.last_mut().unwrap().0 = "up_swiglu_dualffn_fused";
                     }
                     // 前瞻：后一层是 GateSilu(384) 时融合（down 残差 GEMM
                     // epilogue 直接算 silu(affine)，省独立 gate kernel）。
@@ -980,23 +990,32 @@ impl CudaModel {
                         if *channels == mid {
                             // down 残差 + GateSilu384 融合，epilogue 同时写
                             // act384f16（供 up GEMM 直接读，省 f32_to_f16）
-                            hgemm_residual_gatesilu_f32(
-                                rt,
-                                act1152,
-                                down,
-                                act384,
-                                act384f16,
-                                &scale.data,
-                                &bias.data,
-                                m,
-                            )?;
+                            timed!(
+                                "down_residual_gatesilu_fused",
+                                hgemm_residual_gatesilu_f32(
+                                    rt,
+                                    act1152,
+                                    down,
+                                    act384,
+                                    act384f16,
+                                    &scale.data,
+                                    &bias.data,
+                                    m,
+                                )
+                            );
                             true
                         } else {
-                            hgemm_residual(rt, act1152, down, act384, m)?;
+                            timed!(
+                                "down_residual",
+                                hgemm_residual(rt, act1152, down, act384, m)
+                            );
                             false
                         }
                     } else {
-                        hgemm_residual(rt, act1152, down, act384, m)?;
+                        timed!(
+                            "down_residual",
+                            hgemm_residual(rt, act1152, down, act384, m)
+                        );
                         false
                     }
                 }
@@ -1107,14 +1126,16 @@ impl CudaModel {
                     false
                 }
             };
-            if profiling {
-                let _ = ev_end.as_ref().unwrap().record(&stream);
-                let ms = ev_start
-                    .as_ref()
-                    .unwrap()
-                    .elapsed_ms(ev_end.as_ref().unwrap())
-                    .unwrap_or(-1.0);
+            if let Some((start, end)) = &layer_events {
+                end.record(&stream)
+                    .map_err(|e| format!("profile layer end: {e}"))?;
+                let ms = start
+                    .elapsed_ms(end)
+                    .map_err(|e| format!("profile layer elapsed: {e}"))?;
                 layer_times.push((li as i64, layer_tag, ms));
+                if !sub_times.is_empty() {
+                    layer_sub_times.push((li, layer_tag, sub_times));
+                }
             }
             li += 1 + skip_next as usize;
             // --- 临时调试钩子：KATAGO_CUDA_DEBUG_LAYER=<i> 时 dump 两路流 ---
@@ -1217,6 +1238,21 @@ impl CudaModel {
         }
 
         if profiling {
+            // Print subsegments only after every layer end has been sampled.
+            // Their event synchronizations remain diagnostic overhead inside
+            // the enclosing layer interval; no profile logging is inside it.
+            for (li, tag, times) in &layer_sub_times {
+                let total: f32 = times.iter().map(|t| t.1).sum();
+                eprintln!(
+                    "[cuda-profile] {} l{li} total {total:.3} ms: {}",
+                    tag.to_ascii_lowercase(),
+                    times
+                        .iter()
+                        .map(|(n, t)| format!("{n}={t:.3}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
             let total: f32 = layer_times.iter().map(|t| t.2.max(0.0)).sum();
             eprintln!(
                 "[cuda-profile] total {total:.3} ms across {} kernels:",

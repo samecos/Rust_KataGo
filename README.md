@@ -21,7 +21,7 @@ KataGo 围棋引擎的 Rust 移植，基于 KataGo-Lite/`katago-rs`，并包含�
 
 - Rust stable，`rustc >= 1.85`（edition 2024）。
 - 默认构建只需要 Rust 工具链。
-- 真实推理需要一个兼容的 KataGo ONNX 模型；CUDA 还需要 CUDA Toolkit/nvcc，TensorRT 还需要 TensorRT 头文件和库。
+- 真实推理需要兼容模型：CUDA 可直接使用已适配的原生 TF3 权重或兼容 ONNX；TensorRT 使用 ONNX。CUDA 还需要 CUDA Toolkit/nvcc，TensorRT 还需要 TensorRT 头文件和库。
 
 ### 构建与测试
 
@@ -85,13 +85,13 @@ nnMaxBatchSize = 16
 cudaTacticPlan = /path/to/plans/best-tactic-plan.json
 ```
 
-plan 会校验 GPU 指纹、模型 SHA-256 和 tactic 组合；不匹配时故意启动失败，而不是静默使用错误配置。更换 GPU 或模型后重新运行：
+plan 会校验 GPU 指纹、模型 SHA-256 和 tactic 组合；不匹配时故意启动失败。下面是旧 ONNX 搜索路径的调优入口，脚本仍固定 `b11fix.onnx` 和输出 plan，使用前需核对目标：
 
 ```bash
 python scripts/autotune.py --threads both
 ```
 
-仓库中的 [`configs/gtp_cuda.cfg`](configs/gtp_cuda.cfg) 和 `plans/best-tactic-plan.json` 是当前 Windows RTX 5070 Ti/b11fix 的 schema-2 认证配置（q64 attention + DualFFN），前者包含该 checkout 的绝对 plan 路径。WSL 使用对应的 `plans/best-tactic-plan-sm120-q64-wsl.json`；Windows/WSL 的 CUDA build fingerprint 不同，不能交叉复用。直接复用前先修改或删除 `cudaTacticPlan`。`scripts/autotune.py` 目前同样在文件顶部指定模型路径，运行前需要改为目标模型。
+仓库中的 [`configs/gtp_cuda.cfg`](configs/gtp_cuda.cfg) 和 `plans/best-tactic-plan.json` 是当前 Windows RTX 5070 Ti/b11fix 的 schema-2 认证配置（q64 attention + DualFFN），前者包含该 checkout 的绝对 plan 路径。WSL 使用对应的 `plans/best-tactic-plan-sm120-q64-wsl.json`；Windows/WSL 的 CUDA build fingerprint 不同，不能交叉复用。无匹配 plan 时可先移除 `cudaTacticPlan` 使用基础路径并验证。TF3 Worker 使用独立 plan，不能直接套用上述脚本或只替换模型名；调优与验收流程见 [TF3 权重适配与 Worker 部署](docs/TF3权重适配与Worker部署.md)。
 
 不指定 `cudaTacticPlan` 时不会自动运行 autotune，而是使用代码内置的默认 tactic（当前 attention 默认仍为 q128）；生产 q64 必须使用与本机 build fingerprint 匹配的认证 plan。
 
@@ -140,13 +140,13 @@ cargo build -p katago --features cuda --release
 .\target\release\katago-rs.exe nnworker --server 127.0.0.1:50051 `
   --worker-id rustgo-5070ti `
   --model D:/Go/Server/models/kata1-tf3-b11c768-s11001M-d5973M.bin.gz `
-  --config configs/worker_cuda.cfg --capacity 32
+  --config configs/worker_tf3_sm120.cfg --capacity 32
 ```
 
 搜索由 Go Server 维护，Worker 只提供局面评估。默认与 C++ Worker 共用原生 TF3
 `.bin.gz`（modelVersion 17），所有 Worker 用实际模型文件 SHA-256 加入同一池。
-`scripts/run_go_worker.ps1` 已默认选择此模型；旧 ONNX 认证 plan 绑定另一模型，不能复用。
-启动、配置及验证见 [Go Server Worker 接入](docs/Go-Server-Worker.md)。
+`scripts/run_go_worker.ps1` 已默认选择此模型和本机认证的 `worker_tf3_sm120.cfg`，首次接入不需要先跑 autotune。另有持续 C32 和双线程 C64 配置；无匹配 plan 时可用 `worker_cuda.cfg` 验证基础路径。旧 ONNX 认证 plan 绑定另一模型，不能复用。
+完整两端启动命令、配置选择和验收步骤见 [TF3 权重适配与 Worker 部署](docs/TF3权重适配与Worker部署.md)；协议边界和历史验收见 [Go Server Worker 接入](docs/Go-Server-Worker.md)。
 
 ## JSON-lines 分析协议
 

@@ -32,6 +32,7 @@ pub const ALLOWED_TACTIC_KEYS: &[&str] = &[
     "KATAGO_CUDA_NOGRAPH",
     "KATAGO_CUDA_NOPIPELINE",
     "KATAGO_CUDA_PADBATCH",
+    "KATAGO_CUDA_RESIDUAL_ALGO",
     "KATAGO_CUDA_RMS",
     "KATAGO_CUDA_SPLITK",
     "KATAGO_CUDA_T32",
@@ -63,9 +64,15 @@ pub struct BackendCapabilities {
 /// Bump this when a host-side change invalidates certification of these tactics.
 pub const CUDA_HOST_TACTIC_REVISION: u32 = 1;
 
-/// CUDA build identity and the separately versioned host-side tactic contract.
-/// Schema 2 plans compare the CUDA build fields exactly. Legacy plans may omit
-/// the host revision only when they do not control a tactic that requires it.
+/// Host FP32-to-FP16 encoding contract, independent of tactics and device code.
+/// Revision 1 correctly rounds half subnormals to nearest, ties to even.
+/// Every CUDA plan must bind this revision after numerical revalidation.
+pub const CUDA_FP16_ENCODING_REVISION: u32 = 1;
+
+/// CUDA build identity and independently versioned host contracts.
+/// Both plan schemas require a matching FP16 encoding revision. Schema 2 also
+/// compares CUDA build fields exactly. The host tactic revision remains optional
+/// only for plans that do not control a tactic requiring that separate contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackendBuildFingerprint {
@@ -75,8 +82,42 @@ pub struct BackendBuildFingerprint {
     pub cutlass_commit: String,
     pub compiled_sm: Vec<String>,
     pub capabilities: BackendCapabilities,
+    /// Optional for parsing old archives, mandatory when installing any plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fp16_encoding_revision: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_tactic_revision: Option<u32>,
+    /// Runtime library identity, required by version-specific Lt presets.
+    /// Its omission is independent of the mandatory FP16 encoding contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cublaslt_version: Option<u64>,
+}
+
+pub(crate) const RESIDUAL_ALGO_KEY: &str = "KATAGO_CUDA_RESIDUAL_ALGO";
+pub(crate) const TF3_RESIDUAL_PRESET: &str = "tf3_5070ti_r1";
+pub(crate) const TF3_RESIDUAL_CUBLASLT_VERSION: u64 = 130600;
+
+/// This preset was measured only on this GPU and library. A matching heuristic
+/// index on a different target is not evidence of the same algorithm.
+pub(crate) fn validate_tf3_residual_target(
+    device: &DeviceFingerprint,
+    cublaslt_version: Option<u64>,
+) -> Result<(), String> {
+    if cublaslt_version != Some(TF3_RESIDUAL_CUBLASLT_VERSION) {
+        return Err(format!(
+            "{RESIDUAL_ALGO_KEY}={TF3_RESIDUAL_PRESET} requires cuBLASLt {TF3_RESIDUAL_CUBLASLT_VERSION}, actual {cublaslt_version:?}"
+        ));
+    }
+    if device.gpu_name != "NVIDIA GeForce RTX 5070 Ti"
+        || device.compute_capability != "12.0"
+        || device.sm_count != 70
+        || device.l2_cache_bytes != 50331648
+    {
+        return Err(format!(
+            "{RESIDUAL_ALGO_KEY}={TF3_RESIDUAL_PRESET} requires RTX 5070 Ti SM120 (70 SM, 50331648-byte L2), actual {device:?}"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +168,43 @@ pub fn tactic_var(key: &str) -> Result<String, std::env::VarError> {
     std::env::var(key)
 }
 
+fn residual_preset_value(value: Option<&str>) -> Result<bool, String> {
+    match value {
+        None | Some("heuristic") => Ok(false),
+        Some(TF3_RESIDUAL_PRESET) => Ok(true),
+        Some(value) => Err(format!("invalid value '{value}' for {RESIDUAL_ALGO_KEY}")),
+    }
+}
+
+fn validate_residual_plan_override(
+    requested: bool,
+    installed_overrides: Option<&HashMap<String, String>>,
+) -> Result<(), String> {
+    if requested
+        && let Some(overrides) = installed_overrides
+        && overrides.get(RESIDUAL_ALGO_KEY).map(String::as_str) != Some(TF3_RESIDUAL_PRESET)
+    {
+        return Err(format!(
+            "{RESIDUAL_ALGO_KEY}={TF3_RESIDUAL_PRESET} must be explicitly bound by the installed plan; an environment override cannot add an unbound library-specific preset"
+        ));
+    }
+    Ok(())
+}
+
+/// Keep normal plan > environment precedence, but do not let an old plan's
+/// omission smuggle an unversioned new preset in through the environment.
+pub(crate) fn residual_preset_requested() -> Result<bool, String> {
+    let value = tactic_var(RESIDUAL_ALGO_KEY).ok();
+    let requested = residual_preset_value(value.as_deref())?;
+    validate_residual_plan_override(requested, INSTALLED.get().map(|i| &i.overrides))?;
+    if requested && tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() == Ok("0") {
+        return Err(format!(
+            "{RESIDUAL_ALGO_KEY}={TF3_RESIDUAL_PRESET} requires KATAGO_CUDA_CUBLASLT enabled"
+        ));
+    }
+    Ok(requested)
+}
+
 /// Read a boolean tactic using its validated `0|1` value.
 ///
 /// Checking only whether the variable exists makes an explicit `0` enable the
@@ -165,6 +243,7 @@ fn validate_value(key: &str, value: &str) -> Result<(), String> {
         "KATAGO_CUDA_FUSION" => matches!(value, "none" | "up" | "down" | "all"),
         // cuBLASLt 算法选择策略:heuristic=首选(默认),time=top-N 计时重排
         "KATAGO_CUDA_CUBLASLT_RANK" => matches!(value, "heuristic" | "time"),
+        RESIDUAL_ALGO_KEY => matches!(value, "heuristic" | TF3_RESIDUAL_PRESET),
         "KATAGO_CUDA_GEMM_LAYOUT" => {
             matches!(value, "tn" | "nn_k384" | "nn_k384_b8" | "nn_k384_b16")
         }
@@ -211,6 +290,20 @@ pub fn load_and_install(
         validate_value(key, value).map_err(&ctx)?;
     }
     validate_plan_backend(&plan, backend_build).map_err(&ctx)?;
+    // Validate the effective request before installation, including the case
+    // where an old plan omits this key and the environment tries to enable it.
+    let residual_value = plan
+        .apply
+        .tactic_overrides
+        .get(RESIDUAL_ALGO_KEY)
+        .cloned()
+        .or_else(|| tactic_var(RESIDUAL_ALGO_KEY).ok());
+    let residual_requested = residual_preset_value(residual_value.as_deref()).map_err(&ctx)?;
+    validate_residual_plan_override(residual_requested, Some(&plan.apply.tactic_overrides))
+        .map_err(&ctx)?;
+    if residual_requested {
+        validate_tf3_residual_target(device, backend_build.cublaslt_version).map_err(&ctx)?;
+    }
     let t = &plan.target;
     if t.gpu_name != device.gpu_name {
         return Err(ctx(format!(
@@ -246,6 +339,22 @@ pub fn load_and_install(
 }
 
 fn validate_plan_backend(plan: &PlanFile, actual: &BackendBuildFingerprint) -> Result<(), String> {
+    // Weight encoding affects every tactic, including empty/negative overrides.
+    // Check both schemas before legacy build/layout/library checks so an old
+    // archive cannot silently inherit certification under corrected weights.
+    let expected_encoding = plan
+        .backend_build
+        .as_ref()
+        .and_then(|build| build.fp16_encoding_revision)
+        .ok_or_else(|| {
+            "CUDA plan requires backend_build.fp16_encoding_revision; legacy FP16 encoding is not certified for this binary; rerun numerical validation and migrate the plan".to_string()
+        })?;
+    if Some(expected_encoding) != actual.fp16_encoding_revision {
+        return Err(format!(
+            "backend build fp16_encoding_revision mismatch: plan '{:?}' vs actual '{:?}'; rerun numerical validation and migrate the plan",
+            Some(expected_encoding), actual.fp16_encoding_revision
+        ));
+    }
     if plan.schema == 2 {
         let expected = plan
             .backend_build
@@ -275,6 +384,44 @@ fn validate_plan_backend(plan: &PlanFile, actual: &BackendBuildFingerprint) -> R
             "backend build host_tactic_revision mismatch: plan '{expected_revision:?}' vs actual '{:?}'",
             actual.host_tactic_revision
         ));
+    }
+    let expected_library = plan
+        .backend_build
+        .as_ref()
+        .and_then(|build| build.cublaslt_version);
+    if expected_library.is_some() && expected_library != actual.cublaslt_version {
+        return Err(format!(
+            "backend build cublaslt_version mismatch: plan {expected_library:?} vs actual {:?}",
+            actual.cublaslt_version
+        ));
+    }
+    if plan
+        .apply
+        .tactic_overrides
+        .get(RESIDUAL_ALGO_KEY)
+        .map(String::as_str)
+        == Some(TF3_RESIDUAL_PRESET)
+    {
+        let expected_version = expected_library
+            .ok_or_else(|| format!(
+                "plan controls {RESIDUAL_ALGO_KEY}={TF3_RESIDUAL_PRESET} but requires backend_build.cublaslt_version"
+            ))?;
+        if expected_version != TF3_RESIDUAL_CUBLASLT_VERSION {
+            return Err(format!(
+                "{TF3_RESIDUAL_PRESET} requires cuBLASLt {TF3_RESIDUAL_CUBLASLT_VERSION}, plan {expected_version}"
+            ));
+        }
+        if plan
+            .apply
+            .tactic_overrides
+            .get("KATAGO_CUDA_CUBLASLT")
+            .map(String::as_str)
+            == Some("0")
+        {
+            return Err(format!(
+                "{TF3_RESIDUAL_PRESET} requires KATAGO_CUDA_CUBLASLT enabled"
+            ));
+        }
     }
     validate_required_capabilities(&plan.apply.tactic_overrides, actual)
 }
@@ -409,7 +556,9 @@ mod tests {
                 attention_q64: false,
                 attention_q64_serial: false,
             },
+            fp16_encoding_revision: Some(CUDA_FP16_ENCODING_REVISION),
             host_tactic_revision: Some(CUDA_HOST_TACTIC_REVISION),
+            cublaslt_version: Some(TF3_RESIDUAL_CUBLASLT_VERSION),
         }
     }
 
@@ -419,6 +568,7 @@ mod tests {
               "schema": 1,
               "kind": "cuda-tactic-plan",
               "plan_id": "test-plan",
+              "backend_build": {BUILD},
               "target": {{
                 "architecture": "sm_120",
                 "gpu_name": "NVIDIA GeForce RTX 5070 Ti",
@@ -431,6 +581,7 @@ mod tests {
               "apply": {{ "tactic_overrides": {overrides} }}
             }}"#,
             MODEL = "aa".repeat(32),
+            BUILD = serde_json::to_string(&backend_build()).unwrap(),
             overrides = overrides
         )
     }
@@ -451,6 +602,8 @@ mod tests {
         value["schema"] = serde_json::json!(schema);
         if let Some(build) = build {
             value["backend_build"] = serde_json::to_value(build).unwrap();
+        } else {
+            value.as_object_mut().unwrap().remove("backend_build");
         }
         serde_json::from_value(value).unwrap()
     }
@@ -495,6 +648,191 @@ mod tests {
         for value in ["", "nn", "fp16", "NN_K384"] {
             assert!(validate_value("KATAGO_CUDA_GEMM_LAYOUT", value).is_err());
         }
+    }
+
+    #[test]
+    fn residual_algo_accepts_only_registered_presets() {
+        assert!(ALLOWED_TACTIC_KEYS.contains(&RESIDUAL_ALGO_KEY));
+        assert!(!residual_preset_value(None).unwrap());
+        for value in ["heuristic", TF3_RESIDUAL_PRESET] {
+            validate_value(RESIDUAL_ALGO_KEY, value).unwrap();
+            assert_eq!(
+                residual_preset_value(Some(value)).unwrap(),
+                value == TF3_RESIDUAL_PRESET
+            );
+        }
+        for value in ["", "time", "tf3", "1"] {
+            assert!(validate_value(RESIDUAL_ALGO_KEY, value).is_err());
+            assert!(residual_preset_value(Some(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_plans_without_library_version_keep_original_contract() {
+        let actual = backend_build();
+        let mut legacy = actual.clone();
+        legacy.cublaslt_version = None;
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("cublaslt_version")
+                .is_none()
+        );
+        for schema in [1, 2] {
+            for overrides in [
+                "{}",
+                r#"{"KATAGO_CUDA_GEMM_LAYOUT":"nn_k384_b16"}"#,
+                r#"{"KATAGO_CUDA_RESIDUAL_ALGO":"heuristic"}"#,
+            ] {
+                let plan = backend_plan(schema, overrides, Some(&legacy));
+                assert_eq!(plan.backend_build.as_ref().unwrap().cublaslt_version, None);
+                validate_plan_backend(&plan, &actual).unwrap();
+            }
+        }
+        validate_plan_backend(&backend_plan(1, "{}", None), &actual).unwrap();
+        assert_eq!(actual.host_tactic_revision, Some(1));
+        // Only omission preserves the legacy contract; an explicit fingerprint
+        // field must match even if this plan never enables the new preset.
+        let mut other_library = actual.clone();
+        other_library.cublaslt_version = Some(130500);
+        validate_plan_backend(&backend_plan(2, "{}", Some(&legacy)), &other_library).unwrap();
+        for schema in [1, 2] {
+            for overrides in ["{}", r#"{"KATAGO_CUDA_RESIDUAL_ALGO":"heuristic"}"#] {
+                assert!(
+                    validate_plan_backend(
+                        &backend_plan(schema, overrides, Some(&actual)),
+                        &other_library
+                    )
+                    .unwrap_err()
+                    .contains("cublaslt_version mismatch")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn residual_preset_requires_explicit_library_binding_in_both_schemas() {
+        let actual = backend_build();
+        let overrides = r#"{"KATAGO_CUDA_RESIDUAL_ALGO":"tf3_5070ti_r1"}"#;
+        let mut legacy = actual.clone();
+        legacy.cublaslt_version = None;
+        for schema in [1, 2] {
+            let err =
+                validate_plan_backend(&backend_plan(schema, overrides, Some(&legacy)), &actual)
+                    .unwrap_err();
+            assert!(
+                err.contains("requires backend_build.cublaslt_version"),
+                "{err}"
+            );
+            validate_plan_backend(&backend_plan(schema, overrides, Some(&actual)), &actual)
+                .unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_str(&plan_json_v2(overrides, &actual)).unwrap();
+            value["schema"] = serde_json::json!(schema);
+            value["backend_build"]["cublaslt_version"] = serde_json::Value::Null;
+            let plan: PlanFile = serde_json::from_value(value).unwrap();
+            assert!(
+                validate_plan_backend(&plan, &actual)
+                    .unwrap_err()
+                    .contains("requires backend_build.cublaslt_version")
+            );
+        }
+        assert!(
+            validate_plan_backend(&backend_plan(1, overrides, None), &actual)
+                .unwrap_err()
+                .contains("requires backend_build.cublaslt_version")
+        );
+    }
+
+    #[test]
+    fn residual_preset_rejects_mismatched_or_unmeasured_library() {
+        let expected = backend_build();
+        let overrides = r#"{"KATAGO_CUDA_RESIDUAL_ALGO":"tf3_5070ti_r1"}"#;
+        for schema in [1, 2] {
+            let plan = backend_plan(schema, overrides, Some(&expected));
+            for version in [None, Some(130500), Some(130601)] {
+                let mut actual = expected.clone();
+                actual.cublaslt_version = version;
+                assert!(
+                    validate_plan_backend(&plan, &actual)
+                        .unwrap_err()
+                        .contains("cublaslt_version mismatch")
+                );
+            }
+            let mut other = expected.clone();
+            other.cublaslt_version = Some(130500);
+            assert!(
+                validate_plan_backend(&backend_plan(schema, overrides, Some(&other)), &other)
+                    .unwrap_err()
+                    .contains("requires cuBLASLt 130600")
+            );
+            let disabled =
+                r#"{"KATAGO_CUDA_RESIDUAL_ALGO":"tf3_5070ti_r1","KATAGO_CUDA_CUBLASLT":"0"}"#;
+            assert!(
+                validate_plan_backend(&backend_plan(schema, disabled, Some(&expected)), &expected)
+                    .unwrap_err()
+                    .contains("requires KATAGO_CUDA_CUBLASLT enabled")
+            );
+        }
+    }
+
+    #[test]
+    fn residual_preset_rejects_other_gpu_or_device_attributes() {
+        let actual = DeviceFingerprint {
+            sm_count: 70,
+            ..device()
+        };
+        validate_tf3_residual_target(&actual, Some(TF3_RESIDUAL_CUBLASLT_VERSION)).unwrap();
+        for other in [
+            DeviceFingerprint {
+                gpu_name: "NVIDIA GeForce RTX 5080".into(),
+                ..actual.clone()
+            },
+            DeviceFingerprint {
+                compute_capability: "12.1".into(),
+                ..actual.clone()
+            },
+            DeviceFingerprint {
+                sm_count: 84,
+                ..actual.clone()
+            },
+            DeviceFingerprint {
+                l2_cache_bytes: 67108864,
+                ..actual.clone()
+            },
+        ] {
+            assert!(
+                validate_tf3_residual_target(&other, Some(TF3_RESIDUAL_CUBLASLT_VERSION))
+                    .unwrap_err()
+                    .contains("requires RTX 5070 Ti")
+            );
+        }
+        for version in [None, Some(130500)] {
+            assert!(
+                validate_tf3_residual_target(&actual, version)
+                    .unwrap_err()
+                    .contains("requires cuBLASLt 130600")
+            );
+        }
+    }
+
+    #[test]
+    fn environment_cannot_enable_unbound_preset_under_old_plan() {
+        let empty = HashMap::new();
+        validate_residual_plan_override(false, Some(&empty)).unwrap();
+        // A standalone environment experiment still validates actual runtime
+        // target and algorithm identity; a certified plan must record the key.
+        validate_residual_plan_override(true, None).unwrap();
+        assert!(
+            validate_residual_plan_override(true, Some(&empty))
+                .unwrap_err()
+                .contains("explicitly bound")
+        );
+        let enabled = HashMap::from([(RESIDUAL_ALGO_KEY.into(), TF3_RESIDUAL_PRESET.into())]);
+        validate_residual_plan_override(true, Some(&enabled)).unwrap();
+        let disabled = HashMap::from([(RESIDUAL_ALGO_KEY.into(), "heuristic".into())]);
+        validate_residual_plan_override(false, Some(&disabled)).unwrap();
+        assert!(validate_residual_plan_override(true, Some(&disabled)).is_err());
     }
 
     #[test]

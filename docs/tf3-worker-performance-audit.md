@@ -402,6 +402,125 @@ G0 的旧 WSL 二进制 hash 和 49.14% 参考保持原样，不能用这里的�
 
 该 profile 已完成下面的最终 plan 对拍与覆盖验证；独立名称保留其负载适用范围。
 
+### 主机函数缓存：对拍通过，性能门未过，已撤回
+
+独立候选曾将 `CudaRuntime::get_func` 的成功查找缓存为 `CudaFunction`，
+不改变 kernel、精度、算法或 tactic。C32 与双线程配置各通过 128 局全字段
+数值门；C32 的 128 个完整输出与改动前完全一致，graph 回归也通过。
+这些正确性证据不代表有性能收益。
+
+首次 `function-cache-forward-abba` 的旧版两轮为 561.86 / 507.49，
+相差 10.71%，已标为 `UNSTABLE_DIAGNOSTIC_ONLY`；紧接的
+`function-cache-worker-throughput-abba` 旧版为 593.28 / 1134.62，
+因此该报告的 +36.38% 比值也只作诊断，不能采纳。脚本正常路径确实等待
+子进程结束，日志时间表明两组顺序执行；未发现本轮进程泄漏证据，异常原因
+尚未确定，不能把猜测的 GPU 竞争写成已证实原因。初轮 C32 候选也有 4.53%
+重复波动，未据此裁决。
+
+确认没有其他引擎进程、GPU 空闲后，以新目录完整重跑，未挑选初轮样本：
+
+| 口径 | 旧版几何平均 | 缓存候选几何平均 | 相对变化 |
+|---|---:|---:|---:|
+| WSL B14/S2、空盘、CUDA event 中位数求和 | 1108.920 | 1100.384 | −0.770% |
+| Windows uncached C64、B16、双线程 Worker RPC/s | 1142.174 | 1133.523 | −0.757% |
+
+证据分别为 `function-cache-forward-abba-r2/report.json` 和
+`function-cache-worker-throughput-abba-r2/report.json`，均位于
+`target/fork-parity-20260908`。前向两组重复 spread 为 1.98% / 2.34%；
+Worker 为 0.22% / 0.60%，均过预先固定的 5% 稳定门，但没有超过 1% 收益门。
+故撤回缓存的三处代码改动，保留 G1 布局及 plan 生命周期修复。
+拒绝候选的源码和 Windows/WSL 二进制分别保存为
+`function-cache-candidate-cuda.rs`、`rust-function-cache-rejected.exe`、
+`rust-function-cache-rejected-wsl`，保留复核能力。
+
+回退后 Windows/WSL release 均重新构建成功；
+`numeric-function-cache-reverted/comparison.json` 全字段 PASS、top-1 128/128。
+测试期间外部新增提交 `eb1093f` 包含当时仍待性能裁决的缓存候选，本轮未改写
+提交历史，只在当前工作区撤回该候选。新 binary 身份受构建版本信息影响，
+不把新 hash 回填到旧测量记录。
+
+`scripts/benchmark_workers.py` 已增加预先固定的双样本及 5% 稳定门：工作负载
+`status=PASS` 与 `performance_status` 分开，异常比值仅保留
+`diagnostic_only_*` 字段；原报告禁止覆盖。11 项 CPU 回归覆盖本次 593/1134
+异常、单样本、阈值边界与旧证据保护，见 `worker-performance-gate-tests.log`。
+
+这说明静态统计的重复 `cuModuleGetFunction` 调用不能直接推导整网收益。
+描述符缓存也暂不据源码数量采纳；下一候选优先测 Fork 分块在 TF3 实际
+残差形状上的效果，继续使用 FP32 累加、FP32 残差及输出。
+
+### TF3 残差分块：独立算子有候选，尚未进入生产
+
+新增 `scripts/b4_residual_probe/tf3_residual_bench.cu`，保留旧 ONNX 探针。
+新探针覆盖原生 TF3 的 N384、K1152（FFN down）/K384（outproj），
+M5054（B14）/M5776（B16）；CUTLASS 输入/权重 half，累加、epilogue、
+残差 C=D 均 FP32，alpha=beta=1，直接使用原 TN 权重。Fork 的 half 残差
+模板未直接搬入。Lt 基线保持生产 TN、FP32 compute/scale/output、32 MiB
+workspace 和 heuristic 首选；描述符及 CUTLASS Params 均在计时前准备。
+
+`tf3-residual-report.json`（同一证据根目录）使用预热 100、迭代 1000、
+每 tile 三轮完整 ABBA。4 个形状 × 3 个 tile 均通过全输出对 Lt 与 256 点
+FP64 oracle，固定误差门 `5e-5 + 5e-5*abs(reference)`，随后才计时。
+三个 tile 中，128×64×32 / warp64×32 / s3 的结果如下：
+
+| 形状 | 生产 Lt 微秒/次 | CUTLASS 微秒/次 | 算子吞吐变化 |
+|---|---:|---:|---:|
+| FFN down B14 | 60.24 | 60.04 | +0.33% |
+| FFN down B16 | 65.88 | 60.30 | +9.26% |
+| outproj B14 | 22.77 | 24.79 | −8.16% |
+| outproj B16 | 29.02 | 25.09 | +15.67% |
+
+这是 CUDA event 整段耗时除以迭代数的独立算子数据，不是 G0 的逐前向
+event 中位数，也不是整网或 Worker 收益；B16 outproj 的 TN 结果不覆盖
+G1 C32 profile 的 NN 布局。全部 tile/重复数据保留，未只报告最快轮。
+
+同次单轮 top-8 诊断发现 Lt 的其他候选接近上述 B16 分块速度，且 B14
+FFN down 也存在更快候选。因此优先对预先固定的 Lt 候选做完整配对复测，
+再决定是否需要新增 host kernel；单轮 top-8 数据没有替换生产 heuristic。
+当前未启用新 residual tactic，未改写 kernel 指纹或迁移认证 plan。
+
+固定 Lt 候选的后续证据为 `tf3-residual-lt-abba-report.json`：候选名单在
+复测前由前次诊断固定，不重新挑选；预热 100、迭代 1000、三轮 ABBA，
+三形状全输出及 FP64 点检查均 PASS，重复稳定。
+B14 FFN down 的 filtered index 1 为 60.28→54.34 微秒（+10.92%），
+B16 FFN down 的 index 3 为 66.08→61.88（+6.78%），
+B16 outproj 的 index 2 为 29.08→24.91（+16.73%）。这些仍是 TN、beta=1
+独立算子收益，下一步需绑定库版本/算法身份，并做整网与 Worker 验证。
+
+### FP16 舍入缺陷：已确认，生产修复与重新认证待完成
+
+strict RoPE 的新增逐位门揭示 CPU `f32_to_f16_bits` 次正规分支多右移一位，
+且未正确执行 ties-to-even。例如 `2^-24` 应为 half `0x0001` 却得到零，
+`2^-15` 应为 `0x0200` 却得到 `0x0100`。这不是新的 GPU 算法误差；
+同一函数也用于生产 TN/NN/DualFFN 的权重打包。
+
+纯 CPU 按原 TF3 文法与 SHA 解析真实模型至 EOF：265 个将上传为 half 的
+源矩阵共 70,361,856 个元素，其中 713,115 个位模式错误（1.0134966%），
+涉及 263 个矩阵，最大旧/正确 half 差为 `3.0517578125e-5`；82 个值本应
+舍入至最小正规 half。计数未重复包含 NN 副本或 padding。受影响样本由
+NumPy FP16 与 Python `struct '<e'` 交叉核验；证据目录为
+`target/fork-parity-20260908/fp16-conversion-audit`。
+
+此时只修正了 probe 的独立 CPU 舍入参考，生产转换仍待单独修复，不能
+把旧模型数值门直接视为修复后的认证。后续必须同时处理 plan 的全局数值
+契约：CUDA kernel hash 不覆盖 Rust 权重编码，且目前可选 host revision
+允许部分旧 plan 缺失版本。修复需拒绝未重新验证的旧编码计划，完成 TF3、
+ONNX 及相关负载检查后再迁移；不能静默重用旧 PASS 或旧性能结论。
+
+### 剖析计时修复
+
+`KATAGO_CUDA_PROFILE=1` 原先让 Attention 子段与外层共用事件，重录子段
+起点会覆盖整层起点，导致层表及其总计低估。现已为层/子段分配独立事件对，
+日志延后到采样完成；新增 FFN up/SwiGLU 与 down 子段。非 profiling 及
+graph capture 不分配这些事件，算子与精度边界保持原样。
+
+`check_profile_events.py` 对实际三次前向验证：原日志有 98 处层表/子段
+不一致；修复后每次 180 层、33 Attention + 33 FFN 子段，全部父层时间
+不小于其子段总和（考虑打印舍入）。证据为 `profile-events-before-check.json`
+及 `profile-events-after-check.json`；Windows/WSL release 构建及
+`numeric-profile-events/comparison.json` 的 128/128 整网数值门通过。
+剖析模式含逐段同步和主机提交开销，修复后的约 25 ms 层时间总和也不能
+替代无插桩的 G0/Worker 吞吐，或与旧错误总计计算性能变化。
+
 ### G2/G4：已完成的检查与尚未完成的验收
 
 - **G2 现成 FA4 参考**：Fork B14/tn96 的 FP32 MMA AOT 已用于独立 opt-in

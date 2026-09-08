@@ -4,6 +4,7 @@
 //! Run with KATAGO_RUN_FORK_FA4_PROBE=1 and --features cuda --release --nocapture.
 //! KATAGO_FORK_FA4_VARIANT=original (default) uses fa4-reference; `strict` uses
 //! target/fork-parity-20260908/fa4-strict-reference-r2 with its own device ABI.
+//! `strict-rope` uses fa4-strict-rope-smem with raw QKV and cached FP32 cos/sin.
 //! KATAGO_FORK_FA4_DIR may override the selected artifact directory.
 //! KATAGO_FORK_FA4_ITERATIONS defaults to 100; KATAGO_FORK_FA4_CASES to 3.
 //! The copied artifact directories contain source, licenses, hashes and offline
@@ -37,11 +38,14 @@ const ORIGINAL_KERNEL: &str = "kernel_cutlass_kernel_flash_attncuteflash_fwd_sm1
 const STRICT_CUBIN_SHA256: &str =
     "90341b6d5c54a69e983a7e7d8b62956748785ad44c3e4e1b2734b92f3da46749";
 const STRICT_KERNEL: &str = "kernel_cutlass_kernel_strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__tensorptrf16gmemalign16o3613212141152132415872_tensorptrf16gmemalign16o3613212141152132415872_tensorptrf1_0";
+const STRICT_ROPE_CUBIN_SHA256: &str =
+    "0af1b2cf4b03e96baa1af2e9987f9b87842c87665006c739f1d02267d4c27464";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fa4Variant {
     Original,
     Strict,
+    StrictRope,
 }
 
 impl Fa4Variant {
@@ -50,7 +54,10 @@ impl Fa4Variant {
             Err(std::env::VarError::NotPresent) => Self::Original,
             Ok(value) if value == "original" => Self::Original,
             Ok(value) if value == "strict" => Self::Strict,
-            other => panic!("KATAGO_FORK_FA4_VARIANT must be original or strict: {other:?}"),
+            Ok(value) if value == "strict-rope" => Self::StrictRope,
+            other => {
+                panic!("KATAGO_FORK_FA4_VARIANT must be original, strict or strict-rope: {other:?}")
+            }
         }
     }
 
@@ -58,6 +65,7 @@ impl Fa4Variant {
         match self {
             Self::Original => "original",
             Self::Strict => "strict",
+            Self::StrictRope => "strict-rope",
         }
     }
 
@@ -65,6 +73,7 @@ impl Fa4Variant {
         match self {
             Self::Original => "fa4-reference",
             Self::Strict => "fa4-strict-reference-r2",
+            Self::StrictRope => "fa4-strict-rope-smem",
         }
     }
 
@@ -72,13 +81,16 @@ impl Fa4Variant {
         match self {
             Self::Original => ORIGINAL_CUBIN_SHA256,
             Self::Strict => STRICT_CUBIN_SHA256,
+            Self::StrictRope => STRICT_ROPE_CUBIN_SHA256,
         }
     }
 
     fn kernel(self) -> &'static str {
         match self {
             Self::Original => ORIGINAL_KERNEL,
-            Self::Strict => STRICT_KERNEL,
+            // Truncated generated symbols collide; the distinct CUBIN hash is
+            // mandatory because the strict-rope device ABI has two extra args.
+            Self::Strict | Self::StrictRope => STRICT_KERNEL,
         }
     }
 
@@ -86,6 +98,7 @@ impl Fa4Variant {
         match self {
             Self::Original => "fa4-b14-s361-h12-d32-tm128-tn96-s1-fp32",
             Self::Strict => "fa4-strict-r2-b14-s361-h12-d32-tm128-tn96-s1-fp32",
+            Self::StrictRope => "fa4-strict-rope-smem-b14-s361-h12-d32-tm128-tn96-s1-fp32",
         }
     }
 
@@ -96,6 +109,13 @@ impl Fa4Variant {
             Self::Strict => json!({"parameterBytes":[8,8,8,8,4,12],
                 "scale":"natural FP32 scale, no LOG2_E conversion",
                 "evidence":"probe-abi-manifest.json; r2 PTX/header/MLIR/host-object disassembly"}),
+            Self::StrictRope => json!({"parameterBytes":[8,8,8,8,8,8,4,12],
+                "parameters":["rawQ","rawK","V","O","cos","sin","naturalScale","fastDivmodOne"],
+                "scale":"natural FP32 scale, no LOG2_E conversion",
+                "ropeCacheShape":[S,H,D/2],"ropeCacheStrides":[H*D/2,D/2,1],
+                "ropeCacheType":"FP32, shared across batch, same allocation as Rust attention",
+                "registersPerThread":255,"staticSharedMemoryBytes":1024,"stackBytes":24,
+                "evidence":"probe-abi-manifest.json; strict-rope PTX/header/host-object disassembly"}),
         }
     }
 }
@@ -164,6 +184,8 @@ fn launch_fork(
     output: u64,
     scale: f32,
     variant: Fa4Variant,
+    cos: u64,
+    sin: u64,
 ) {
     if variant == Fa4Variant::Original {
         return launch_fork_original(stream, f, input, output, scale);
@@ -176,6 +198,29 @@ fn launch_fork(
     let k = input + (C * 2) as u64;
     let v = input + (C * 4) as u64;
     let fast_divmod_one = [1u32, 1, 0];
+    if variant == Fa4Variant::StrictRope {
+        // Static export: Q,K,V,O,cos,sin pointers; natural f32 scale; scheduler.
+        // Host .o 0x3c0..0x514 supplies these eight arguments in this order.
+        unsafe {
+            stream
+                .launch_builder(f)
+                .arg(&input)
+                .arg(&k)
+                .arg(&v)
+                .arg(&output)
+                .arg(&cos)
+                .arg(&sin)
+                .arg(&scale)
+                .arg(&fast_divmod_one)
+                .launch(LaunchConfig {
+                    grid_dim: (3, H as u32, B as u32),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 20480,
+                })
+                .expect("strict shared-memory RoPE FA4 Driver launch");
+        }
+        return;
+    }
     unsafe {
         stream
             .launch_builder(f)
@@ -280,6 +325,144 @@ extern "C" __global__ void probe_reference(
     }
 }
 "#;
+
+// Only appended for strict-rope. This independent helper exposes the contracted
+// FP32-to-half boundary for a complete CPU half-bit check without modifying AOT.
+// The AOT's internal shared memory is not observable here: its instruction audit
+// and final attention reference gate remain separately required.
+const STRICT_ROPE_REFERENCE_SOURCE: &str = r#"
+extern "C" __global__ void probe_rope_contract(
+    const unsigned short* x, const float* co, const float* sn, unsigned short* y) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= 14 * 361 * 192) return;
+    int row=i/192, pair=i%192, r=(row%361)*192+pair;
+    int offset=row*1152+pair*2;
+    float c=co[r], s=sn[r];
+    #pragma unroll
+    for(int qk=0;qk<2;qk++) {
+        int p=offset+qk*384;
+        float a=h2f(x[p]), b=h2f(x[p+1]), ac, bs, as, u, v;
+        asm("mul.rn.f32 %0, %1, %2;" : "=f"(ac) : "f"(a), "f"(c));
+        asm("mul.rn.f32 %0, %1, %2;" : "=f"(bs) : "f"(b), "f"(s));
+        asm("mul.rn.f32 %0, %1, %2;" : "=f"(as) : "f"(a), "f"(s));
+        asm("sub.rn.f32 %0, %1, %2;" : "=f"(u) : "f"(ac), "f"(bs));
+        asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(v) : "f"(b), "f"(c), "f"(as));
+        y[p]=f2h(u); y[p+1]=f2h(v);
+    }
+    y[offset+768]=x[offset+768]; y[offset+769]=x[offset+769];
+}
+"#;
+
+// Independent test oracle. Do not use the production f32_to_f16_bits here:
+// its subnormal branch shifts the significand twice (cuda.rs:1095-1096),
+// approximately halving values below 2^-14. Production/input generation stay
+// unchanged in this diagnostic; this function fixes only the new boundary oracle.
+fn reference_half_rne(x: f32) -> u16 {
+    let bits = x.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent_bits = (bits >> 23) & 0xff;
+    let fraction = bits & 0x7fffff;
+    if exponent_bits == 0xff {
+        return sign | if fraction == 0 { 0x7c00 } else { 0x7e00 };
+    }
+    let exponent = exponent_bits as i32 - 127;
+    if exponent < -25 {
+        return sign;
+    }
+    if exponent > 15 {
+        return sign | 0x7c00;
+    }
+    let significand = fraction | 0x800000;
+    let shift = if exponent < -14 { -exponent - 1 } else { 13 } as u32;
+    let quotient = significand >> shift;
+    let remainder = significand & ((1u32 << shift) - 1);
+    let midpoint = 1u32 << (shift - 1);
+    let rounded =
+        quotient + u32::from(remainder > midpoint || (remainder == midpoint && quotient & 1 != 0));
+    let magnitude = if exponent < -14 {
+        rounded
+    } else {
+        // Including the implicit bit allows rounding carry to propagate into
+        // the exponent, including the finite-to-infinity boundary.
+        (((exponent + 14) as u32) << 10) + rounded
+    };
+    sign | magnitude as u16
+}
+
+fn verify_half_rounding_oracle() {
+    // Exhaust every finite half value and each adjacent finite-half midpoint,
+    // checking the midpoint's two neighboring FP32 values and both signs.
+    for low in 0u16..=0x7bff {
+        let value = f16_to_f32_bits(low);
+        assert_eq!(reference_half_rne(value), low);
+        assert_eq!(reference_half_rne(-value), low | 0x8000);
+        if low < 0x7bff {
+            let high = f16_to_f32_bits(low + 1);
+            let middle = ((value as f64 + high as f64) * 0.5) as f32;
+            let expected_tie = if low & 1 == 0 { low } else { low + 1 };
+            for (v, expected) in [
+                (f32::from_bits(middle.to_bits() - 1), low),
+                (middle, expected_tie),
+                (f32::from_bits(middle.to_bits() + 1), low + 1),
+            ] {
+                assert_eq!(reference_half_rne(v), expected);
+                assert_eq!(reference_half_rne(-v), expected | 0x8000);
+            }
+        }
+    }
+    for (value, expected) in [
+        (65519.0, 0x7bff),
+        (65520.0, 0x7c00),
+        (f32::INFINITY, 0x7c00),
+    ] {
+        assert_eq!(reference_half_rne(value), expected);
+        assert_eq!(reference_half_rne(-value), expected | 0x8000);
+    }
+    assert_eq!(reference_half_rne(f32::NAN) & 0x7fff, 0x7e00);
+}
+
+fn verify_rotation_half_cpu(input: &[u16], cos: &[f32], sin: &[f32], rotated: &[u16]) -> Value {
+    assert_eq!(input.len(), 3 * N);
+    assert_eq!(rotated.len(), input.len());
+    let mut qk_mismatches = 0usize;
+    let mut v_mismatches = 0usize;
+    let mut first_mismatch = None;
+    for row in 0..B * S {
+        for pair in 0..C / 2 {
+            let cache = (row % S) * (C / 2) + pair;
+            let offset = row * 3 * C + pair * 2;
+            for qk in 0..2 {
+                let p = offset + qk * C;
+                let a = f16_to_f32_bits(input[p]);
+                let b = f16_to_f32_bits(input[p + 1]);
+                // Rust FP operations keep separate products; only mul_add fuses.
+                let ac = a * cos[cache];
+                let bs = b * sin[cache];
+                let a_sin = a * sin[cache];
+                let expected = [
+                    reference_half_rne(ac - bs),
+                    reference_half_rne(b.mul_add(cos[cache], a_sin)),
+                ];
+                for d in 0..2 {
+                    if rotated[p + d] != expected[d] {
+                        qk_mismatches += 1;
+                        first_mismatch.get_or_insert(json!({"element":p+d,
+                            "expectedHalfBits":expected[d],"actualHalfBits":rotated[p+d]}));
+                    }
+                }
+            }
+            for d in 0..2 {
+                let p = offset + 2 * C + d;
+                v_mismatches += usize::from(input[p] != rotated[p]);
+            }
+        }
+    }
+    json!({"scope":"independent GPU helper vs CPU FP32/RNE contract; AOT internal shared memory is not dumped",
+        "halfOracle":"test-local IEEE RNE; exhaustive finite-half roundtrip and midpoint-neighbor self-check",
+        "qkHalfElements":2*N,"qkHalfBitMismatches":qk_mismatches,
+        "vElements":N,"vCopyBitMismatches":v_mismatches,"firstMismatch":first_mismatch,
+        "pass":qk_mismatches==0 && v_mismatches==0})
+}
 
 fn measure(
     device: &Arc<CudaContext>,
@@ -392,6 +575,9 @@ fn fork_fa4_fp32_attention_probe() {
         return;
     }
     let variant = Fa4Variant::from_env();
+    if variant == Fa4Variant::StrictRope {
+        verify_half_rounding_oracle();
+    }
     let directory = std::env::var_os("KATAGO_FORK_FA4_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -452,11 +638,16 @@ fn fork_fa4_fp32_attention_probe() {
     let q64 = rt
         .get_func("attention_fa2_q64_serial_kernel")
         .expect("q64 serial kernel");
+    let helper_source = if variant == Fa4Variant::StrictRope {
+        format!("{REFERENCE_SOURCE}\n{STRICT_ROPE_REFERENCE_SOURCE}")
+    } else {
+        REFERENCE_SOURCE.to_owned()
+    };
     let helpers = rt
         .device
         .load_module(
             compile_ptx_with_opts(
-                REFERENCE_SOURCE,
+                &helper_source,
                 CompileOptions {
                     arch: Some("compute_120"),
                     fmad: Some(true),
@@ -471,7 +662,11 @@ fn fork_fa4_fp32_attention_probe() {
         )
         .expect("load reference module");
     let rope = helpers
-        .load_function("probe_rope")
+        .load_function(if variant == Fa4Variant::StrictRope {
+            "probe_rope_contract"
+        } else {
+            "probe_rope"
+        })
         .expect("standalone RoPE");
     let reference_function = helpers
         .load_function("probe_reference")
@@ -523,6 +718,11 @@ fn fork_fa4_fp32_attention_probe() {
         let (q64_ptr, _) = d_q64.device_ptr_mut(&stream);
         let (fa4_ptr, _) = d_fa4.device_ptr_mut(&stream);
         let (reference_ptr, _) = d_reference.device_ptr_mut(&stream);
+        let candidate_input = if variant == Fa4Variant::StrictRope {
+            input_ptr
+        } else {
+            rotated_ptr
+        };
         stream.synchronize().expect("uploads complete");
         let launch_rope = || unsafe {
             stream
@@ -534,6 +734,8 @@ fn fork_fa4_fp32_attention_probe() {
                 .launch(LaunchConfig::for_num_elems((B * S * H * 16) as u32))
                 .expect("RoPE launch");
         };
+        // Needed once to form the independent reference. Strict-rope candidate
+        // launches always read raw input and never invoke this standalone helper.
         launch_rope();
         unsafe {
             stream
@@ -554,10 +756,24 @@ fn fork_fa4_fp32_attention_probe() {
         launch_rust(
             &stream, &q64, input_ptr, cos_ptr, sin_ptr, q64_ptr, scale, 64, 128,
         );
-        launch_fork(&stream, &fa4, rotated_ptr, fa4_ptr, scale, variant);
+        launch_fork(
+            &stream,
+            &fa4,
+            candidate_input,
+            fa4_ptr,
+            scale,
+            variant,
+            cos_ptr,
+            sin_ptr,
+        );
         stream.synchronize().expect("correctness kernels complete");
         let reference = stream.clone_dtoh(&d_reference).expect("reference download");
         let rotated = stream.clone_dtoh(&d_rotated).expect("RoPE download");
+        let rotation_boundary = if variant == Fa4Variant::StrictRope {
+            verify_rotation_half_cpu(&input, &cos, &sin, &rotated)
+        } else {
+            Value::Null
+        };
         verify_reference_cpu(&rotated, &reference, scale);
         let out128 = stream.clone_dtoh(&d_q128).expect("q128 download");
         let out64 = stream.clone_dtoh(&d_q64).expect("q64 download");
@@ -567,9 +783,12 @@ fn fork_fa4_fp32_attention_probe() {
             serial_mismatches, 0,
             "established q128/q64 serial bitwise gate"
         );
-        let numerical = json!({"q128":compare_half(&reference,&out128),
+        let mut numerical = json!({"q128":compare_half(&reference,&out128),
             "q64serial":compare_half(&reference,&out64),"forkFa4":compare_half(&reference,&outfa4),
             "forkVsQ128HalfBitMismatches":outfa4.iter().zip(&out128).filter(|(a,b)|a!=b).count()});
+        if variant == Fa4Variant::StrictRope {
+            numerical["rotationHalfBoundary"] = rotation_boundary.clone();
+        }
         println!(
             "FA4_NUMERIC variant={} seed={seed} amplitude={amplitude} {numerical}",
             variant.name()
@@ -579,18 +798,33 @@ fn fork_fa4_fp32_attention_probe() {
         let numeric_guards_pass = ["q128", "q64serial", "forkFa4"].iter().all(|name| {
             numerical[*name]["maxAbs"].as_f64().unwrap() <= 0.005
                 && numerical[*name]["rmse"].as_f64().unwrap() <= 0.0005
-        });
+        }) && (variant != Fa4Variant::StrictRope
+            || rotation_boundary["pass"] == true);
         all_numeric_guards_pass &= numeric_guards_pass;
         let mut timings = Vec::new();
         // The first pair exposes the cost difference (Rust includes RoPE).
         // The second pair includes RoPE on both paths and is the fair comparison.
-        for timing_case in [0, 2, 2, 0, 1, 3, 3, 1] {
-            let label = [
-                "rustQ128WithRope",
-                "rustQ64SerialWithRope",
-                "forkFa4PreRotated",
-                "standaloneRopePlusForkFa4",
-            ][timing_case];
+        let timing_order = if variant == Fa4Variant::StrictRope {
+            [0, 2, 2, 0, 1, 2, 2, 1]
+        } else {
+            [0, 2, 2, 0, 1, 3, 3, 1]
+        };
+        for timing_case in timing_order {
+            // Preserve both established variants' diagnostics. Fused candidate
+            // timing includes its internal RoPE, with no external RoPE launch.
+            if variant == Fa4Variant::StrictRope && !numeric_guards_pass {
+                break;
+            }
+            let label = if variant == Fa4Variant::StrictRope && timing_case == 2 {
+                "strictFa4FusedRope"
+            } else {
+                [
+                    "rustQ128WithRope",
+                    "rustQ64SerialWithRope",
+                    "forkFa4PreRotated",
+                    "standaloneRopePlusForkFa4",
+                ][timing_case]
+            };
             let timing = measure(
                 &rt.device,
                 &stream,
@@ -603,10 +837,28 @@ fn fork_fa4_fp32_attention_probe() {
                     1 => launch_rust(
                         &stream, &q64, input_ptr, cos_ptr, sin_ptr, q64_ptr, scale, 64, 128,
                     ),
-                    2 => launch_fork(&stream, &fa4, rotated_ptr, fa4_ptr, scale, variant),
+                    2 => launch_fork(
+                        &stream,
+                        &fa4,
+                        candidate_input,
+                        fa4_ptr,
+                        scale,
+                        variant,
+                        cos_ptr,
+                        sin_ptr,
+                    ),
                     _ => {
                         launch_rope();
-                        launch_fork(&stream, &fa4, rotated_ptr, fa4_ptr, scale, variant);
+                        launch_fork(
+                            &stream,
+                            &fa4,
+                            rotated_ptr,
+                            fa4_ptr,
+                            scale,
+                            variant,
+                            cos_ptr,
+                            sin_ptr,
+                        );
                     }
                 },
             );
