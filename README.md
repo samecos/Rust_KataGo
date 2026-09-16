@@ -1,5 +1,7 @@
 # Rust_KataGo
 
+**本机使用入口（2026-09-16）**：[RustGo 使用指南](docs/RustGo使用指南.md)包含可直接复制的 Worker/GTP 命令和配置选择。本轮 Fork 对标优化已按用户确认结项，详见[结项记录](docs/RustGo性能优化结项记录.md)。当前认证高吞吐 Worker 为 1574.82 uncached RPC/s；持续 C64 请显式选择 `worker_tf3_sm120_throughput.cfg` 和 capacity 64，启动脚本默认仍是日常配置。
+
 KataGo 围棋引擎的 Rust 移植，基于 KataGo-Lite/`katago-rs`，并包含面向 NVIDIA CUDA 的手写推理后端。项目当前的主要使用方式是运行 `katago-rs`，通过 GTP 接入 Sabaki、Lizzie、KaTrain 等 GUI，或通过 JSON-lines 分析协议供脚本和服务调用。
 
 项目的实现边界很明确：棋盘、规则、搜索、GTP、分析协议和模型推理链路已经在 workspace 中组织完成；CUDA/TensorRT 是可选后端，默认构建不依赖 GPU，方便先跑协议和回归测试。

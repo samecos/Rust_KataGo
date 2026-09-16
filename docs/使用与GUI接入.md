@@ -1,5 +1,7 @@
 # Rust_KataGo 使用与 GUI 接入说明
 
+> 更新说明（2026-09-16）：本文保留 `b11fix.onnx` 的 GTP 用法和历史性能数据。原生 TF3 与 Go Server Worker 请看[使用指南](RustGo使用指南.md)；本轮优化已[结项](RustGo性能优化结项记录.md)，无需为正常使用重跑性能测试。
+
 > 2026-08-19。适用二进制：`target/release/katago-rs.exe`（`--features cuda`，release）。
 > 模型：`D:/code/b11fix.onnx`。硬件：RTX 5070 Ti（SM120，70 SM）。
 
@@ -19,7 +21,7 @@ nnMaxBatchSize = 16
   `python scripts/autotune.py --threads both` 重新认证，或临时删掉该行退回
   代码默认 tactic（q128，性能不同）。
 - `nnMaxBatchSize=16`：实测 B16 之后每行成本转劣，线程再多也别放大。
-- 不带 `cudaTacticPlan` 也完全可用：所有 tactic 默认值就是认证结果。
+- 不带 `cudaTacticPlan` 会使用内置默认 tactic，并不等于认证组合，也不能继承认证性能。TF3 不能使用本页的 ONNX plan。
 
 线程数按用途选（实测 v=1500，认证 plan）：
 
@@ -39,16 +41,19 @@ nnMaxBatchSize = 16
 （eval B16 W64：1112 vs 单流 1016。注意仅限饱和供数——GTP 对局等搜索
 语境**不要**用：双流在搜索是负收益甚至灾难性回退。）
 
-**WSL 部署**：同硬件 Linux 口径比 Windows 再 +2~5%（搜索 +4.6%），测量
-也稳定得多；环境一键脚本 `scripts/wsl_setup.sh`，基准 `scripts/wsl_bench.sh`。
+**WSL 部署**：旧ONNX版本曾记录与Windows不同的性能；不能据此推断当前TF3组合在WSL更快。Windows/WSL需要各自匹配的计划与构建身份。`scripts/wsl_setup.sh` 等脚本保留为部署参考，本轮不继续测试WSL。
 
 ## 2. 启动命令
 
+```powershell
+Set-Location D:/code/Rust_KataGo
+.\target\release\katago-rs.exe gtp `
+  --config configs/gtp_cuda.cfg `
+  --model D:/code/b11fix.onnx `
+  --override-config virtualLossUtilityBlend=1.0
 ```
-D:/code/Rust_KataGo/target/release/katago-rs.exe gtp ^
-  -config D:/code/Rust_KataGo/configs/gtp_cuda.cfg ^
-  -model D:/code/b11fix.onnx
-```
+
+现有 `gtp_cuda.cfg` 文件末尾保留 `virtualLossUtilityBlend=0.0` 实验设置；上例显式覆盖为1.0，使用本文下方说明的标准搜索行为，不改变认证NN计划。
 
 **分析命令为流式输出**（2026-08-16 起，对齐官方 KataGo 语义）：
 `lz-analyze`/`kata-analyze` 带 interval（厘秒）时，info 行按 interval 持续
@@ -65,10 +70,10 @@ GUI 里的胜率曲线与领地热图实时变化。不带 interval 则保留一
 
 1. 引擎设置 → 添加引擎：
    - 路径：`D:/code/Rust_KataGo/target/release/katago-rs.exe`
-   - 参数：`gtp --config D:/code/Rust_KataGo/configs/gtp_cuda.cfg --model D:/code/b11fix.onnx`
+   - 参数：`gtp --config D:/code/Rust_KataGo/configs/gtp_cuda.cfg --model D:/code/b11fix.onnx --override-config virtualLossUtilityBlend=1.0`
 2. 附加命令（可选）：`boardsize 19`、`komi 7.5`。
 3. 对局直接开；分析模式用引擎的 analyze（Sabaki 发 `kata-analyze`，
-   本实现支持，一次性输出一帧）。
+   本实现支持；带interval时持续输出直到stop或下一条命令）。
 
 ### KaTrain（陪练/教学）
 

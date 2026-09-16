@@ -1,0 +1,248 @@
+{
+  "schema": 1,
+  "status": "CPU_SOURCE_AUDIT_PASS_NOT_BUILT_NOT_GPU_VALIDATED_NOT_CERTIFIED",
+  "registered_utc": "2026-09-08T16:00:59.332780+00:00",
+  "candidate_id": "strict-r2-exact-linear-rope-no-vcopy-b14-r1",
+  "registered_before_build_and_measurement_by_preparer": true,
+  "single_factor": "Remove V copy from exact linear RoPE and point unchanged AOT V to original input; no batch unroll",
+  "baseline_manifest": {
+    "path": "old-source-manifest.json",
+    "sha256": "a78ab8a0ab8fce483f4d5811f8bf0b3623587bb7fdfaaf9003ba09f5a3bd012b"
+  },
+  "control": {
+    "helper": "probe_rope_contract",
+    "source_constant": "STRICT_ROPE_REFERENCE_SOURCE",
+    "copies_v": true
+  },
+  "candidate": {
+    "source_constant": "LINEAR_NO_VCOPY_ROPE_SOURCE",
+    "batch": 14,
+    "sequence": 361,
+    "heads": 12,
+    "head_dim": 32,
+    "threads_per_block": 1024,
+    "grid": [
+      948,
+      1,
+      1
+    ],
+    "block": [
+      1024,
+      1,
+      1
+    ],
+    "logical_threads": 970368,
+    "same_linear_thread_geometry_as_control": true,
+    "batch_unroll": false,
+    "packed_row_stride_half_elements": 1152,
+    "qk_scratch_layout_unchanged": true,
+    "candidate_helper_writes": [
+      "Q",
+      "K"
+    ],
+    "candidate_helper_reads": [
+      "input Q",
+      "input K",
+      "FP32 cached cos",
+      "FP32 cached sin"
+    ],
+    "v_scratch_sentinel_half_bits": 32309,
+    "v_copy_removed_half_elements": 1940736,
+    "raw_v_offset_half_elements": 768,
+    "raw_v_offset_bytes": 1536,
+    "raw_v_pointer_formula": "input_ptr + 1536 bytes",
+    "q_pointer_formula": "candidate_scratch_ptr",
+    "k_pointer_formula": "candidate_scratch_ptr + 768 bytes",
+    "v_pointer_formula": "original_input_ptr + 1536 bytes",
+    "exact_arithmetic": "Original explicit FP32 mul/sub/FMA and half RN; source body only loses the two V assignments",
+    "physical_threads": 970752,
+    "tail_threads_guarded_before_memory_access": 384
+  },
+  "aot": {
+    "cubin_path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fa4-strict-reference-r2\\cutlass___call___strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__FakeTensorFloat161436112324158721152321_FakeTensorFloat161436112324158721152321_FakeTensorFloat16143611.sm_120.cubin",
+    "cubin_sha256": "90341b6d5c54a69e983a7e7d8b62956748785ad44c3e4e1b2734b92f3da46749",
+    "abi_manifest_path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fa4-strict-reference-r2\\probe-abi-manifest.json",
+    "abi_manifest_sha256": "5e2a14a27c195f55f96b79dee2424d8429751bc7e4e2b84093d63b421b0cbc6e",
+    "device_abi": {
+      "kernel": "kernel_cutlass_kernel_strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__tensorptrf16gmemalign16o3613212141152132415872_tensorptrf16gmemalign16o3613212141152132415872_tensorptrf1_0",
+      "parameter_names": [
+        "Q pointer",
+        "K pointer",
+        "V pointer",
+        "O pointer",
+        "natural softmax scale",
+        "fast_divmod divisor 1"
+      ],
+      "parameter_bytes": [
+        8,
+        8,
+        8,
+        8,
+        4,
+        12
+      ],
+      "parameter_alignments": [
+        8,
+        8,
+        8,
+        8,
+        4,
+        4
+      ],
+      "parameter_5_bytes_hex": "010000000100000000000000",
+      "parameter_5_padding": "Last two bytes are host padding, explicitly zeroed by Rust; PTX does not load parameter 5",
+      "scale": "Natural FP32 qk_scale*qk_scale; never multiply by LOG2_E",
+      "grid": [
+        3,
+        12,
+        14
+      ],
+      "block": [
+        128,
+        1,
+        1
+      ],
+      "dynamic_shared_memory_bytes": 20480,
+      "qkv_shape_bshd": [
+        14,
+        361,
+        12,
+        32
+      ],
+      "qkv_stride_elements": [
+        415872,
+        1152,
+        32,
+        1
+      ],
+      "output_stride_elements": [
+        138624,
+        384,
+        32,
+        1
+      ],
+      "qkv_pointer_offsets_bytes": [
+        0,
+        768,
+        1536
+      ],
+      "runtime_shape_stride_arguments": false
+    },
+    "unchanged_binary_and_parameter_layout": true
+  },
+  "numeric_gates": {
+    "amplitudes": [
+      0.5,
+      2.0,
+      6.0
+    ],
+    "all_seeds_before_any_timing": true,
+    "qk_half_elements_per_seed": 3881472,
+    "input_half_elements_per_seed": 5822208,
+    "v_half_elements_per_seed": 1940736,
+    "attention_output_half_elements_per_seed": 1940736,
+    "control_qk_cpu_rne_mismatches": 0,
+    "candidate_qk_cpu_rne_mismatches": 0,
+    "candidate_scratch_v_sentinel_mismatches": 0,
+    "original_input_any_half_mismatches": 0,
+    "raw_v_vs_control_v_half_mismatches": 0,
+    "candidate_vs_control_aot_output_half_mismatches": 0,
+    "q128_vs_q64_half_mismatches": 0,
+    "attention_reference_outputs": [
+      "q128",
+      "q64serial",
+      "fa4Control",
+      "fa4Candidate"
+    ],
+    "attention_max_abs_limit": 0.005,
+    "attention_rmse_limit": 0.0005,
+    "post_timing_per_seed": {
+      "original_input_sha256_unchanged": true,
+      "all_scratch_v_sentinels_unchanged": true,
+      "outside_timed_events": true
+    }
+  },
+  "timing_registration": {
+    "phase_order": [
+      "A",
+      "B",
+      "B",
+      "A"
+    ],
+    "groups": {
+      "helper_only": {
+        "A": "exact linear helper with V copy",
+        "B": "exact linear helper without V copy"
+      },
+      "same_fa4_core": {
+        "A": "exact linear helper + strict r2 copied QKV",
+        "B": "no-V-copy helper + same strict r2 scratch QK/raw V"
+      },
+      "candidate_vs_q64": {
+        "A": "q64-serial including RoPE",
+        "B": "no-V-copy helper + strict r2 scratch QK/raw V"
+      }
+    },
+    "warmup_iterations_per_phase": 32,
+    "minimum_timed_iterations_per_phase": 200,
+    "phase_metric": "cudaEventMedianMs",
+    "phase_median_definition": "median of sorted per-iteration CUDA event durations; mean of middle two for even N",
+    "arm_aggregation": "geometric_mean_of_two_phase_medians",
+    "throughput_gain_formula": "A_geomean_latency/B_geomean_latency - 1",
+    "relative_spread_formula": "max(two_phase_medians)/min(two_phase_medians)-1",
+    "maximum_arm_relative_spread": 0.05,
+    "minimum_gain": 0.01,
+    "all_seeds_and_groups_retained_separately": true,
+    "helper_only_is_diagnostic": true,
+    "event_mean_and_wall_mean_are_diagnostic_only": true,
+    "raw_samples_field": "cudaEventSamplesMs",
+    "raw_samples_order": "original event enqueue order",
+    "raw_samples_preserved_before_sort": true
+  },
+  "probe": {
+    "test": "fork_fa4_no_vcopy_rope_probe",
+    "environment": {
+      "KATAGO_RUN_FORK_FA4_PROBE": "1",
+      "KATAGO_FORK_FA4_VARIANT": "strict",
+      "KATAGO_FORK_ROPE_LAYOUT": "linear-no-vcopy",
+      "KATAGO_FORK_FA4_CASES": "3",
+      "KATAGO_FORK_FA4_ITERATIONS": "200",
+      "KATAGO_FORK_ROPE_REPORT_DIR": "<fresh directory>"
+    },
+    "old_two_tests_unchanged": true
+  },
+  "gates": {
+    "cpu_source_index_check": {
+      "status": "PASS",
+      "path": "cpu-source-check-r1.json",
+      "sha256": "8d4f57e6adf31e6746489cbbeaf0eca10e5bdd612a83a4d81f31ca0a6124971d",
+      "source_sha256": "6b4fd1ba35649fea285f621c95f01be55fa054ce17f090b01e4b240351197bec"
+    },
+    "compiled_instruction_audit": "NOT_RUN",
+    "numeric": "NOT_RUN",
+    "performance": "NOT_RUN",
+    "whole_model": "NOT_RUN",
+    "worker": "NOT_RUN"
+  },
+  "preparer_actions": {
+    "source_edits": false,
+    "build": false,
+    "gpu": false,
+    "production_changes": false,
+    "plan_changes": false
+  },
+  "production_eligible": false,
+  "linear_launch_source": {
+    "path": "C:\\Users\\Administrator\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\cudarc-0.19.9\\src\\driver\\safe\\launch.rs",
+    "sha256": "21fbbef76b123b27fdb2eac67d7cd161d81058a37e0484394e8a3871ddfdb9ff",
+    "line": 31,
+    "function": "LaunchConfig::for_num_elems",
+    "actual": "NUM_THREADS=1024, grid=n.div_ceil(NUM_THREADS)"
+  },
+  "geometry_corrected_before_build_and_measurement_utc": "2026-09-08T16:04:35.762424+00:00",
+  "preparation_updated_utc": "2026-09-08T16:07:50.465787+00:00",
+  "pre_cpu_registered_contract": {
+    "path": "experiment-contract-registered-before-cpu.json",
+    "sha256": "3315dfe8951b09d879ce332fa042db66008a60b6491c11ce7d193ffa0dc2826d"
+  }
+}

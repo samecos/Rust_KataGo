@@ -1,0 +1,1 @@
+{"status":"EXPORTED_EXACT_CUTLASS_PARAMS_CPU_ONLY","gpu_used":false,"parameter_size":400,"parameter_alignment":8,"pointer_offsets":{"input":64,"weight":112,"source":208,"output":304,"cos":288,"sin":296},"shape":[5054,1152,384],"grid":[40,9,1],"threads":128,"shared_bytes":49152,"alpha":1,"beta":0}

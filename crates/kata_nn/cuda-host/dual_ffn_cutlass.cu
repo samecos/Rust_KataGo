@@ -257,3 +257,36 @@ extern "C" int katago_dual_ffn_probe() {
   (void)cudaGetLastError();
   return result;
 }
+
+// Host-only width plumbing; reuses the exact original DualGemm kernel type.
+struct CompactHandle {
+  std::unordered_map<uint64_t,std::unique_ptr<State>> byShape;
+};
+static uint64_t compact_key(int tokens,int hidden) {
+  return (uint64_t(uint32_t(tokens))<<32)|uint32_t(hidden);
+}
+extern "C" void* katago_compact_ffn_create(){return new(std::nothrow) CompactHandle();}
+extern "C" void katago_compact_ffn_destroy(void* p){delete static_cast<CompactHandle*>(p);}
+extern "C" int katago_compact_ffn_exec(void* opaque,const void* input,const void* gate,const void* up,void* output,int tokens,int hidden,uintptr_t stream){
+  if(!opaque||!input||!gate||!up||!output||tokens<=0||tokens>5776||hidden<16||hidden>1152||hidden%16)return 1;
+  auto* handle=static_cast<CompactHandle*>(opaque);
+  auto& slot=handle->byShape[compact_key(tokens,hidden)];
+  if(!slot)slot=std::make_unique<State>();
+  DualGemm::TensorRefC nc;DualGemm::TensorRefD nd;
+  DualGemm::Arguments args{cutlass::gemm::DualGemmMode::kGemm,{tokens,hidden,kChannels},
+    {reinterpret_cast<const Element*>(input),Layout(kChannels)},
+    {reinterpret_cast<const Element*>(gate),LayoutB(kChannels)},nc,nd,
+    {reinterpret_cast<const Element*>(up),LayoutB(kChannels)},nc,nd,
+    {reinterpret_cast<Element*>(output),Layout(hidden)},{1.0f},{1.0f},{},1};
+  cutlass::Status status;
+  if(!slot->initialized){
+    status=slot->op.can_implement(args);if(status!=cutlass::Status::kSuccess)return statusCode(status);
+    if(DualGemm::get_workspace_size(args)!=0)return 50;
+    status=slot->op.initialize(args,nullptr,reinterpret_cast<cudaStream_t>(stream));
+    if(status!=cutlass::Status::kSuccess)return statusCode(status);slot->initialized=true;
+  }else{
+    status=slot->op.update(args,nullptr);if(status!=cutlass::Status::kSuccess)return statusCode(status);
+  }
+  status=slot->op.run(reinterpret_cast<cudaStream_t>(stream));if(status!=cutlass::Status::kSuccess)return statusCode(status);
+  auto result=cudaPeekAtLastError();return result==cudaSuccess?0:200+int(result);
+}

@@ -1,0 +1,42 @@
+{
+  "status": "ARCHIVED_LEGACY_NOT_CERTIFIED_FOR_FP16_ENCODING_R1",
+  "originals": {
+    "onnx-q128-win": {
+      "filename": "best-tactic-plan-sm120-q128-windows.json",
+      "old_sha256": "fd4f317c7668f258f30dd03cd854a7566dc994ec08d261a17cbba9f18f5d7ef1",
+      "active": "D:\\code\\Rust_KataGo\\plans\\best-tactic-plan-sm120-q128-windows.json"
+    },
+    "onnx-q64-win": {
+      "filename": "best-tactic-plan-sm120-q64-windows.json",
+      "old_sha256": "fe9b0db6236f5d7e10ac694764a287ef65d69e971fd785335975177ed9640d40",
+      "active": "D:\\code\\Rust_KataGo\\plans\\best-tactic-plan-sm120-q64-windows.json"
+    },
+    "onnx-default-win": {
+      "filename": "best-tactic-plan.json",
+      "old_sha256": "fe9b0db6236f5d7e10ac694764a287ef65d69e971fd785335975177ed9640d40",
+      "active": "D:\\code\\Rust_KataGo\\plans\\best-tactic-plan.json"
+    },
+    "onnx-q64-wsl": {
+      "filename": "best-tactic-plan-sm120-q64-wsl.json",
+      "old_sha256": "a7d4e6e2f282d45a626f3528409f460cbceff5dae84b8c028e235857617bd1c2",
+      "active": "D:\\code\\Rust_KataGo\\plans\\best-tactic-plan-sm120-q64-wsl.json"
+    },
+    "default": {
+      "filename": "worker-tf3-sm120.json",
+      "old_sha256": "1e48c332df5f631afae6144aa092d2ce5c295ff5945407d6ad6a20cff53b5c99",
+      "active": "D:\\code\\Rust_KataGo\\plans\\worker-tf3-sm120.json"
+    },
+    "throughput": {
+      "filename": "worker-tf3-sm120-throughput.json",
+      "old_sha256": "2836165c08294718885709ccc0b7c342f02e3605934935c7b294e9a4c3500406",
+      "active": "D:\\code\\Rust_KataGo\\plans\\worker-tf3-sm120-throughput.json"
+    },
+    "c32": {
+      "filename": "worker-tf3-sm120-c32.json",
+      "old_sha256": "e90a2b6b532bf3c0f1f8710fe3b3e7ad54f80f8cadfccfed8da481a75a013c81",
+      "active": "D:\\code\\Rust_KataGo\\plans\\worker-tf3-sm120-c32.json"
+    }
+  },
+  "legacy_encoder_note": "Known incorrect host FP16 subnormal encoder. Old numerical/performance records remain evidence for their recorded old binary only.",
+  "installed_utc": "2026-09-08T15:08:18.405808+00:00"
+}

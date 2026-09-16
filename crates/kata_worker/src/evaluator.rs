@@ -573,6 +573,10 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
 }
 
 #[cfg(test)]
+#[path = "input_fixture_export.rs"]
+mod input_fixture_export;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

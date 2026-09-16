@@ -1,6 +1,8 @@
 # TF3 权重适配、调优与 Go Server Worker 部署
 
-核对日期：2026-09-08。依据本地 Rust_KataGo `eb1093fd983cfcd284a81567d41a50239cc1a933` 及整理期间工作区的更新，与后端 `D:/Go/Server` 的 `e42b218` 代码。本文面向负责后端接入和 GPU Worker 部署的同事；命令以本机 Windows PowerShell 为例。
+> 部署说明更新至 2026-09-16。本轮优化已结项；直接启动请看[使用指南](RustGo使用指南.md)，交付身份与结果见[结项记录](RustGo性能优化结项记录.md)。第5、6节保留为今后修改模型/环境时的维护参考，不是本机首次使用前需要重新执行的测试。
+
+历史适配内容初次核对：2026-09-08，依据本地 Rust_KataGo `eb1093fd983cfcd284a81567d41a50239cc1a933` 及整理期间工作区的更新，与后端 `D:/Go/Server` 的 `e42b218` 代码。本文面向负责后端接入和 GPU Worker 部署的同事；命令以本机 Windows PowerShell 为例。
 
 ## 1. 先看结论
 
@@ -53,23 +55,30 @@ flowchart LR
 | 当前本机、同一 TF3 文件、构建指纹匹配，先接后端 | 直接用默认 `worker_tf3_sm120.cfg`，不需要重跑调优 |
 | 换机器或重新构建，plan 指纹不匹配 | 用 `worker_cuda.cfg` 跑通并验收；需要恢复优化性能时，对新环境重新验证、调优并生成独立 plan |
 | 同环境换成另一份兼容 TF3 权重 | 更新实际模型身份，完成 C++ FP32 对拍；旧 plan 不可直接复用，需要新模型的性能证据 |
-| 请求长期维持 C32 或 C64 | 选择下表对应配置，在真实目标负载复测；capacity 参数本身不会产生足够的请求 |
+| 请求长期维持 C32 或 C64 | 按下表选择对应的已认证配置；capacity 参数本身不会产生足够的请求 |
 | 修改 kernel、布局、attention、精度或启用未验收 tactic | 先过相应数值门，再做 ABBA；慢于基线则回退，不通过修改容差或 plan 身份绕过验收 |
 
 普通启动不会自动执行离线 autotune。不配置 `cudaTacticPlan` 时使用内置 tactic 默认值；模型上传、算子准备和 graph warmup 属于初始化，不等于完成了负载调优。Worker 不运行 MCTS，因此 GTP `genconfig` / 搜索线程调优不能替代 Worker 调优。
 
 ### 3.2 仓库现有配置
 
-以下均使用 `nnMaxBatchSize = 16`。C 表示在途请求数，B 表示一次实际物理 batch，两者不同。
+基础、低并发及 C32 配置使用 `nnMaxBatchSize = 16`；Windows C64 吞吐配置现为 14。C 表示在途请求数，B 表示一次实际物理 batch，两者不同。
 
 | 场景 | 配置文件（`configs/`） | plan（`plans/`） | NN 服务线程 | 建议 capacity | 特点 |
 | --- | --- | --- | ---: | ---: | --- |
 | 首次部署到未认证环境、基础验证 | `worker_cuda.cfg` | 无 | 默认 1 | 32 | 内置 tactic 默认值 |
 | 日常部署、低并发或负载不确定 | `worker_tf3_sm120.cfg` | `worker-tf3-sm120.json` | 1 | 32 | DualFFN + q64-serial，保留 CUDA Graph；启动脚本默认 |
 | 持续 C32 | `worker_tf3_sm120_c32.cfg` | `worker-tf3-sm120-c32.json` | 1 | 32 | 增加 `nn_k384_b16`；只有实际 B16 及以上启用对应 NN 权重布局 |
-| 持续高并发 C64 | `worker_tf3_sm120_throughput.cfg` | `worker-tf3-sm120-throughput.json` | 2 | 64 | DualFFN + q64-serial，关闭 CUDA Graph |
+| Windows 持续高并发 C64 | `worker_tf3_sm120_throughput.cfg` | `worker-tf3-sm120-throughput.json` | 2 | 64 | B14上限；strict Attention、只读QKV/RoPE、QKV N128、既有half全零FFN通道压缩、输出投影N128；其他批次使用已验证回退路径，关闭CUDA Graph |
 
-C32 配置的同 binary、同负载 ABBA 记录为 1073.48 → 1093.68 uncached RPC/s（+1.88%）；这是持续 C32 的结果，不是低并发的普遍升级。双线程配置在另一组 C64 实测约 1163.8 NN rows/s，低并发可能因拆散 batch 而更慢；不同轮次的数字不能直接当作两套配置的严格对照。详细条件与历史证据见 [TF3 Worker 性能审计](tf3-worker-performance-audit.md)。
+C32历史ABBA复验为1066.46→1088.63 uncached RPC/s（+2.08%）。当前Windows
+B14/S2/C64认证吞吐为 **1574.822297 uncached RPC/s**（2026-09-16），已经包含
+compact FFN、QKV N128和Attention输出投影N128。最后一项的同CLI配对Worker
+收益为+1.143208%，完整前向共同墙钟+1.456147%；此前compact FFN的+21.77%
+属于另一配对基线，不能相加。FP32累加、精确激活和原数值门不变。
+最新额外FFN down NN布局未采纳，正式计划保持；日常及C32配置仍使用各自
+策略，Windows新组合不宣称已在WSL认证。详细条件见
+[TF3 Worker 性能审计](tf3-worker-performance-audit.md)和[结项记录](RustGo性能优化结项记录.md)。
 
 `capacity` 包括排队和已经接纳但仍未收尾的任务；取消不能立即终止 GPU kernel。提高 capacity 不等于提高 `nnMaxBatchSize`，持续 C64/C128 在单线程 B16 下可能只增加排队时间。
 
@@ -84,6 +93,8 @@ C32 配置的同 binary、同负载 ABBA 记录为 1073.48 → 1093.68 uncached 
 ## 4. 本机从编译到接入
 
 ### 4.1 准备模型和 CUDA 构建
+
+本机已有匹配的认证 release 二进制时，直接进入4.2/4.3；不必重新构建或重新认证。下面的构建流程供缺少二进制或以后主动升级时使用。
 
 运行环境需要 Rust/MSVC、CUDA Toolkit/nvcc 和可用驱动；详细安装步骤见 [编译指南](编译指南.md)。复用当前优化 plan 还需匹配 CUTLASS 和 CUDA 构建能力。基础 CUDA 可以没有 CUTLASS，但要求 DualFFN 的认证 plan 会检查能力并拒绝不匹配的构建。
 
@@ -293,11 +304,11 @@ $py = 'D:/Go/Server/worker/.venv-windows/Scripts/python.exe'
 
 当前工作区脚本还分别报告任务 `status` 与 `performance_status`：`PASS` 只代表请求验证通过。可采纳的比较需两侧各至少两轮且 `performance_status = STABLE`；默认重复 spread 门为 5%（`max/min−1`），可在测量前用 `--maximum-relative-spread` 指定。`UNSTABLE_DIAGNOSTIC_ONLY` 或重复不足的报告仅作诊断。每次复测使用新的输出目录，脚本会拒绝覆盖已有 `report.json`。
 
-要测吞吐 profile，将候选换成 `worker_tf3_sm120_throughput.cfg`、并发改成 64、输出目录改名。要对标 C++，使用 `--order cpp,rust,rust,cpp` 并指定 C++ Worker/部署配置；性能对标的 FP16 配置与数值金标的 FP32 配置分开。
+上面的通用脚本要求 B16，不能直接把候选换成新的 B14 throughput 配置。本轮 B16/B14 对照使用单独冻结的 `target/fork-parity-20260908/g2-strict-attention-integration-r1/best-worker-comparison/run.py`，原始协议、配置快照及 ABBA 记录保存在同目录；它绑定本轮证据身份，修改配置时须重新登记实验。对仍使用 B16 的 C++ 比较，可用 `--order cpp,rust,rust,cpp` 并指定 C++ Worker/部署配置；性能对标的 FP16 配置与数值金标的 FP32 配置分开。
 
 新候选至少保留：模型/二进制/配置哈希、设备与 build 指纹、具体负载、路径日志、完整数值报告和 ABBA 各轮结果。现有 C32 plan 的采纳门为 1%；一次最快成绩或底层 GEMM 微基准不足以说明 Worker 收益。最终要用写入的 plan 再跑对拍和路径检查，确保测到的配置就是上线配置。
 
-`nnbench --mode eval` 可作补充 NN 测量；`--mode direct/kernel` 当前不会安装配置文件里的 `cudaTacticPlan`，只适合显式环境和路径检查下的底层诊断。FA4 strict attention、RoPE 融合及 B12–B16/lane/graph 联合调优仍未完成生产验收，不是本文现有部署 profile 的组成部分。
+`nnbench --mode eval` 可作补充 NN 测量；`--mode direct/kernel` 当前不会安装配置文件里的 `cudaTacticPlan`，只适合显式环境和路径检查下的底层诊断。`fa4-strict-b14-r1` 与精确 Q/K RoPE（V 直接读取原缓冲区）已在上述 Windows C64 profile 验收，AOT/ABI 字节指纹必须匹配。其他 batch 的 strict AOT、WSL 新路径和进一步融合仍属独立候选。
 
 ## 7. 常见问题
 
@@ -318,7 +329,7 @@ $py = 'D:/Go/Server/worker/.venv-windows/Scripts/python.exe'
 
 本次执行了双方 CLI `--help`、三项验证/基准脚本 `--help`、原始 TF3 文件 SHA-256 和当前 release `cuda-fingerprint` 检查，并对照代码、三套配置和 plan。当前本机指纹与三套 TF3 plan 的要求相符；两项目的 `worker.proto` 文件完全一致。
 
-本文引用的 128/128 数值结果、C32 +1.88% 和 C64 吞吐来自仓库已有验收记录，**本次文档整理没有重新执行 GPU 对拍、性能基准或启动生产 Server/Worker**。部署到新环境后，按第 5 节用实际二进制和最终配置验收。
+最初的文档整理只核对 CLI、脚本与既有记录；2026-09-09 更新另纳入本轮实测的 FP16 编码修正复验和 strict Attention B14 数值/ABBA/最终安装证据。Worker 检查使用独立本地测试服务，未启动生产 Server。部署到新环境后，按第 5 节用实际二进制和最终配置验收。
 
 | 维护内容 | 入口 |
 | --- | --- |

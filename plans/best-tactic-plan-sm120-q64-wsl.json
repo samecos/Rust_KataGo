@@ -1,18 +1,25 @@
 {
   "schema": 2,
   "kind": "cuda-tactic-plan",
-  "plan_id": "sm120-nvidia-geforce-rtx-5070-ti-q64-wsl-20260819-r1",
-  "generated_utc": "2026-08-19T00:00:00Z",
+  "plan_id": "fp16-rne-r1-revalidated-onnx-q64-wsl-20260908",
+  "generated_utc": "2026-09-08T15:05:45.591715+00:00",
   "backend_build": {
-    "kernel_build_id": "sha256:577e5d952c440b28512c51ee7dac55cee047e3be7d8cba6dd82e188645a1a042",
-    "cuda_compiler": "13.3.73",
-    "cutlass_version": "3.9.2",
-    "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e+dirty.921f2f82c217241bad23658efd85f2dcf44d4da57fde959c3b471426e1c77969",
-    "compiled_sm": ["120", "89"],
     "capabilities": {
-      "dual_ffn": true,
-      "attention_q64": true
-    }
+      "attention_q64": true,
+      "attention_q64_serial": true,
+      "dual_ffn": true
+    },
+    "compiled_sm": [
+      "120",
+      "89"
+    ],
+    "cublaslt_version": 130600,
+    "cuda_compiler": "13.3.73",
+    "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e+dirty.921f2f82c217241bad23658efd85f2dcf44d4da57fde959c3b471426e1c77969",
+    "cutlass_version": "3.9.2",
+    "fp16_encoding_revision": 1,
+    "host_tactic_revision": 1,
+    "kernel_build_id": "sha256:6cc6a22c841c143822dfc975848d983f7e46b27cb83e08a1acc67da4e403cb95"
   },
   "target": {
     "architecture": "sm_120",
@@ -29,9 +36,147 @@
     }
   },
   "selection": {
-    "method": "manual candidate promotion after WSL and Windows ABBA",
-    "min_improvement": 0.01,
-    "attention_core_improvement": 0.147,
-    "windows_and_wsl_validated": true
+    "status": "REVALIDATED_FOR_LISTED_SCOPE",
+    "method": "Fresh whole-model numerical gates plus explicit stable tactic-retention ABBA under corrected FP16 encoding",
+    "fp16_encoding_revision": 1,
+    "historical_selection": "plans\\archive\\fp16-legacy-pre-rne-20260908\\legacy-selection-history.json",
+    "legacy_plan_sha256": "a7d4e6e2f282d45a626f3528409f460cbceff5dae84b8c028e235857617bd1c2",
+    "numerical_evidence": {
+      "contract": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\contract\\report.json",
+        "sha256": "62767aec0e9016cf6a5f522af61b042384854e8186c2643108ee31468f9fec4f"
+      },
+      "ort_fp32": [
+        {
+          "name": "onnx-wsl-q64-b1",
+          "status": "PASS",
+          "positions": 16,
+          "physical_batch": 1,
+          "dump_meta": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\onnx-wsl-q64-b1\\meta.json",
+            "sha256": "60396f0c6c9d04eb9b8e4a9b9085dbe83ec6b622b8143ca551edd1762d8b8daa"
+          },
+          "compare": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\onnx-wsl-q64-b1.compare.log",
+            "sha256": "16e81dca5d0bef83329c1c29d429dc13180a53c4bd4b1b7ec6640b5d8436c317"
+          },
+          "dump": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\onnx-wsl-q64-b1.dump.log",
+            "sha256": "82e84ff36d5c630a704e741dddd64c84b4b1a5fdd3fc75056c88f3e7517a0c6a"
+          },
+          "test_binary": {
+            "path": "D:\\code\\Rust_KataGo\\target\\cudarocmopt-wsl\\release\\deps\\dump_nn_io_cuda-37bfa819f103dd52",
+            "sha256": "1941d00805215c0b705d43799c005b48202cd99ea47192ce37e760f99059e4d1"
+          }
+        },
+        {
+          "name": "onnx-wsl-q64-b16",
+          "status": "PASS",
+          "positions": 16,
+          "physical_batch": 16,
+          "dump_meta": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\onnx-wsl-q64-b16\\meta.json",
+            "sha256": "de32d27de2fc66b75d2a9f31bfe1da0261d06f3cb6089f300454d7dc52edb445"
+          },
+          "compare": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\onnx-wsl-q64-b16.compare.log",
+            "sha256": "1a204c80b98e4edbb1fb5c4b45eb78b0c3c67b8832a9df547514eb5e4b50a184"
+          },
+          "dump": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\onnx-wsl-q64-b16.dump.log",
+            "sha256": "eb3bc5a001826852f1aa9b88166bd2ce1e8cba5a872ac0cbe7a86628b3603d5b"
+          },
+          "test_binary": {
+            "path": "D:\\code\\Rust_KataGo\\target\\cudarocmopt-wsl\\release\\deps\\dump_nn_io_cuda-37bfa819f103dd52",
+            "sha256": "1941d00805215c0b705d43799c005b48202cd99ea47192ce37e760f99059e4d1"
+          }
+        }
+      ],
+      "graphs": [
+        {
+          "platform": "wsl",
+          "tile": "q64",
+          "status": "PASS",
+          "evidence": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\graph-wsl-q64.log",
+            "sha256": "5c67c7388e9f0fd595fc3e444bf8b90504df68939485c4fc5580252e146ab1d8"
+          }
+        }
+      ],
+      "real_staged_plan_loads": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\onnx-plan-loads-r2\\report.json",
+        "sha256": "51cd015adf3adaee9ad2861a92816115499e4a27f1c2cb9d38b083735a600334"
+      }
+    },
+    "retention_recheck": {
+      "q64_wsl": {
+        "status": "PASS",
+        "samples": {
+          "baseline": [
+            1033.5,
+            1026.7
+          ],
+          "candidate": [
+            1063.8,
+            1066.3
+          ]
+        },
+        "baseline_geomean": 1030.0943888790002,
+        "candidate_geomean": 1065.0492664661097,
+        "ratio": 1.0339336646859605,
+        "relative_spread": {
+          "baseline": 0.0066231615856626735,
+          "candidate": 0.0023500658018424936
+        },
+        "maximum_relative_spread": 0.05,
+        "minimum_improvement": 0.01,
+        "source_report": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\onnx-tile-eval-abba\\report.json",
+          "sha256": "d2248774233c39142a269ba5d751ecedc537bd025648123eaebb44a38498d024"
+        },
+        "scope": {
+          "platform": "wsl",
+          "model_sha256": "f2fc09fdf58a3e8a4b97addceab0c853874c52709152e61935b6ac6b9f474f94",
+          "batch": 16,
+          "workers": 32,
+          "metric": "eval NN rows divided by timed wall seconds; includes evaluator/copies, excludes warmup",
+          "baseline": "q128",
+          "candidate": "q64",
+          "caveat": "Evaluator wall throughput rounded to 0.1 NN rows/s; not an attention-core or cross-platform comparison."
+        }
+      }
+    },
+    "retention_role": "candidate retained for the explicitly listed measured scope",
+    "encoding_regression": {
+      "status": "RECORDED_DESCRIPTIVE_ONLY",
+      "correctness_veto": false,
+      "note": "Known incorrect encoding is not an admissible fallback, regardless of speed ratio.",
+      "source_report": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fp16-rne-r1\\encoding-forward-abba\\report.json",
+        "sha256": "1800706f5cca0a02f0a7d71933885c8d12b40163ba63b72916243bbada509737"
+      },
+      "recorded_status": "STABLE",
+      "recorded_performance_status": null,
+      "recorded_summary": {
+        "baseline": {
+          "samples": [
+            1126.3285796210841,
+            1149.2393103594288
+          ],
+          "geomean": 1137.7262764311333,
+          "relative_spread": 0.02034107200409685
+        },
+        "candidate": {
+          "samples": [
+            1133.4695260053095,
+            1125.4993722999707
+          ],
+          "geomean": 1129.4774190040814,
+          "relative_spread": 0.007081437716887962
+        },
+        "candidate_over_baseline_event_ratio": 0.9927496994681996
+      }
+    },
+    "encoding_regression_is_not_a_correctness_veto": true
   }
 }

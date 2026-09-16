@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "status": "PASS",
+  "scope": "CPU_SOURCE_AND_LOGICAL_INDEX_ONLY",
+  "created_utc": "2026-09-08T16:05:54.314514+00:00",
+  "baseline_probe_sha256": "44a7ae4cc0bc2f80f31f59bd8e18db872574a2a92687aa95973d608581b119a3",
+  "self_checks": [
+    "valid_exact_control_minus_v_fixture",
+    "restored_v_write_rejected",
+    "arithmetic_change_rejected",
+    "wrong_row_stride_rejected",
+    "wrong_cache_stride_rejected",
+    "wrong_linear_extent_rejected",
+    "wrong_qk_extent_rejected"
+  ],
+  "coverage": {
+    "grid": [
+      948,
+      1,
+      1
+    ],
+    "block": [
+      1024,
+      1,
+      1
+    ],
+    "logical_threads": 970368,
+    "qk_half_elements_written_once": 3881472,
+    "launched_physical_threads": 970752,
+    "guarded_tail_threads_with_no_memory_access": 384,
+    "v_half_elements_untouched_by_helper": 1940736,
+    "original_input_half_elements": 5822208,
+    "scratch_v_sentinel_half_bits": "0x7e35",
+    "scratch_v_keeps_sentinel_under_checked_source": true,
+    "raw_v_offset_bytes": 1536,
+    "raw_v_indices_equal_control_v_source": true,
+    "qk_scratch_row_stride_half_elements": 1152,
+    "v_global_copy_traffic_removed_bytes": 7762944
+  },
+  "cubin_sha256": "90341b6d5c54a69e983a7e7d8b62956748785ad44c3e4e1b2734b92f3da46749",
+  "build_performed": false,
+  "gpu_performed": false,
+  "production_eligible": false,
+  "candidate_source_checks": {
+    "entry_point": "probe_rope_no_vcopy",
+    "body_equals_control_minus_two_v_copies": true,
+    "candidate_body_token_sha256": "897ac62a82e634265df6784bac655c6df3bfac0a82585b78ddcebeb2904622f4",
+    "unchanged_linear_indexing_and_exact_qk_arithmetic": true,
+    "helper_does_not_read_or_write_v": true
+  },
+  "unchanged_source_constants": [
+    "REFERENCE_SOURCE",
+    "STRICT_ROPE_REFERENCE_SOURCE",
+    "BATCH_UNROLLED_ROPE_SOURCE"
+  ],
+  "unchanged_existing_function_bodies_ignoring_whitespace": [
+    "launch_fork_original",
+    "launch_fork",
+    "launch_rust",
+    "reference_half_rne",
+    "verify_half_rounding_oracle",
+    "verify_rotation_half_cpu",
+    "measure",
+    "compare_half",
+    "verify_reference_cpu",
+    "fork_fa4_fp32_attention_probe",
+    "launch_rope_batch_helper",
+    "run_rope_batch_experiment",
+    "fork_fa4_batch_unrolled_rope_probe"
+  ],
+  "source": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\tests\\probe_fork_fa4.rs",
+  "source_sha256": "6b4fd1ba35649fea285f621c95f01be55fa054ce17f090b01e4b240351197bec",
+  "candidate_constant_sha256": "3ecf5679cca5d1bbc8e0bde513dc11da6eaa34b63f8e7e10a076243b125a21c7",
+  "limitations": [
+    "Source/body equality and logical index audit; not generated instruction or runtime buffer checks.",
+    "Raw-V launch argument source and numeric/timing schedule additionally require read-only host-source review."
+  ],
+  "checker_sha256": "08dd5b2f6570f667fea4997bda130e65191094c5e116d3ea0a60f920c8d9d75a"
+}

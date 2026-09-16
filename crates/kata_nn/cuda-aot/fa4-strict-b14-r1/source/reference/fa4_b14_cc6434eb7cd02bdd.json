@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "candidate_id": "fa4-b14-s361-h12-d32-tm128-tn96-s1-fp32",
+  "batch": 14,
+  "fixed_shape": {
+    "sequence": 361,
+    "heads": 12,
+    "head_dim": 32
+  },
+  "accumulation": {
+    "qk": "fp32",
+    "pv": "fp32"
+  },
+  "tile": {
+    "m": 128,
+    "n": 96,
+    "num_stages": 1
+  },
+  "artifact_stem": "fa4_b14_cc6434eb7cd02bdd",
+  "symbol_prefix": "fa4_b14_cc6434eb7cd02bdd",
+  "fat_symbol_token": "fa4_b14_cc6434eb7cd02bdd",
+  "launch_symbol": "sm120_search_fa4_fat_launch_fa4_b14_cc6434eb7cd02bdd",
+  "python_environment": {
+    "executable": "/root/katagomo-fullflow/.final-migration-env/venv/bin/python",
+    "version": "3.12.13 (main, Aug  7 2026, 02:25:39) [Clang 22.1.3 ]",
+    "distributions": {
+      "flash-attn-4": "0.0.1.dev1+katago",
+      "nvidia-cutlass-dsl": "4.7.0",
+      "quack-kernels": "0.6.4",
+      "torch": "2.13.0"
+    },
+    "module_sources": {
+      "flash_attn.cute.flash_fwd": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_fwd.py",
+        "sha256": "3b97ed4cb20bb867d97fdea7eb03a86ccf32fc4b6f0c8e1ef0302ff1b4728045"
+      },
+      "flash_attn.cute.flash_fwd_sm120": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_fwd_sm120.py",
+        "sha256": "abd017add69914e46f0fcfc017ad51c3d07d79fd87d15f969036ddd82bcc7da2"
+      },
+      "flash_attn.cute.mask": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/mask.py",
+        "sha256": "93f265c7a02295c4b63027fc8c10fe3a371669f579415e2f3a0480d069a6558b"
+      },
+      "flash_attn.cute.softmax": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/softmax.py",
+        "sha256": "3ed1d321d7086615c20b9f930d03d8aecd3759a8d507fccf7bbee8cc391f2198"
+      }
+    }
+  },
+  "sha256": {
+    ".h": "15dcd5c14504fee6e8fa4e8092267216200b6e015b492a4660aaab882b2ade0f",
+    ".o": "4b1941c8be5a8f064d1bb9c8fb5c608d5be9b1af21a3df642c99ac04e1f1189a",
+    "bridge": "ef6c10ccf973bc7240ed7432441935c63e8f80136499f23bb1de870882c9f3e7"
+  },
+  "acceptance_metric": "natural whole-graph S2 total throughput"
+}

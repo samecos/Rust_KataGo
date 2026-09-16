@@ -291,6 +291,11 @@ pub struct CudaModel {
     mid: usize,
     num_heads: usize,
     head_dim: usize,
+    /// Load-time opt-in identity: never load AOT modules in an apply/capture.
+    strict_attention: bool,
+    qkv_immutable: Option<crate::backends::cuda::qkv_immutable::QkvImmutable>,
+    ffn_compact: Option<crate::backends::cuda::ffn_compact::FfnCompact>,
+    outproj_n128: Option<crate::backends::cuda::outproj_n128::OutprojN128>,
     /// B2 dual-FFN(CUTLASS DualGemm)主机句柄;build 无 CUTLASS 时None。
     #[cfg(katago_dualffn)]
     dual_ffn: Option<DualFfnState>,
@@ -395,6 +400,9 @@ static SPLITK_REPORT: OnceLock<()> = OnceLock::new();
 static FUSION_MODE_REPORT: OnceLock<()> = OnceLock::new();
 static RMS_V1_REPORT: OnceLock<()> = OnceLock::new();
 static RMS_W4_REPORT: OnceLock<()> = OnceLock::new();
+static STEM_FLAT_REPORT: OnceLock<()> = OnceLock::new();
+static GATE_ROWQUAD_REPORT: [OnceLock<()>; 16] = [const { OnceLock::new() }; 16];
+static STEM_MAP3D_REPORT: [OnceLock<()>; 16] = [const { OnceLock::new() }; 16];
 pub(crate) static PADBATCH_REPORT: OnceLock<()> = OnceLock::new();
 pub(crate) static CUBLASLT_RANK_TIME_REPORT: OnceLock<()> = OnceLock::new();
 pub(crate) static CUBLASLT_RANK_HEUR_REPORT: OnceLock<()> = OnceLock::new();
@@ -517,10 +525,35 @@ impl CudaModel {
         rt: &CudaRuntime,
         stream: &Arc<CudaStream>,
     ) -> Result<Self, String> {
+        crate::tactic_plan::gate_rowquad_requested()?;
+        let strict_attention = rt.prepare_strict_attention(
+            graph.board_size * graph.board_size,
+            graph.num_heads,
+            graph.head_dim,
+            graph.mid_channels,
+        )?;
+        let qkv_immutable = if crate::tactic_plan::qkv_immutable_requested()? {
+            Some(crate::backends::cuda::qkv_immutable::QkvImmutable::load(&rt.device)?)
+        } else { None };
+        let ffn_compact = if crate::tactic_plan::ffn_compact_requested()? {
+            Some(crate::backends::cuda::ffn_compact::FfnCompact::load(graph, rt)?)
+        } else { None };
+        let outproj_n128 = if crate::tactic_plan::outproj_n128_requested()? { Some(crate::backends::cuda::outproj_n128::OutprojN128::load(graph, &rt.device)?) } else { None };
         let stream = stream.clone();
         let mut layers = Vec::with_capacity(graph.layers.len());
+        let mut ffn_index = 0;
         for layer in &graph.layers {
-            layers.push(upload_layer(&stream, layer)?);
+            if ffn_compact.is_some() && let Layer::Ffn(ffn) = layer {
+                let packed = crate::backends::cuda::ffn_compact::pack(ffn_index, ffn, f32_to_f16_bits)?;
+                layers.push(LayerBuf::Ffn {
+                    dual: upload_compact_half_weight(&stream, &packed.dual, 2 * packed.hidden, 384)?,
+                    down: upload_compact_half_weight(&stream, &packed.down, 384, packed.hidden)?,
+                    hidden: packed.hidden,
+                });
+                ffn_index += 1;
+            } else {
+                layers.push(upload_layer(&stream, layer)?);
+            }
         }
         Ok(Self {
             layers,
@@ -529,6 +562,10 @@ impl CudaModel {
             mid: graph.mid_channels,
             num_heads: graph.num_heads,
             head_dim: graph.head_dim,
+            strict_attention,
+            qkv_immutable,
+            ffn_compact,
+            outproj_n128,
             #[cfg(katago_dualffn)]
             dual_ffn: {
                 // Keep the load stream's handle as the readiness probe and
@@ -547,6 +584,8 @@ impl CudaModel {
             },
         })
     }
+
+    pub(crate) fn ffn_compact_enabled(&self) -> bool { self.ffn_compact.is_some() }
 
     pub fn num_layers(&self) -> usize {
         self.layers.len()
@@ -575,8 +614,28 @@ impl CudaModel {
         spatial: &CudaSlice<f32>,
         global: &CudaSlice<f32>,
     ) -> Result<(), String> {
+        if crate::tactic_plan::strict_attention_requested()? != self.strict_attention {
+            return Err(
+                "strict attention selection changed after model preparation; reload the model"
+                    .into(),
+            );
+        }
+        if crate::tactic_plan::qkv_immutable_requested()? != self.qkv_immutable.is_some() { return Err("QKV epilogue selection changed after model preparation".into()); }
+        if let Some(qkv)=&self.qkv_immutable { qkv.validate_selection()?; }
+        if crate::tactic_plan::outproj_n128_requested()? != self.outproj_n128.is_some() { return Err("outproj N128 selection changed after model preparation".into()); }
+        let strict_attention = if self.strict_attention {
+            if capturing() {
+                return Err("fa4-strict-b14-r1 requires NOGRAPH=1; capture is unsupported".into());
+            }
+            Some(rt.prepared_strict_attention()?)
+        } else {
+            None
+        };
         ACTIVE_STREAM.with(|s| *s.borrow_mut() = Some(stream.clone()));
         let batch = ws.batch;
+        if let Some(qkv) = &self.qkv_immutable { qkv.report_scope(batch); }
+        let strict_b14 =
+            strict_attention.is_some() && crate::backends::cuda::strict_attention::uses_aot(batch)?;
         let s = self.seq_len;
         let m = batch * s;
         let h = self.num_heads;
@@ -847,7 +906,28 @@ impl CudaModel {
                     // v3 回退：f32 GEMM + 独立 rope 拆分 qbuf/kbuf/vbuf。
                     let use_v3 =
                         crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3");
-                    if use_v3 {
+                    if strict_b14 {
+                        // Preserve the QKV GEMM half boundary and the existing
+                        // packed strides. The FFN scratch is idle in Attention;
+                        // only its Q/K slots are written. V stays in act1152.
+                        let strict = strict_attention.expect("prepared strict attention");
+                        if let Some(fused) = &self.qkv_immutable {
+                            if (qkv.n,qkv.k,qkv.kp)!=(1152,384,384) || qkv.nn_data.is_some() { return Err("QKV epilogue requires unpadded TN weights".into()); }
+                            timed!("qkv_rope", fused.launch(&stream,normed,&qkv.data,act1152,cos,sin));
+                            timed!("attn", strict.launch_attention_rotated_packed(&stream,act1152,normed,scale));
+                        } else {
+                        timed!("qkv", hgemm_f16(rt, normed, qkv, act1152, m));
+                        timed!(
+                            "rope",
+                            strict.launch_rope(&stream, act1152, cos, sin, act2304)
+                        );
+                        timed!(
+                            "attn",
+                            strict.launch_attention(&stream, act2304, act1152, normed, scale)
+                        );
+                        }
+                        strict.report_scope(batch);
+                    } else if use_v3 {
                         timed!("qkv", hgemm(rt, normed, qkv, gemm_out, m));
                         timed!(
                             "rope",
@@ -917,6 +997,9 @@ impl CudaModel {
                                 use_q64 && serial_requested,
                             )
                         );
+                        if let Some(strict) = strict_attention {
+                            strict.report_scope(batch);
+                        }
                         if use_q64 && serial_requested {
                             ATTENTION_FA2_Q64_SERIAL_REPORT.get_or_init(|| {
                                 eprintln!(
@@ -946,23 +1029,33 @@ impl CudaModel {
                         );
                         pending_splitk_beta = Some(1.0);
                     } else {
-                        timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
+                        if batch == 14 && let Some(kernel) = &self.outproj_n128 {
+                            if (out.n,out.k,out.kp)!=(384,384,384) || out.nn_data.is_some() { return Err("outproj N128 requires original TN N384/K384 weights".into()); }
+                            timed!("outproj", kernel.launch(&stream, normed, &out.data, act384));
+                        } else {
+                            timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
+                        }
+                        if !capturing() { crate::backends::cuda::outproj_n128::report(batch,self.outproj_n128.is_some()); }
                     }
                     false
                 }
                 LayerBuf::Ffn { dual, down, hidden } => {
                     let hidden = *hidden;
-                    assert_eq!(hidden, 3 * mid, "FFN 隐层维度不符");
+                    if self.ffn_compact.is_some() {
+                        if hidden >= 3 * mid || hidden % 16 != 0 { return Err("compact FFN hidden width mismatch".into()); }
+                    } else { assert_eq!(hidden, 3 * mid, "FFN 隐层维度不符"); }
                     // B2(KATAGO_CUDA_DUALFFN=1):CUTLASS DualGemm + SwiGLU
                     // epilogue 一步出 act1152,省 act2304 往返 + swiglu kernel。
                     // 数值与两 kernel 路径逐位一致(中间 half 舍入在 epilogue
                     // 内复刻)。不可用/未启用时走现有路径。
                     let dual_done = timed!("up_swiglu_unfused", {
                         #[cfg(katago_dualffn)]
-                        let dual_done = match &self.dual_ffn {
+                        let dual_done = if let Some(compact) = &self.ffn_compact {
+                            compact.launch(&active_stream(rt), normed, &dual.data, act1152, m, hidden)?
+                        } else { match &self.dual_ffn {
                             Some(st) => dual_ffn_run(st, rt, normed, dual, act1152, m)?,
                             None => false,
-                        };
+                        } };
                         #[cfg(not(katago_dualffn))]
                         let dual_done = false;
                         if !dual_done {
@@ -1397,6 +1490,13 @@ fn upload_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
 // ---------------------------------------------------------------------------
 // 上传辅助
 // ---------------------------------------------------------------------------
+
+fn upload_compact_half_weight(stream: &StreamRef, host: &[u16], n: usize, k: usize) -> Result<WeightBuf, String> {
+    if k % 16 != 0 || host.len() != n * k { return Err("compact FFN upload shape mismatch".into()); }
+    let mut dev: CudaSlice<u16> = unsafe { stream.alloc(n * k) }.map_err(|e| e.to_string())?;
+    stream.memcpy_htod(host, &mut dev).map_err(|e| e.to_string())?;
+    Ok(WeightBuf { data: dev, nn_data: upload_nn_weights(stream, host, n, k, k)?, n, k, kp: k })
+}
 
 fn upload_weight(stream: &StreamRef, t: &Tensor, n: usize, k: usize) -> Result<WeightBuf, String> {
     let data = match &t.data {
@@ -1972,9 +2072,28 @@ fn conv_bias_gate(
     g: usize,
 ) -> Result<(), String> {
     // 融合版：conv+global 加和 → out f32（残差保留）+ gated f16（silu）。
-    let f = rt.get_func("conv_bias_gate_silu_kernel")?;
+    let map3d = crate::tactic_plan::stem_map3d_requested()?;
+    if map3d && (!(1..=16).contains(&batch) || (s, c, g) != (361, 768, 19)) {
+        return Err(format!(
+            "KATAGO_CUDA_STEM_MAP3D=1 requires B1..16/S361/C768/G19, actual B{batch}/S{s}/C{c}/G{g}"
+        ));
+    }
+    let f = rt.get_func(if map3d {
+        "conv_bias_gate_silu_map3d_kernel"
+    } else {
+        "conv_bias_gate_silu_kernel"
+    })?;
     let stream = active_stream(rt);
     let n = batch * s * c;
+    let launch = if map3d {
+        LaunchConfig {
+            grid_dim: (3, 91, batch as u32),
+            block_dim: (256, 4, 1),
+            shared_mem_bytes: 0,
+        }
+    } else {
+        LaunchConfig::for_num_elems(n as u32)
+    };
     unsafe {
         stream
             .launch_builder(&f)
@@ -1989,13 +2108,40 @@ fn conv_bias_gate(
             .arg(&(s as i32))
             .arg(&(c as i32))
             .arg(&(g as i32))
-            .launch(LaunchConfig::for_num_elems(n as u32))
+            .launch(launch)
     }
     .map_err(|e| format!("conv_bias_gate launch failed: {e}"))?;
+    if map3d {
+        if STEM_MAP3D_REPORT[batch - 1].get().is_none() {
+            report_tactic_once(&STEM_MAP3D_REPORT[batch - 1], &format!(
+                "name=stem_global_map requested=1 launch=map3d effective=1 physical_batch={batch} s=361 c=768 g=19 grid=3x91x{batch} block=256x4x1"
+            ));
+        }
+    } else {
+        report_tactic_once(&STEM_FLAT_REPORT,
+            "name=stem_global_map requested=0 launch=flat effective=0");
+    }
     Ok(())
 }
 
 /// 异位门控 SiLU（f32 入 → f16 出）。
+fn gate_rowquad_batch(n: usize, c: usize) -> Option<usize> {
+    if c != 768 || n == 0 || n % (361 * 768) != 0 { return None; }
+    let batch = n / (361 * 768);
+    (1..=16).contains(&batch).then_some(batch)
+}
+
+#[cfg(test)]
+mod gate_rowquad_tests {
+    #[test]
+    fn shape_requires_complete_c768_rows_and_supported_batches() {
+        for b in 1..=16 { assert_eq!(super::gate_rowquad_batch(b * 361 * 768, 768), Some(b)); }
+        for (n, c) in [(0, 768), (5054 * 768 - 1, 768), (5054 * 384, 384), (17 * 361 * 768, 768)] {
+            assert_eq!(super::gate_rowquad_batch(n, c), None);
+        }
+    }
+}
+
 fn gate_silu_out(
     rt: &CudaRuntime,
     x: &CudaSlice<f32>,
@@ -2005,20 +2151,46 @@ fn gate_silu_out(
     n: usize,
     c: usize,
 ) -> Result<(), String> {
-    let f = rt.get_func("gate_silu_out_f16_kernel")?;
-    let stream = active_stream(rt);
-    unsafe {
-        stream
-            .launch_builder(&f)
-            .arg(x)
-            .arg(scale)
-            .arg(bias)
-            .arg(out)
-            .arg(&(n as i32))
-            .arg(&(c as i32))
-            .launch(LaunchConfig::for_num_elems(n as u32))
+    let requested = crate::tactic_plan::gate_rowquad_requested()?;
+    let batch = gate_rowquad_batch(n, c);
+    if requested && batch.is_none() {
+        return Err(format!("KATAGO_CUDA_GATE_ROWQUAD_R1=1 requires B1..16/S361/C768, actual n={n}, c={c}"));
     }
-    .map_err(|e| format!("gate_silu_out launch failed: {e}"))?;
+    let enabled = requested && batch == Some(14);
+    let stream = active_stream(rt);
+    if enabled {
+        use cudarc::driver::DevicePtr;
+        let aligned = {
+            let (xp, _x) = x.device_ptr(&stream);
+            let (sp, _s) = scale.device_ptr(&stream);
+            let (bp, _b) = bias.device_ptr(&stream);
+            let (op, _o) = out.device_ptr(&stream);
+            [xp, sp, bp].iter().all(|p| *p != 0 && *p % 16 == 0) && op != 0 && op % 8 == 0
+        };
+        if !aligned { return Err("C768 rowquad requires float4 input/parameter and 64-bit output alignment".into()); }
+        let f = rt.get_func("gate_silu_rowquad_c768_kernel")?;
+        unsafe {
+            stream.launch_builder(&f).arg(x).arg(scale).arg(bias).arg(out)
+                .launch(LaunchConfig { grid_dim: ((n / 768) as u32, 1, 1), block_dim: (192, 1, 1), shared_mem_bytes: 0 })
+        }.map_err(|e| format!("gate rowquad launch failed: {e}"))?;
+    } else {
+        let f = rt.get_func("gate_silu_out_f16_kernel")?;
+        unsafe {
+            stream.launch_builder(&f).arg(x).arg(scale).arg(bias).arg(out)
+                .arg(&(n as i32)).arg(&(c as i32)).launch(LaunchConfig::for_num_elems(n as u32))
+        }.map_err(|e| format!("gate_silu_out launch failed: {e}"))?;
+    }
+    if !capturing() {
+        if let Some(batch) = batch {
+            if GATE_ROWQUAD_REPORT[batch - 1].get().is_none() {
+                report_tactic_once(&GATE_ROWQUAD_REPORT[batch - 1], &format!(
+                    "name=gate_rowquad requested={} effective={} launch={} physical_batch={batch} c=768 rows={} block={} reason={}",
+                    u8::from(requested), u8::from(enabled), if enabled { "rowquad" } else { "scalar" }, n / 768,
+                    if enabled { 192 } else { 1024 }, if enabled { "registered-b14" } else if requested { "physical-batch-not-14" } else { "disabled" }
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2820,6 +2992,8 @@ pub struct CudaWorkspace {
     pub normed: CudaSlice<u16>,
     pub act1152: CudaSlice<u16>,
     /// dual FFN 的 gate|up 拼接输出 [M, 2H]（行内 [gate H | up H]）。
+    /// strict B14 attention reuses its first [M,1152] half elements for
+    /// rotated packed Q/K; the unused V slots are never read by that path.
     pub act2304: CudaSlice<u16>,
     pub gemm_out: CudaSlice<f32>,
     pub qbuf: CudaSlice<u16>,

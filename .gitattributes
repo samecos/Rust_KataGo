@@ -1,0 +1,3 @@
+# AOT manifests and runtime fingerprints bind exact bytes, including line endings.
+# Preserve the complete bundled sources, licenses, locks and runtime artifacts.
+crates/kata_nn/cuda-aot/** -text

@@ -1,0 +1,37 @@
+{
+  "schema": 2,
+  "kind": "cuda-tactic-plan",
+  "plan_id": "sm120-nvidia-geforce-rtx-5070-ti-q64-wsl-20260819-r1",
+  "generated_utc": "2026-08-19T00:00:00Z",
+  "backend_build": {
+    "kernel_build_id": "sha256:577e5d952c440b28512c51ee7dac55cee047e3be7d8cba6dd82e188645a1a042",
+    "cuda_compiler": "13.3.73",
+    "cutlass_version": "3.9.2",
+    "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e+dirty.921f2f82c217241bad23658efd85f2dcf44d4da57fde959c3b471426e1c77969",
+    "compiled_sm": ["120", "89"],
+    "capabilities": {
+      "dual_ffn": true,
+      "attention_q64": true
+    }
+  },
+  "target": {
+    "architecture": "sm_120",
+    "gpu_name": "NVIDIA GeForce RTX 5070 Ti",
+    "compute_capability": "12.0",
+    "sm_count": 70,
+    "l2_cache_bytes": 50331648,
+    "model_sha256": "f2fc09fdf58a3e8a4b97addceab0c853874c52709152e61935b6ac6b9f474f94"
+  },
+  "apply": {
+    "tactic_overrides": {
+      "KATAGO_CUDA_DUALFFN": "1",
+      "KATAGO_CUDA_ATTN_TILE": "q64"
+    }
+  },
+  "selection": {
+    "method": "manual candidate promotion after WSL and Windows ABBA",
+    "min_improvement": 0.01,
+    "attention_core_improvement": 0.147,
+    "windows_and_wsl_validated": true
+  }
+}

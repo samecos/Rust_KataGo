@@ -58,6 +58,7 @@ struct Shape { int m, n, k; std::string name; };
 struct Options {
   std::string suite = "tf3", candidates = "cutlass", output;
   int warmup = 10, iterations = 200, rounds = 3;
+  bool metadata_only = false;
 };
 Options parse(int argc, char** argv) {
   Options o;
@@ -65,9 +66,10 @@ Options parse(int argc, char** argv) {
     std::string arg = argv[i];
     if(arg == "--help") {
       std::cout << "tf3_residual_bench [--suite tf3|legacy] [--candidates cutlass|lt|all] [--warmup 10] "
-                   "[--iterations 200] [--rounds 3] [--output report.json]\n";
+                   "[--iterations 200] [--rounds 3] [--metadata-only] [--output report.json]\n";
       std::exit(0);
     }
+    if(arg == "--metadata-only") { o.metadata_only = true; continue; }
     if(i + 1 == argc) throw std::runtime_error("missing value for " + arg);
     std::string value = argv[++i];
     if(arg == "--suite") o.suite = value;
@@ -103,6 +105,58 @@ std::string algorithm_hex(const cublasLtMatmulAlgo_t& algorithm) {
   for(size_t i = 0; i < sizeof(algorithm); ++i)
     result << std::hex << std::setfill('0') << std::setw(2) << unsigned(bytes[i]);
   return result.str();
+}
+// Query only documented API attributes; never decode or mask opaque data[] bits.
+// Keep unsupported attributes visible, including API status and exact byte sizes.
+template<class T, class Getter> std::string attribute_json(const char* type, Getter get) {
+  T value{}; size_t written = 0;
+  auto status = get(&value,sizeof(value),&written);
+  bool success = status == CUBLAS_STATUS_SUCCESS;
+  bool complete = success && written == sizeof(value);
+  std::ostringstream r;
+  r << "{\"status\":" << int(status) << ",\"type\":" << quote(type)
+    << ",\"requested_bytes\":" << sizeof(value) << ",\"written_bytes\":";
+  if(success) r << written; else r << "null";
+  r << ",\"complete\":" << (complete ? "true" : "false") << ",\"value\":";
+  if(complete) r << value; else r << "null";
+  r << '}'; return r.str();
+}
+template<class T> std::string config_attribute(const cublasLtMatmulAlgo_t& algorithm,
+                                              cublasLtMatmulAlgoConfigAttributes_t attr, const char* type) {
+  return attribute_json<T>(type,[&](void* value,size_t size,size_t* written) {
+    return cublasLtMatmulAlgoConfigGetAttribute(&algorithm,attr,value,size,written);
+  });
+}
+template<class T> std::string cap_attribute(const cublasLtMatmulAlgo_t& algorithm,
+                                           cublasLtMatmulAlgoCapAttributes_t attr, const char* type) {
+  return attribute_json<T>(type,[&](void* value,size_t size,size_t* written) {
+    return cublasLtMatmulAlgoCapGetAttribute(&algorithm,attr,value,size,written);
+  });
+}
+std::string runtime_property(libraryPropertyType attr) {
+  int value = 0;
+  auto status = cublasLtGetProperty(attr,&value);
+  std::ostringstream r; r << "{\"status\":" << int(status) << ",\"value\":";
+  if(status == CUBLAS_STATUS_SUCCESS) r << value; else r << "null";
+  r << '}'; return r.str();
+}
+const char* platform_os() {
+#if defined(_WIN32)
+  return "windows";
+#elif defined(__linux__)
+  return "linux";
+#else
+  return "unknown";
+#endif
+}
+const char* platform_arch() {
+#if defined(_M_X64) || defined(__x86_64__)
+  return "x86_64";
+#elif defined(_M_ARM64) || defined(__aarch64__)
+  return "aarch64";
+#else
+  return "unknown";
+#endif
 }
 template<class T> struct DeviceBuffer {
   T* p = nullptr;
@@ -163,6 +217,7 @@ struct Lt {
   cublasLtMatmulPreference_t pref = nullptr;
   DeviceBuffer<unsigned char> workspace{kWorkspace};
   std::vector<cublasLtMatmulHeuristicResult_t> heur;
+  int returned_count = 0;
   explicit Lt(const Shape& s) {
     try {
       lt_check(cublasLtCreate(&handle), "Lt create");
@@ -179,6 +234,7 @@ struct Lt {
       cublasLtMatmulHeuristicResult_t found[8]{};
       int count = 0;
       lt_check(cublasLtMatmulAlgoGetHeuristic(handle,op,a,b,c,c,pref,8,found,&count), "Lt heuristics");
+      returned_count = count;
       // Mirrors cuda.rs: preserve order and filter only by workspace capacity.
       for(int i = 0; i < count; ++i) if(found[i].workspaceSize <= bytes) heur.push_back(found[i]);
       if(heur.empty()) throw std::runtime_error("Lt returned no production-compatible heuristic");
@@ -199,6 +255,52 @@ struct Lt {
         data.dc.p,c,data.dc.p,c,&heur.at(index).algo,workspace.p,kWorkspace,data.stream.p), "Lt matmul");
   }
 };
+std::string heuristic_metadata(Case& d, Lt& lt) {
+  std::ostringstream r; r << std::setprecision(12)
+    << "{\"schema\":1,\"requested_count\":8,\"returned_count\":" << lt.returned_count
+    << ",\"filtered_count\":" << lt.heur.size()
+    << ",\"filter\":\"workspaceSize<=32MiB_preserve_order\",\"candidates\":[";
+  for(size_t i = 0; i < lt.heur.size(); ++i) {
+    if(i) r << ',';
+    const auto& h = lt.heur[i]; const auto& algorithm = h.algo;
+    r << "{\"filtered_index\":" << i << ",\"heuristic_state\":" << int(h.state)
+      << ",\"algorithm_workspace_bytes\":" << h.workspaceSize
+      << ",\"algorithm_bytes_hex\":" << quote(algorithm_hex(algorithm)) << ",\"config\":{";
+#define CONFIG_FIELD(name, type, label) \
+    r << quote(#name) << ':' << config_attribute<type>(algorithm,CUBLASLT_ALGO_CONFIG_##name,label)
+    CONFIG_FIELD(ID,int32_t,"int32_t"); r << ',';
+    CONFIG_FIELD(TILE_ID,uint32_t,"uint32_t"); r << ',';
+    CONFIG_FIELD(SPLITK_NUM,int32_t,"int32_t"); r << ',';
+    CONFIG_FIELD(REDUCTION_SCHEME,uint32_t,"uint32_t"); r << ',';
+    CONFIG_FIELD(CTA_SWIZZLING,uint32_t,"uint32_t"); r << ',';
+    CONFIG_FIELD(CUSTOM_OPTION,uint32_t,"uint32_t"); r << ',';
+    CONFIG_FIELD(STAGES_ID,uint32_t,"uint32_t"); r << ',';
+    CONFIG_FIELD(INNER_SHAPE_ID,uint16_t,"uint16_t"); r << ',';
+    CONFIG_FIELD(CLUSTER_SHAPE_ID,uint16_t,"uint16_t");
+#undef CONFIG_FIELD
+    r << "},\"capabilities\":{";
+#define CAP_FIELD(name, type, label) \
+    r << quote(#name) << ':' << cap_attribute<type>(algorithm,CUBLASLT_ALGO_CAP_##name,label)
+    CAP_FIELD(NUMERICAL_IMPL_FLAGS,uint64_t,"uint64_t"); r << ',';
+    CAP_FIELD(MIN_ALIGNMENT_A_BYTES,uint32_t,"uint32_t"); r << ',';
+    CAP_FIELD(MIN_ALIGNMENT_B_BYTES,uint32_t,"uint32_t"); r << ',';
+    CAP_FIELD(MIN_ALIGNMENT_C_BYTES,uint32_t,"uint32_t"); r << ',';
+    CAP_FIELD(MIN_ALIGNMENT_D_BYTES,uint32_t,"uint32_t");
+#undef CAP_FIELD
+    cublasLtMatmulHeuristicResult_t checked{};
+    auto status = cublasLtMatmulAlgoCheckForStream(lt.handle,lt.op,lt.a,lt.b,lt.c,lt.c,
+                                                 &algorithm,&checked,d.stream.p);
+    r << "},\"algo_check_for_stream\":{\"status\":" << int(status) << ",\"result_state\":";
+    if(status == CUBLAS_STATUS_SUCCESS) r << int(checked.state); else r << "null";
+    r << ",\"workspace_bytes\":";
+    if(status == CUBLAS_STATUS_SUCCESS) r << checked.workspaceSize; else r << "null";
+    r << ",\"waves_count\":";
+    if(status == CUBLAS_STATUS_SUCCESS && std::isfinite(checked.wavesCount)) r << checked.wavesCount;
+    else r << "null";
+    r << "}}";
+  }
+  r << "]}"; return r.str();
+}
 template<int TM, int TN, int WM, int WN> struct CutlassOp {
   using Gemm = cutlass::gemm::device::Gemm<
       cutlass::half_t,cutlass::layout::RowMajor,
@@ -369,6 +471,12 @@ std::string lt_candidate(Case& d, Lt& lt, const std::vector<float>& reference,
 }
 std::string shape_report(Shape s, const Options& o, bool& all_cutlass_numeric, bool& all_lt_numeric) {
   Case d(s); Lt lt(s);
+  if(o.metadata_only) {
+    std::ostringstream r;
+    r << "{\"name\":" << quote(s.name) << ",\"m\":" << s.m << ",\"n\":" << s.n << ",\"k\":" << s.k
+      << ",\"status\":\"METADATA_ONLY\",\"heuristic_metadata\":" << heuristic_metadata(d,lt) << '}';
+    return r.str();
+  }
   std::cerr << "Numeric gate then ABBA: " << s.name << " M=" << s.m << " N=" << s.n << " K=" << s.k << '\n';
   d.reset(); lt.run(d);
   auto reference = d.download();
@@ -410,10 +518,14 @@ std::string shape_report(Shape s, const Options& o, bool& all_cutlass_numeric, b
   }
   r << "],\"top8_best_filtered_index\":" << best_index << ",\"top8_best_ms\":";
   if(best_index < 0) r << "null"; else r << best;
+  // After this shape's unchanged numerical gates and all timing. Attribute and
+  // check APIs never execute inside measure() or append_pair().
+  r << ",\"heuristic_metadata\":" << heuristic_metadata(d,lt);
   r << '}'; return r.str();
 }
 } // namespace
 
+#ifndef KATAGO_RESIDUAL_PROBE_LIBRARY
 int main(int argc, char** argv) {
   try {
     Options o = parse(argc,argv);
@@ -436,14 +548,21 @@ int main(int argc, char** argv) {
       << ",\"device\":" << quote(device.name) << ",\"sm\":" << (10*device.major+device.minor)
       << ",\"driver_version\":" << driver << ",\"runtime_version\":" << runtime
       << ",\"cublaslt_version\":" << cublasLtGetVersion()
+      << ",\"platform\":{\"os_macro\":" << quote(platform_os()) << ",\"arch_macro\":" << quote(platform_arch()) << '}'
+      << ",\"cublas_header_version\":{\"major\":" << CUBLAS_VER_MAJOR << ",\"minor\":" << CUBLAS_VER_MINOR
+      << ",\"patch\":" << CUBLAS_VER_PATCH << ",\"build\":" << CUBLAS_VER_BUILD << '}'
+      << ",\"cublaslt_runtime_properties\":{\"major\":" << runtime_property(MAJOR_VERSION)
+      << ",\"minor\":" << runtime_property(MINOR_VERSION) << ",\"patch\":" << runtime_property(PATCH_LEVEL)
+      << ",\"build\":null,\"build_note\":\"GetProperty_has_no_build_property_header_build_is_compile_time_only\"}"
       << ",\"nvcc_version\":\"" << __CUDACC_VER_MAJOR__ << '.' << __CUDACC_VER_MINOR__ << '.' << __CUDACC_VER_BUILD__ << '"'
       << ",\"cutlass_version\":\"" << CUTLASS_MAJOR << '.' << CUTLASS_MINOR << '.' << CUTLASS_PATCH << '"'
       << ",\"suite\":" << quote(o.suite) << ",\"streams\":1,\"warmup\":" << o.warmup
       << ",\"candidate_set\":" << quote(o.candidates)
       << ",\"lt_candidate_source_report\":\"target/fork-parity-20260908/tf3-residual-report.json\""
       << ",\"lt_candidate_source_sha256\":\"83859747256f74e2e910805ab723e6820b18e5d7183337a80bcce7b2a37b1ca4\""
-      << ",\"top8_diagnostic_enabled\":" << (o.candidates == "lt" ? "false" : "true")
-      << ",\"iterations\":" << o.iterations << ",\"abba_rounds\":" << o.rounds
+      << ",\"metadata_only\":" << (o.metadata_only ? "true" : "false")
+      << ",\"top8_diagnostic_enabled\":" << (o.metadata_only || o.candidates == "lt" ? "false" : "true")
+      << ",\"iterations\":" << o.iterations << ",\"abba_rounds\":" << (o.metadata_only ? 0 : o.rounds)
       << ",\"input\":\"seeded_random_half_A_B_nonzero_float_residual\",\"seed\":1831565813"
       << ",\"layout\":\"Rust_TN_weights_NK\",\"workspace_bytes\":" << kWorkspace
       << ",\"precision\":\"half_inputs_weights_float_accumulator_epilogue_residual_output\""
@@ -457,9 +576,9 @@ int main(int argc, char** argv) {
       if(i) report << ','; report << shape_report(shapes[i],o,all_cutlass_numeric,all_lt_numeric);
     }
     bool all_numeric = all_cutlass_numeric && all_lt_numeric;
-    report << "],\"all_selected_numeric_pass\":" << (all_numeric ? "true" : "false")
-      << ",\"all_cutlass_numeric_pass\":" << (o.candidates == "lt" ? "null" : (all_cutlass_numeric ? "true" : "false"))
-      << ",\"all_lt_numeric_pass\":" << (o.candidates == "cutlass" ? "null" : (all_lt_numeric ? "true" : "false")) << "}\n";
+    report << "],\"all_selected_numeric_pass\":" << (o.metadata_only ? "null" : (all_numeric ? "true" : "false"))
+      << ",\"all_cutlass_numeric_pass\":" << (o.metadata_only || o.candidates == "lt" ? "null" : (all_cutlass_numeric ? "true" : "false"))
+      << ",\"all_lt_numeric_pass\":" << (o.metadata_only || o.candidates == "cutlass" ? "null" : (all_lt_numeric ? "true" : "false")) << "}\n";
     if(o.output.empty()) std::cout << report.str();
     else {
       std::ofstream file(o.output,std::ios::binary);
@@ -471,3 +590,4 @@ int main(int argc, char** argv) {
     return 1;
   }
 }
+#endif

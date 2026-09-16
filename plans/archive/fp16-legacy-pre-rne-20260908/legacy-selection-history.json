@@ -1,0 +1,159 @@
+{
+  "status": "HISTORICAL_ONLY_OLD_ENCODER",
+  "plans": {
+    "onnx-q128-win": {
+      "original_plan_id": "sm120-nvidia-geforce-rtx-5070-ti-q128-windows-20260819-r1",
+      "original_sha256": "fd4f317c7668f258f30dd03cd854a7566dc994ec08d261a17cbba9f18f5d7ef1",
+      "legacy_encoder": "incorrect host FP16 subnormal encoding; no encoding revision",
+      "original_selection": {
+        "method": "q128 fallback baseline",
+        "min_improvement": 0.01,
+        "windows_and_wsl_validated": true
+      },
+      "new_encoder_certification": false
+    },
+    "onnx-q64-win": {
+      "original_plan_id": "sm120-nvidia-geforce-rtx-5070-ti-q64-windows-20260819-r1",
+      "original_sha256": "fe9b0db6236f5d7e10ac694764a287ef65d69e971fd785335975177ed9640d40",
+      "legacy_encoder": "incorrect host FP16 subnormal encoding; no encoding revision",
+      "original_selection": {
+        "method": "manual candidate promotion after WSL and Windows ABBA",
+        "min_improvement": 0.01,
+        "attention_core_improvement": 0.147,
+        "windows_and_wsl_validated": true
+      },
+      "new_encoder_certification": false
+    },
+    "onnx-default-win": {
+      "original_plan_id": "sm120-nvidia-geforce-rtx-5070-ti-q64-windows-20260819-r1",
+      "original_sha256": "fe9b0db6236f5d7e10ac694764a287ef65d69e971fd785335975177ed9640d40",
+      "legacy_encoder": "incorrect host FP16 subnormal encoding; no encoding revision",
+      "original_selection": {
+        "method": "manual candidate promotion after WSL and Windows ABBA",
+        "min_improvement": 0.01,
+        "attention_core_improvement": 0.147,
+        "windows_and_wsl_validated": true
+      },
+      "new_encoder_certification": false
+    },
+    "onnx-q64-wsl": {
+      "original_plan_id": "sm120-nvidia-geforce-rtx-5070-ti-q64-wsl-20260819-r1",
+      "original_sha256": "a7d4e6e2f282d45a626f3528409f460cbceff5dae84b8c028e235857617bd1c2",
+      "legacy_encoder": "incorrect host FP16 subnormal encoding; no encoding revision",
+      "original_selection": {
+        "method": "manual candidate promotion after WSL and Windows ABBA",
+        "min_improvement": 0.01,
+        "attention_core_improvement": 0.147,
+        "windows_and_wsl_validated": true
+      },
+      "new_encoder_certification": false
+    },
+    "default": {
+      "original_plan_id": "tf3-sm120-5070ti-dualffn-q64-serial-20260908-r1",
+      "original_sha256": "1e48c332df5f631afae6144aa092d2ce5c295ff5945407d6ad6a20cff53b5c99",
+      "legacy_encoder": "incorrect host FP16 subnormal encoding; no encoding revision",
+      "original_selection": {
+        "measured_requests_per_run": 8192,
+        "concurrency": 32,
+        "attention_bitwise_cases": 15,
+        "reference_policy_top1": "128/128",
+        "attention_worker_abba_improvement": 0.0353013907613422,
+        "evidence": "docs/tf3-worker-performance-audit.md",
+        "method": "Native TF3 FP32 reference and ONNX ORT numerical gates before sequential Worker ABBA",
+        "physical_max_batch": 16,
+        "min_improvement": 0.01
+      },
+      "new_encoder_certification": false
+    },
+    "throughput": {
+      "original_plan_id": "tf3-sm120-5070ti-dualffn-q64-serial-throughput-20260908-r1",
+      "original_sha256": "2836165c08294718885709ccc0b7c342f02e3605934935c7b294e9a4c3500406",
+      "legacy_encoder": "incorrect host FP16 subnormal encoding; no encoding revision",
+      "original_selection": {
+        "measured_requests_per_run": 8192,
+        "concurrency": 64,
+        "attention_bitwise_cases": 15,
+        "reference_policy_top1": "128/128",
+        "evidence": "docs/tf3-worker-performance-audit.md",
+        "method": "Native TF3 FP32 reference and ONNX ORT numerical gates before sequential Worker ABBA",
+        "physical_max_batch": 16,
+        "min_improvement": 0.01,
+        "nn_server_threads": 2,
+        "attention_validation": {
+          "concurrency": 32,
+          "improvement": 0.0353013907613422,
+          "candidate": "DualFFN + q64-serial",
+          "baseline": "DualFFN + q128",
+          "nn_server_threads": 1,
+          "evidence": "target/tf3-perf-audit/worker-attention-abba/report.json"
+        },
+        "throughput_validation": {
+          "concurrency": 64,
+          "improvement": 0.078,
+          "candidate": "Two NN threads without CUDA Graph",
+          "baseline": "Single NN thread with CUDA Graph",
+          "nn_server_threads": 2,
+          "evidence": "target/tf3-perf-audit/worker-two-servers-abba/report.json"
+        }
+      },
+      "new_encoder_certification": false
+    },
+    "c32": {
+      "original_plan_id": "tf3-sm120-5070ti-c32-nn-k384-b16-20260908-r1",
+      "original_sha256": "e90a2b6b532bf3c0f1f8710fe3b3e7ad54f80f8cadfccfed8da481a75a013c81",
+      "legacy_encoder": "incorrect host FP16 subnormal encoding; no encoding revision",
+      "original_selection": {
+        "measured_requests_per_run": 8192,
+        "concurrency": 32,
+        "attention_bitwise_cases": 15,
+        "reference_policy_top1": "128/128",
+        "attention_worker_abba_improvement": 0.0353013907613422,
+        "evidence": "docs/tf3-worker-performance-audit.md",
+        "method": "Native TF3 FP32 reference and ONNX ORT numerical gates before sequential Worker ABBA",
+        "physical_max_batch": 16,
+        "min_improvement": 0.01,
+        "layout_validation": {
+          "scope": "Sustained uncached C32 Worker, one NN service thread, physical batch 16, CUDA Graph",
+          "baseline": "Same binary and single-thread config, GEMM layout tn",
+          "candidate": "Same binary and config, GEMM layout nn_k384_b16",
+          "improvement": 0.018821995175624995,
+          "rpc_per_second": {
+            "baseline": {
+              "runs": 2,
+              "rpc_geomean": 1073.4793117528347,
+              "rpc_min": 1072.742074358416,
+              "rpc_max": 1074.2170558104933,
+              "nn_rows_mean": 1073.4795650844546,
+              "average_batch_mean": 15.968810916179336
+            },
+            "rust": {
+              "runs": 2,
+              "rpc_geomean": 1093.6843341797799,
+              "rpc_min": 1093.312806670105,
+              "rpc_max": 1094.055987941238,
+              "nn_rows_mean": 1093.6843973056716,
+              "average_batch_mean": 15.968810916179336
+            }
+          },
+          "measured_requests_per_run": 8192,
+          "order": [
+            "baseline",
+            "rust",
+            "rust",
+            "baseline"
+          ],
+          "tested_binary_sha256": "1d0895baba596c817e192d13445dbca0a154429698c716ba02044a85ec0ab271",
+          "numeric_policy_top1": "128/128",
+          "evidence": "target/fork-parity-20260908/worker-layout-b16-abba/report.json",
+          "numeric_evidence": "target/fork-parity-20260908/numeric-layout-b16/comparison.json",
+          "path_evidence": "target/fork-parity-20260908/layout-b16-tactics/summary.json",
+          "rejected_scopes": {
+            "C16_single_thread": "-0.72%; retain baseline profile",
+            "C64_two_threads": "+0.59%, below the 1% adoption threshold; retain throughput profile"
+          }
+        }
+      },
+      "new_encoder_certification": false
+    }
+  }
+}

@@ -1,0 +1,11 @@
+--- original/flash_fwd_sm120.py
++++ generated/strict_flash_fwd_sm120.py
+@@ -9,7 +9,7 @@
+ import cutlass.utils as utils_basic
+ from cutlass.base_dsl.arch import Arch
+ 
+-from flash_attn.cute.flash_fwd import FlashAttentionForwardSm80
++from strict_flash_fwd import FlashAttentionForwardSm80
+ 
+ 
+ class FlashAttentionForwardSm120(FlashAttentionForwardSm80):

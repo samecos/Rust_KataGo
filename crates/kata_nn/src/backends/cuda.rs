@@ -7,6 +7,20 @@
 //! SM120 优化路径（plan 驱动、fail-closed 见 M4）。
 
 #[cfg(feature = "cuda")]
+#[path = "strict_attention.rs"]
+pub(crate) mod strict_attention;
+#[cfg(feature = "cuda")]
+#[path = "qkv_immutable.rs"]
+pub(crate) mod qkv_immutable;
+
+#[cfg(feature = "cuda")]
+#[path = "ffn_compact.rs"]
+pub(crate) mod ffn_compact;
+#[cfg(feature = "cuda")]
+#[path = "outproj_n128.rs"]
+pub(crate) mod outproj_n128;
+
+#[cfg(feature = "cuda")]
 mod imp {
     use cudarc::driver::sys::CUdevice_attribute;
     use cudarc::driver::{
@@ -33,6 +47,11 @@ mod imp {
                 attention_q64: CUDA_CAP_ATTENTION_Q64,
                 attention_q64_serial: CUDA_CAP_ATTENTION_Q64_SERIAL,
             },
+            fp16_encoding_revision: Some(crate::tactic_plan::CUDA_FP16_ENCODING_REVISION),
+            strict_attention_artifact: super::strict_attention::fingerprint(),
+            qkv_immutable_artifact: super::qkv_immutable::fingerprint(),
+            ffn_compact_artifact: super::ffn_compact::fingerprint(),
+            outproj_n128_artifact: super::outproj_n128::fingerprint(),
             host_tactic_revision: Some(crate::tactic_plan::CUDA_HOST_TACTIC_REVISION),
             cublaslt_version: Some(unsafe { cudarc::cublaslt::sys::cublasLtGetVersion() } as u64),
         }
@@ -300,6 +319,9 @@ mod imp {
         /// cuBLASLt GEMM,按形状、输出类型、残差模式和权重布局缓存算法。
         /// graph capture 前需 warmup(第一次调用完成算法选择)。
         cublaslt: Option<CublasLtState>,
+        /// Optional, independently fingerprinted AOT modules. Preparation is
+        /// explicit at model load, after any plan has been installed.
+        strict_attention: OnceLock<Result<super::strict_attention::StrictAttention, String>>,
     }
 
     /// cuBLASLt 状态:handle + workspace + 算法缓存。
@@ -326,6 +348,49 @@ mod imp {
     }
 
     impl CudaRuntime {
+        pub(crate) fn prepare_strict_attention(
+            &self,
+            sequence: usize,
+            heads: usize,
+            head_dim: usize,
+            width: usize,
+        ) -> Result<bool, String> {
+            let requested = crate::tactic_plan::strict_attention_requested()?;
+            if !requested {
+                return Ok(false);
+            }
+            if crate::backends::cuda_exec::capturing() {
+                return Err("strict attention cannot be prepared during graph capture".into());
+            }
+            super::strict_attention::validate_shape(sequence, heads, head_dim, width)?;
+            crate::tactic_plan::validate_strict_attention_target(&super::device_fingerprint(
+                &self.device,
+            )?)?;
+            if !attention_q64_serial_available() {
+                return Err("fa4-strict-b14-r1 requires the q64-serial fallback kernel".into());
+            }
+            // Resolve the fallback before inference too. A compile capability
+            // alone does not prove that this runtime loaded the symbol.
+            self.get_func("attention_fa2_q64_serial_kernel")?;
+            self.strict_attention
+                .get_or_init(|| super::strict_attention::StrictAttention::load(&self.device))
+                .as_ref()
+                .map_err(Clone::clone)?;
+            Ok(true)
+        }
+
+        pub(crate) fn prepared_strict_attention(
+            &self,
+        ) -> Result<&super::strict_attention::StrictAttention, String> {
+            self.strict_attention
+                .get()
+                .ok_or_else(|| {
+                    "fa4-strict-b14-r1 was not prepared at model load; reload the model".to_string()
+                })?
+                .as_ref()
+                .map_err(Clone::clone)
+        }
+
         /// Call after plan installation, before preparing inference. Direct
         /// callers also validate on the first matching GEMM cache miss.
         pub fn validate_residual_algo_request(&self) -> Result<(), String> {
@@ -413,6 +478,7 @@ mod imp {
                 target_id: target_id.to_string(),
                 modules,
                 cublaslt,
+                strict_attention: OnceLock::new(),
             })
         }
 
@@ -1286,8 +1352,15 @@ mod imp {
             if e < -10 {
                 return sign;
             }
-            let m = (mant | 0x800000) >> (14 - e);
-            let m = (m + 1) >> 1;
+            // Half subnormals have a fixed 2^-24 spacing. Shift the full
+            // significand once, then round using all discarded bits. A carry
+            // to 0x400 correctly becomes the minimum normal half value.
+            let significand = mant | 0x800000;
+            let shift = (14 - e) as u32;
+            let m = significand >> shift;
+            let discarded = significand & ((1u32 << shift) - 1);
+            let midpoint = 1u32 << (shift - 1);
+            let m = m + u32::from(discarded > midpoint || (discarded == midpoint && (m & 1) != 0));
             return sign | (m as u16);
         }
         let m = mant >> 13;
@@ -1319,6 +1392,116 @@ mod imp {
             f32::INFINITY * sign
         } else {
             sign * (1.0 + (m as f32) / 1024.0) * 2f32.powi(e - 15)
+        }
+    }
+
+    #[cfg(test)]
+    mod half_encoding_tests {
+        use super::{f16_to_f32_bits, f32_to_f16_bits};
+
+        // Build the exact positive binary16 number line from its spacing, using
+        // FP64 arithmetic. This oracle does not use either production converter
+        // or repeat the FP32 significand-shift/rounding implementation.
+        fn positive_finite_half_values() -> Vec<f32> {
+            let mut values = Vec::with_capacity(0x7c00);
+            let subnormal_step = 2.0f64.powi(-24);
+            for fraction in 0..1024 {
+                values.push((fraction as f64 * subnormal_step) as f32);
+            }
+            for exponent in -14..=15 {
+                let step = 2.0f64.powi(exponent - 10);
+                for significand in 1024..2048 {
+                    values.push((significand as f64 * step) as f32);
+                }
+            }
+            values
+        }
+
+        #[test]
+        fn every_finite_half_roundtrips_without_a_gpu() {
+            let values = positive_finite_half_values();
+            assert_eq!(values.len(), 0x7c00);
+            for (magnitude, &positive) in values.iter().enumerate() {
+                for (value, sign) in [(positive, 0u16), (-positive, 0x8000)] {
+                    let bits = magnitude as u16 | sign;
+                    assert_eq!(
+                        f16_to_f32_bits(bits).to_bits(),
+                        value.to_bits(),
+                        "half decode {bits:#06x}"
+                    );
+                    assert_eq!(f32_to_f16_bits(value), bits, "half encode {bits:#06x}");
+                }
+            }
+        }
+
+        #[test]
+        fn every_finite_half_midpoint_and_neighboring_f32_rounds_to_even() {
+            let values = positive_finite_half_values();
+            for (low, pair) in values.windows(2).enumerate() {
+                // Every adjacent-half midpoint is exactly representable in
+                // FP32. Its immediate FP32 neighbors lie on opposite sides.
+                let midpoint = ((pair[0] as f64 + pair[1] as f64) * 0.5) as f32;
+                let low = low as u16;
+                let even = if low & 1 == 0 { low } else { low + 1 };
+                for (value, expected) in [
+                    (f32::from_bits(midpoint.to_bits() - 1), low),
+                    (midpoint, even),
+                    (f32::from_bits(midpoint.to_bits() + 1), low + 1),
+                ] {
+                    assert_eq!(
+                        f32_to_f16_bits(value),
+                        expected,
+                        "positive midpoint neighbor {:#010x}",
+                        value.to_bits()
+                    );
+                    assert_eq!(
+                        f32_to_f16_bits(-value),
+                        expected | 0x8000,
+                        "negative midpoint neighbor {:#010x}",
+                        (-value).to_bits()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn half_underflow_normal_boundary_overflow_and_special_values() {
+            // Known IEEE encodings cover sticky-bit rounding, signed zero,
+            // subnormal-to-normal carry, overflow ties and existing NaN policy.
+            for (fp32_bits, half_bits) in [
+                (0x00000000u32, 0x0000u16),
+                (0x00000001, 0x0000), // smallest FP32 subnormal
+                (0x007fffff, 0x0000), // largest FP32 subnormal
+                (0x00800000, 0x0000), // smallest FP32 normal
+                (0x32ffffff, 0x0000), // just below 2^-25
+                (0x33000000, 0x0000), // 2^-25: tie to signed zero
+                (0x33000001, 0x0001), // just above underflow midpoint
+                (0x33800000, 0x0001), // 2^-24: smallest half subnormal
+                (0x38000000, 0x0200), // 2^-15: formerly encoded as 0x0100
+                (0x387fc000, 0x03ff), // largest half subnormal
+                (0x387fdfff, 0x03ff), // just below minimum-normal midpoint
+                (0x387fe000, 0x0400), // tie rounds into minimum normal
+                (0x387fe001, 0x0400),
+                (0x38800000, 0x0400), // 2^-14: smallest half normal
+                (0x3f800000, 0x3c00), // 1.0
+                (0x477fe000, 0x7bff), // 65504: largest finite half
+                (0x477fefff, 0x7bff), // just below overflow midpoint
+                (0x477ff000, 0x7c00), // 65520: overflow tie
+                (0x477ff001, 0x7c00),
+                (0x7f7fffff, 0x7c00), // largest finite FP32
+                (0x7f800000, 0x7c00), // infinity
+                (0x7f800001, 0x7e00), // signaling NaN: existing canonicalization
+                (0x7fc00000, 0x7e00), // quiet NaN
+            ] {
+                for sign in [0u32, 0x80000000] {
+                    assert_eq!(
+                        f32_to_f16_bits(f32::from_bits(fp32_bits | sign)),
+                        half_bits | ((sign >> 16) as u16),
+                        "boundary FP32 {:#010x}",
+                        fp32_bits | sign
+                    );
+                }
+            }
         }
     }
 
@@ -2324,6 +2507,14 @@ mod backend_impl {
                 .rt
                 .validate_residual_algo_request()
                 .map_err(NeuralNetError)?;
+            if crate::tactic_plan::ffn_compact_requested().map_err(NeuralNetError)? {
+                let sha = crate::tactic_plan::sha256_file(std::path::Path::new(&model.model_path)).map_err(NeuralNetError)?;
+                if sha != crate::tactic_plan::FFN_COMPACT_MODEL { return Err(NeuralNetError("FFN compact source model SHA mismatch".into())); }
+            }
+            if crate::tactic_plan::outproj_n128_requested().map_err(NeuralNetError)? {
+                let sha=crate::tactic_plan::sha256_file(std::path::Path::new(&model.model_path)).map_err(NeuralNetError)?;
+                crate::tactic_plan::validate_outproj_model_sha(&sha).map_err(NeuralNetError)?;
+            }
             let gemm_layout =
                 crate::backends::cuda_exec::selected_gemm_layout().map_err(NeuralNetError)?;
             let uploaded_model = {
@@ -2365,6 +2556,9 @@ mod backend_impl {
                     }
                 }
             };
+            if uploaded_model.ffn_compact_enabled() != crate::tactic_plan::ffn_compact_requested().map_err(NeuralNetError)? {
+                return Err(NeuralNetError("CUDA model FFN compaction changed after upload; reload the model".into()));
+            }
             ensure_requested_cuda_capabilities(&uploaded_model).map_err(NeuralNetError)?;
             Ok(Box::new(CudaComputeContext {
                 model: uploaded_model,

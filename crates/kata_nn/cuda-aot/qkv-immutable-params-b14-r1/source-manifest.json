@@ -1,0 +1,50 @@
+{
+  "source_files": [
+    {
+      "path": "source/qkv-immutable-params-rope-r1/probe.cu",
+      "sha256": "e2926997477c4b6ea33fa415b71904f8fd4aa62b3cac2b1040acf8212d5bcb50",
+      "origin": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-rope-r1\\probe.cu",
+        "sha256": "e2926997477c4b6ea33fa415b71904f8fd4aa62b3cac2b1040acf8212d5bcb50"
+      }
+    },
+    {
+      "path": "source/qkv-immutable-params-rope-r1/iterator.cuh",
+      "sha256": "8386148f39424962b59c6e58ac70ee6c3322fdfbeb7a8f21885ac4b1dbcaefdb",
+      "origin": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-rope-r1\\iterator.cuh",
+        "sha256": "8386148f39424962b59c6e58ac70ee6c3322fdfbeb7a8f21885ac4b1dbcaefdb"
+      }
+    },
+    {
+      "path": "source/qkv-immutable-params-integration-r1/abi-export.cu",
+      "sha256": "cbb95fdb57b05ca97999df271c95c9de51aaf1067b1819cb78dc660668ce952b",
+      "origin": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\abi-export.cu",
+        "sha256": "cbb95fdb57b05ca97999df271c95c9de51aaf1067b1819cb78dc660668ce952b"
+      }
+    }
+  ],
+  "nvcc_sha256": "92d993c6e7025e1597d0d895e65e8658f5f1d41576a477656647a7eece2cd35f",
+  "compiler": {
+    "path": "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.3\\bin\\nvcc.exe",
+    "sha256": "92d993c6e7025e1597d0d895e65e8658f5f1d41576a477656647a7eece2cd35f"
+  },
+  "operator_build": {
+    "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-rope-r1\\build-win-r1\\invocation.json",
+    "sha256": "adcd53f3ae93b20a5d876d37701334f8b54a6757950392addf3f4cff80bce55b"
+  },
+  "abi_build": {
+    "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\abi-build\\invocation.json",
+    "sha256": "c985d939ecb57122fda95b4606f44b04cfeaebfb3ddca8e2e5f3a32bafcaa51d"
+  },
+  "acceptance": {
+    "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\promotion-r1\\acceptance.json",
+    "sha256": "8d0e770891a77b798ea17bad096ca7dff121d50535f2ce34e7342dae42f3369d"
+  },
+  "certified_cubin": {
+    "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\cuda-aot\\qkv-immutable-params-b14-r1\\kernel.sm120.cubin",
+    "sha256": "faf6f3136db74a02b75c99c993ef344f44ec521c9f95eaca69e361830f76fbf2"
+  },
+  "scope": "Exact source bytes of measured kernel and CPU ABI exporter. Rebuild verifies machine instructions and parameter images without GPU execution. Added source/docs do not change runtime files or compiled fingerprints."
+}

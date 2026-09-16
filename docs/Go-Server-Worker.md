@@ -1,5 +1,7 @@
 # RustGo 接入 Go Server
 
+> 本轮已于2026-09-16结项。快速运行见[使用指南](RustGo使用指南.md)，当前认证成果见[结项记录](RustGo性能优化结项记录.md)。已有本机认证二进制时可直接启动，不需要重跑下文历史验收。
+
 首次部署请先读 [TF3 权重适配、调优与 Worker 部署](TF3权重适配与Worker部署.md)：包含原生权重支持范围、是否需要 autotune、三套 profile 选择、Server/Worker 两端命令及验收。本文保留协议契约与详细历史记录。
 
 RustGo 提供原生 `katago-rs nnworker` 命令，实现 Go Server 的
@@ -46,20 +48,25 @@ GPU、精度、batch 和 tactic 使用常规 NN 配置。启动脚本默认使�
 
 该配置仍用一个 NN 服务线程、物理 batch 上限 16 和 CUDA Graph，独立 plan
 `worker-tf3-sm120-c32.json` 只在实际 B16 启用 K384 NN 权重布局。
-本机 TF3 持续 C32 的 uncached Worker ABBA 为 1073.48→1093.68 RPC/s
-（+1.88%），已通过最终配置的 TF3 全字段对拍和 top-1 128/128。
+修正 FP16 编码后，本机 TF3 持续 C32 的 uncached Worker ABBA 复验为
+1066.46→1088.63 RPC/s（+2.08%），TF3 全字段对拍和 top-1 128/128 通过。
 这不是所有负载的默认升级：低并发仍使用原 `worker_tf3_sm120.cfg`。
 
-持续高并发时可显式选择原有双 NN 服务线程配置，capacity 至少为 64：
+持续高并发时可显式选择双 NN 服务线程配置，capacity 至少为 64：
 
 ```powershell
 .\scripts\run_go_worker.ps1 -Server 127.0.0.1:50051 `
   -Config configs/worker_tf3_sm120_throughput.cfg -Capacity 64
 ```
 
-双线程配置关闭 CUDA Graph，按其独立 plan 运行；低并发时可能因 batch 不足而更慢，
-默认配置保持单线程。新布局在双线程 C64 仅 +0.59%，未过 1% 采纳门，因此原
-吞吐配置不变。性能对比、数值门及复现工具见
+该配置现为Windows RTX 5070 Ti的B14上限、双线程、无CUDA Graph，包含
+strict Attention、只读QKV/RoPE、QKV N128、既有half全零FFN通道压缩和
+Attention输出投影N128。当前认证吞吐 **1574.822297 uncached RPC/s**；
+最后一项的同CLI配对Worker收益+1.143208%，完整前向共同墙钟+1.456147%。
+FP32累加、精确激活及原数值门保持；整网、真实Worker、旧ONNX/Graph及
+最终计划/路径验收已完成。此前FFN压缩+21.77%为历史独立配对结果，不与
+本轮收益相加。日常和C32计划保留各自策略；新Windows组合不宣称WSL认证。
+最新FFN down NN候选未采纳，正式配置不变。详细边界与历史结果见
 [TF3 Worker 性能审计](tf3-worker-performance-audit.md)。
 当前 Worker 的真实推理接入限定为 CUDA；TensorRT 的模型与引擎缓存身份尚未按
 Worker 契约验证，选择该后端会明确报错。

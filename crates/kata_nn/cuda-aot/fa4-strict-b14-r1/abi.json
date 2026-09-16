@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "revision": 1,
+  "candidate": "fa4-strict-b14-r1",
+  "target": {
+    "compute_capability": [
+      12,
+      0
+    ],
+    "ptx_isa": "9.3"
+  },
+  "attention": {
+    "kernel": "kernel_cutlass_kernel_strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__tensorptrf16gmemalign16o3613212141152132415872_tensorptrf16gmemalign16o3613212141152132415872_tensorptrf1_0",
+    "parameter_names": [
+      "Q pointer",
+      "K pointer",
+      "V pointer",
+      "O pointer",
+      "natural softmax scale",
+      "fast_divmod divisor 1"
+    ],
+    "parameter_bytes": [
+      8,
+      8,
+      8,
+      8,
+      4,
+      12
+    ],
+    "parameter_alignments": [
+      8,
+      8,
+      8,
+      8,
+      4,
+      4
+    ],
+    "parameter_5_bytes_hex": "010000000100000000000000",
+    "parameter_5_padding": "Last two bytes are host padding, explicitly zeroed by Rust; PTX does not load parameter 5",
+    "scale": "Natural FP32 qk_scale*qk_scale; never multiply by LOG2_E",
+    "grid": [
+      3,
+      12,
+      14
+    ],
+    "block": [
+      128,
+      1,
+      1
+    ],
+    "dynamic_shared_memory_bytes": 20480,
+    "qkv_shape_bshd": [
+      14,
+      361,
+      12,
+      32
+    ],
+    "qkv_stride_elements": [
+      415872,
+      1152,
+      32,
+      1
+    ],
+    "output_stride_elements": [
+      138624,
+      384,
+      32,
+      1
+    ],
+    "qkv_pointer_offsets_bytes": [
+      0,
+      768,
+      1536
+    ],
+    "runtime_shape_stride_arguments": false,
+    "file": "attention.sm120.cubin",
+    "sha256": "90341b6d5c54a69e983a7e7d8b62956748785ad44c3e4e1b2734b92f3da46749",
+    "qkv_pointer_allocations": [
+      "rotated_scratch",
+      "rotated_scratch",
+      "original_packed_input"
+    ],
+    "pointer_min_alignment_bytes": 16,
+    "tile_m": 128,
+    "tile_n": 96,
+    "stages": 1,
+    "qk_accumulator": "float32",
+    "pv_accumulator": "float32",
+    "probability_boundary": "FP32 exp and row sum, then RN float16 before PV",
+    "output_boundary": "FP32 normalization then RN float16",
+    "lse": null,
+    "causal": false,
+    "local": false,
+    "score_mod": null,
+    "mask_mod": null
+  },
+  "rope_helper": {
+    "file": "rope_no_vcopy.sm120.ptx",
+    "sha256": "3a5448f8cb639fca97bf13ce17b66f12bdc83c4875b8f146447e7c861f33191a",
+    "kernel": "probe_rope_no_vcopy",
+    "parameter_names": [
+      "original_packed_input pointer",
+      "FP32 cos pointer",
+      "FP32 sin pointer",
+      "rotated_scratch pointer"
+    ],
+    "parameter_bytes": [
+      8,
+      8,
+      8,
+      8
+    ],
+    "parameter_alignments": [
+      8,
+      8,
+      8,
+      8
+    ],
+    "grid": [
+      948,
+      1,
+      1
+    ],
+    "block": [
+      1024,
+      1,
+      1
+    ],
+    "dynamic_shared_memory_bytes": 0,
+    "pairs": 970368,
+    "coefficient_shape": [
+      361,
+      192
+    ],
+    "coefficient_dtype": "float32",
+    "coefficient_batch_shared": true,
+    "qk_math": "ac=mul.rn.f32(a,c); bs=mul.rn.f32(b,s); as=mul.rn.f32(a,s); u=sub.rn.f32(ac,bs); v=fma.rn.f32(b,c,as); Q/K stored as float16 RN",
+    "v_behavior": "no V load/store; attention V is original_packed_input + 1536 bytes",
+    "scratch_layout": "original full packed QKV strides; V slots unwritten",
+    "other_diagnostic_entries_present": true,
+    "load_only_named_entry": true
+  },
+  "lifetime": {
+    "same_stream": true,
+    "input_unchanged_until_attention_completes": true,
+    "scratch_disjoint_from_input_and_output": true,
+    "buffers_outlive_enqueued_work": true
+  },
+  "numeric_contract": {
+    "fp16_encoding_revision": 1,
+    "natural_scale": "FP32 qk_scale * qk_scale; qk_scale = 1 / sqrt(sqrt(FP32(32)))",
+    "softmax": "FP32 scale before max/sub; ordinary expf corrective DAG; FP32 sum; rcp.rn.f32 normalization",
+    "fast_math": false,
+    "attention_guard_max_abs": 0.005,
+    "attention_guard_rmse": 0.0005,
+    "full_model_validation_required": true
+  }
+}

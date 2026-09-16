@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "status": "NO_BLOCKING_ISSUE_FOUND_IN_READ_ONLY_SOURCE_REVIEW",
+  "created_utc": "2026-09-08T16:07:50.465787+00:00",
+  "source_sha256": "6b4fd1ba35649fea285f621c95f01be55fa054ce17f090b01e4b240351197bec",
+  "cpu_audit": {
+    "path": "cpu-source-check-r1.json",
+    "sha256": "8d4f57e6adf31e6746489cbbeaf0eca10e5bdd612a83a4d81f31ca0a6124971d"
+  },
+  "findings": [
+    {
+      "subject": "single-factor helper and prior behavior",
+      "source_lines": [
+        1362,
+        1382,
+        1481,
+        1500
+      ],
+      "result": "Candidate body differs only by removal of two V copies. Both helpers retain for_num_elems actual1024x948 geometry. Three old CUDA source constants and thirteen old function bodies including both earlier tests are unchanged."
+    },
+    {
+      "subject": "AOT ABI and raw V argument",
+      "source_lines": [
+        1386,
+        1412,
+        1686,
+        1693,
+        1785,
+        1793
+      ],
+      "result": "Q=rotated, K=rotated+C*2 bytes, V=raw_input+C*4 bytes; C=384. Six parameter order/types, natural FP32 scale, fast_divmod[1u32,1,0], grid3x12x14, block128 and shared20480 match fixed strict r2 ABI. Numeric and timed candidate calls use original input as raw_input."
+    },
+    {
+      "subject": "numerical boundary and diagnostics",
+      "source_lines": [
+        1415,
+        1465,
+        1622,
+        1626,
+        1708,
+        1730,
+        1752,
+        1756
+      ],
+      "result": "Full Q/K CPU RNE comparison and control match; input full bits unchanged; control V matches raw source; all scratch V sentinel bits0x7e35 preserved. Same-AOT output exact equality and four attention reference gates retained. Three seeds finish numeric before any timing."
+    },
+    {
+      "subject": "resource lifetime and Rust read-only type review",
+      "source_lines": [
+        1565,
+        1567,
+        1616,
+        1654,
+        1694,
+        1738,
+        1750,
+        1850,
+        1852
+      ],
+      "result": "Single stream performs allocations/uploads/kernels/readbacks; buffers retained in typed CudaSlice vectors through all timing and final synchronization. Raw pointer arguments useu64 and are passed by reference as prior Driver launches. No apparent conflicting Rust borrows, invalid moves or pointer-lifetime issue found; this is not a compilation result."
+    },
+    {
+      "subject": "registered metric and retained samples",
+      "source_lines": [
+        1757,
+        1827,
+        1909,
+        1912,
+        1944,
+        1990
+      ],
+      "result": "Three distinct A/B/B/A groups. New measurement function preserves event durations in raw_times before sorting another vector for the unchanged median definition. Report registers phase median, arm geomean, 5%spread and1%gain."
+    },
+    {
+      "subject": "post-timing boundaries",
+      "source_lines": [
+        1829,
+        1848
+      ],
+      "result": "After each seed all timing phases complete, outside measurements read back retained original input and candidate scratch; verify original inputSHA and full Vsentinel region."
+    }
+  ],
+  "limitations": [
+    "No compilation or GPU execution by preparer/reviewer.",
+    "Actual NVRTC/PTX instructions, GPU boundary outputs, timing and whole-model/Worker behavior remain unverified."
+  ],
+  "build_performed": false,
+  "gpu_performed": false,
+  "production_eligible": false
+}

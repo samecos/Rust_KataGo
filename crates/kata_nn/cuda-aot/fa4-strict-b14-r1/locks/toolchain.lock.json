@@ -1,0 +1,2612 @@
+{
+  "schema": 1,
+  "scope": "CPU snapshot of the existing measured WSL export environment",
+  "rebuild_verified": false,
+  "gpu_executed": false,
+  "python": {
+    "version": "3.12.13 (main, Aug  7 2026, 02:25:39) [Clang 22.1.3 ]",
+    "executable_sha256": "021044895e95be79dc2f110367607e684119afbc8ce75f6f0eec94844e0acec7"
+  },
+  "distributions": {
+    "apache-tvm-ffi": "0.1.12",
+    "cloudpickle": "3.1.2",
+    "cmake": "3.31.10",
+    "cuda-bindings": "13.3.1",
+    "cuda-core": "1.0.1",
+    "cuda-pathfinder": "1.6.0",
+    "cuda-python": "13.3.1",
+    "cuda-toolkit": "13.0.3.0",
+    "einops": "0.8.2",
+    "filelock": "3.32.2",
+    "flash-attn-4": "0.0.1.dev1+katago",
+    "fsspec": "2026.7.0",
+    "iniconfig": "2.3.0",
+    "jinja2": "3.1.6",
+    "markupsafe": "3.0.3",
+    "ml-dtypes": "0.5.4",
+    "mpmath": "1.3.0",
+    "networkx": "3.6.1",
+    "ninja": "1.13.0",
+    "numpy": "2.5.1",
+    "nvidia-cublas": "13.1.1.3",
+    "nvidia-cuda-cccl": "13.0.85",
+    "nvidia-cuda-crt": "13.0.88",
+    "nvidia-cuda-culibos": "13.0.85",
+    "nvidia-cuda-cupti": "13.0.85",
+    "nvidia-cuda-nvcc": "13.0.88",
+    "nvidia-cuda-nvdisasm": "13.3.73",
+    "nvidia-cuda-nvrtc": "13.0.88",
+    "nvidia-cuda-runtime": "13.0.96",
+    "nvidia-cudnn-cu13": "9.20.0.48",
+    "nvidia-cufft": "12.0.0.61",
+    "nvidia-cufile": "1.15.1.6",
+    "nvidia-curand": "10.4.0.35",
+    "nvidia-cusolver": "12.0.4.66",
+    "nvidia-cusparse": "12.6.3.3",
+    "nvidia-cusparselt-cu13": "0.8.1",
+    "nvidia-cutlass-dsl": "4.7.0",
+    "nvidia-cutlass-dsl-libs-base": "4.7.0",
+    "nvidia-cutlass-dsl-libs-core": "4.7.0",
+    "nvidia-cutlass-dsl-libs-cu12": "4.7.0",
+    "nvidia-cutlass-dsl-libs-cu13": "4.7.0",
+    "nvidia-nccl-cu13": "2.29.7",
+    "nvidia-nvjitlink": "13.0.88",
+    "nvidia-nvshmem-cu13": "3.4.5",
+    "nvidia-nvtx": "13.0.85",
+    "nvidia-nvvm": "13.0.88",
+    "packaging": "26.3",
+    "pip": "26.2.1",
+    "pluggy": "1.6.0",
+    "protobuf": "6.33.6",
+    "psutil": "7.2.2",
+    "pygments": "2.20.0",
+    "pytest": "9.1.1",
+    "pyyaml": "6.0.3",
+    "quack-kernels": "0.6.4",
+    "setuptools": "83.0.0",
+    "setuptools-scm": "9.2.2",
+    "sympy": "1.14.0",
+    "tilelang": "0.1.13",
+    "torch": "2.13.0",
+    "torch-c-dlpack-ext": "0.1.5",
+    "tqdm": "4.70.0",
+    "triton": "3.7.1",
+    "typing-extensions": "4.16.0",
+    "wheel": "0.47.0",
+    "z3-solver": "4.15.4.0"
+  },
+  "codegen_package_files": [
+    {
+      "path": "flash_attn/cute/__init__.py",
+      "bytes": 367,
+      "sha256": "50713012c3a5e8045f368672342aea6eeeb3b3ce0968cb5639b1f158b9499487"
+    },
+    {
+      "path": "flash_attn/cute/ampere_helpers.py",
+      "bytes": 3706,
+      "sha256": "cadac170a7da379e27c36d044360480d710cfa88d082dad2b9decd58e4847111"
+    },
+    {
+      "path": "flash_attn/cute/barrier.py",
+      "bytes": 2054,
+      "sha256": "767af807aa7521b8d15ee6c9534f4745a7ad2224b0da2b816cc49ccb9ea6c119"
+    },
+    {
+      "path": "flash_attn/cute/bench_utils.py",
+      "bytes": 8431,
+      "sha256": "5bd0302c4cd4cd2c3b7e8b1d01eb49d546475d06897678f5543ea2e0172aae84"
+    },
+    {
+      "path": "flash_attn/cute/benchmark.py",
+      "bytes": 7367,
+      "sha256": "43bb07eb55d46a402abab8c50984eb39d4cf8f19a11ad79cd0291919614a9101"
+    },
+    {
+      "path": "flash_attn/cute/benchmark_flash_attention_fp8.py",
+      "bytes": 16735,
+      "sha256": "7677c981bc5c9f997f8e1a82eacb2e4498ba55a6c6acccdb96196ec2c24ae193"
+    },
+    {
+      "path": "flash_attn/cute/blackwell_helpers.py",
+      "bytes": 49894,
+      "sha256": "134679d00bdc93a10b69611269782911812bc0c19f0d30eb472e1d21dd3dc423"
+    },
+    {
+      "path": "flash_attn/cute/block_info.py",
+      "bytes": 7667,
+      "sha256": "c7cd78131b43d6a3906e19405236fd7d4d556d626ff4726de571b443c19c00d5"
+    },
+    {
+      "path": "flash_attn/cute/block_sparse_utils.py",
+      "bytes": 72281,
+      "sha256": "c3e71e79986e658bb26cffae2d20683e8ad3509c0ee2674fb79fbe35f641c593"
+    },
+    {
+      "path": "flash_attn/cute/block_sparsity.py",
+      "bytes": 28290,
+      "sha256": "9331cb2abd4be4da87a74c0839b665d5f914ac6f51cb97491e97b26199668ac9"
+    },
+    {
+      "path": "flash_attn/cute/cache_utils.py",
+      "bytes": 9975,
+      "sha256": "ded91c4f65ea434386eacf200cbcc9f1c604ad8b9b7dcbbe80e3264d794c00df"
+    },
+    {
+      "path": "flash_attn/cute/compute_block_sparsity.py",
+      "bytes": 21839,
+      "sha256": "88a668f6a418f4bae08c810426d0fd6a43834f7c7cf8653599a62f5c46a4e92c"
+    },
+    {
+      "path": "flash_attn/cute/copy_utils.py",
+      "bytes": 12656,
+      "sha256": "0f563eeeb6654602d1541f7202b7b88386c4dbdbd24ad6b0825834d65e508c09"
+    },
+    {
+      "path": "flash_attn/cute/cu_blocks_kernel.py",
+      "bytes": 6795,
+      "sha256": "aebbf862f2b90d13f3b1c50ee79ef49ce7babec7f61d37cfcd426bf2ab113a09"
+    },
+    {
+      "path": "flash_attn/cute/cute_dsl_ptxas.py",
+      "bytes": 5122,
+      "sha256": "21f0674c9f5a99d7c339092e49d5822d387b0a4673888becff1ac073cb5ac619"
+    },
+    {
+      "path": "flash_attn/cute/cute_dsl_utils.py",
+      "bytes": 9849,
+      "sha256": "ea4a3c935dc31d381b969f1b86631eaa44c9e22cc096bd12d130c81a2a1f92bb"
+    },
+    {
+      "path": "flash_attn/cute/fa_logging.py",
+      "bytes": 2915,
+      "sha256": "bc71edfa4b1cb7af64b78def09e790ff4c6fe64ab4fcf8e3d9699f44e8d3c0a0"
+    },
+    {
+      "path": "flash_attn/cute/fast_math.py",
+      "bytes": 492,
+      "sha256": "7e5f822bf4d0ba36967558f3ae9a1408b410cb726c31222cd61703569d1be738"
+    },
+    {
+      "path": "flash_attn/cute/flash_bwd.py",
+      "bytes": 67705,
+      "sha256": "80cb6bfb436160d73b7214529f94d28b7333c98dff75a53d20552eb33645fea2"
+    },
+    {
+      "path": "flash_attn/cute/flash_bwd_mla_dk_sm100.py",
+      "bytes": 47799,
+      "sha256": "10990b4471c9d137726280f8e582c5400ef26b2e85aebaa08097ec00d85f1cff"
+    },
+    {
+      "path": "flash_attn/cute/flash_bwd_mla_dq_dqv_sm100.py",
+      "bytes": 55330,
+      "sha256": "84546f26b52ce6cd2887e12711dc26f777ab35d0b9451cf3a7629e6c5c8c358e"
+    },
+    {
+      "path": "flash_attn/cute/flash_bwd_mla_sm100.py",
+      "bytes": 90389,
+      "sha256": "7add176d5a739b0fe63597559fe040f7cd58c016ba39716c98f5d6080b3f689e"
+    },
+    {
+      "path": "flash_attn/cute/flash_bwd_postprocess.py",
+      "bytes": 32030,
+      "sha256": "df88b299cb938197abc145c3a85262515d1d810633229d0f929239e8291e8ce8"
+    },
+    {
+      "path": "flash_attn/cute/flash_bwd_preprocess.py",
+      "bytes": 20702,
+      "sha256": "b43ec797cb57938ee887a1576eb05aff0c1ead686e073ed4f426b47dc7a7c830"
+    },
+    {
+      "path": "flash_attn/cute/flash_bwd_sm100.py",
+      "bytes": 190135,
+      "sha256": "c90418e754de6e7b5cba8cf89c53754aea5a2d6584438bdd6c8910762c7a257e"
+    },
+    {
+      "path": "flash_attn/cute/flash_bwd_sm120.py",
+      "bytes": 2041,
+      "sha256": "ad2d802c97dbf654fd03724bcfa91702b18acec8518e5dd4a33f137ba238bf7d"
+    },
+    {
+      "path": "flash_attn/cute/flash_bwd_sm90.py",
+      "bytes": 84147,
+      "sha256": "2170fcc979bd6843e73fb81133e3af23fc4d73e29b537a41a5e9a3f06492d840"
+    },
+    {
+      "path": "flash_attn/cute/flash_fwd.py",
+      "bytes": 53524,
+      "sha256": "3b97ed4cb20bb867d97fdea7eb03a86ccf32fc4b6f0c8e1ef0302ff1b4728045"
+    },
+    {
+      "path": "flash_attn/cute/flash_fwd_combine.py",
+      "bytes": 34142,
+      "sha256": "f8e7f1369b892a0e4b6175e2980966348390b0ee3b1014ba195292653ebee1ae"
+    },
+    {
+      "path": "flash_attn/cute/flash_fwd_mla_sm100.py",
+      "bytes": 136821,
+      "sha256": "d73a9e5629b2e5af21622763674de63af430740723b84d8cd93c49f2f57392be"
+    },
+    {
+      "path": "flash_attn/cute/flash_fwd_sm100.py",
+      "bytes": 165752,
+      "sha256": "f5928a15a7aa559084d14aa12cc2c95efdc89c7b3a1f0d20219b24103a32456f"
+    },
+    {
+      "path": "flash_attn/cute/flash_fwd_sm120.py",
+      "bytes": 2203,
+      "sha256": "abd017add69914e46f0fcfc017ad51c3d07d79fd87d15f969036ddd82bcc7da2"
+    },
+    {
+      "path": "flash_attn/cute/flash_fwd_sm90.py",
+      "bytes": 68282,
+      "sha256": "0261f8c67cef82cbfb3125637be1ade912fc9afd0ccc33d8bb5e1de9236eef1c"
+    },
+    {
+      "path": "flash_attn/cute/interface.py",
+      "bytes": 160946,
+      "sha256": "b0af7198dd03d639f549b70ada9e64f2ab7674936c6a508205190b537d8f45f8"
+    },
+    {
+      "path": "flash_attn/cute/mask.py",
+      "bytes": 77082,
+      "sha256": "93f265c7a02295c4b63027fc8c10fe3a371669f579415e2f3a0480d069a6558b"
+    },
+    {
+      "path": "flash_attn/cute/mma_sm100_desc.py",
+      "bytes": 10900,
+      "sha256": "ac6ec28b2f1a4b797c391a7807b88f83b430452d418262c3dfa7b0f3516e39f9"
+    },
+    {
+      "path": "flash_attn/cute/named_barrier.py",
+      "bytes": 1753,
+      "sha256": "1f80f96b690a2888ee1301d377665db6e9dd74b402f80eaa867d38f7294d813b"
+    },
+    {
+      "path": "flash_attn/cute/pack_gqa.py",
+      "bytes": 11565,
+      "sha256": "82ad3a7c44ab4d7b0cffc248aebfedeeadacade8ae2eabb231fddf343e8755cd"
+    },
+    {
+      "path": "flash_attn/cute/paged_kv.py",
+      "bytes": 9615,
+      "sha256": "95e84b59b3b3f84cefaa33e477332a9a1f311ef51f42960a3968a0d1eee8665a"
+    },
+    {
+      "path": "flash_attn/cute/pipeline.py",
+      "bytes": 14543,
+      "sha256": "849bce91c72be0a5c7458979e10c8290f45e05253a83600e30fb9540c61ed56a"
+    },
+    {
+      "path": "flash_attn/cute/prepare_scheduler.py",
+      "bytes": 14514,
+      "sha256": "6823d3033f88acf91d664ce127928d73a37629afd9fd376b03ae76130c180cb8"
+    },
+    {
+      "path": "flash_attn/cute/seqlen_info.py",
+      "bytes": 11805,
+      "sha256": "640d2433702635d68d4f0b94e9fa2d6b81da48b7f62056270b1b1fd480c72f30"
+    },
+    {
+      "path": "flash_attn/cute/sm100_hd256_2cta_fmha_backward.py",
+      "bytes": 8675,
+      "sha256": "08d65e70c90fcd1927337a2dce42962c9759f66152255135c43073b02df7d07a"
+    },
+    {
+      "path": "flash_attn/cute/sm100_hd256_2cta_fmha_backward_dkdvkernel.py",
+      "bytes": 142048,
+      "sha256": "891ec6b0526eeecc9c59b8d43c4d23719d9efd4b8c722d806e0c680ca972801b"
+    },
+    {
+      "path": "flash_attn/cute/sm100_hd256_2cta_fmha_backward_dqkernel.py",
+      "bytes": 117086,
+      "sha256": "1aea91ccd068be8b6c88621ba995d86168955bcfc9326fd3c8a94a36db0c4e7f"
+    },
+    {
+      "path": "flash_attn/cute/sm100_hd256_2cta_fmha_forward.py",
+      "bytes": 92133,
+      "sha256": "7bc1fefbff85ac503115ee64a61440b1973b91b8c8bca376b25589e964c5f160"
+    },
+    {
+      "path": "flash_attn/cute/sm90_config_search.py",
+      "bytes": 13980,
+      "sha256": "bd0ed6094e9fc48de587098f9b05bccbdd5f450b70d3500759a48b5d436cff9c"
+    },
+    {
+      "path": "flash_attn/cute/softmax.py",
+      "bytes": 29406,
+      "sha256": "3ed1d321d7086615c20b9f930d03d8aecd3759a8d507fccf7bbee8cc391f2198"
+    },
+    {
+      "path": "flash_attn/cute/testing.py",
+      "bytes": 17976,
+      "sha256": "3342b4475126666e5bff050316cd2a586852f7c82eb23fd21172470cc40a15ff"
+    },
+    {
+      "path": "flash_attn/cute/tile_scheduler.py",
+      "bytes": 85451,
+      "sha256": "569393dcbdd91a8c873ebce93e8e9928f1b31d5bd9784fa2303683f1162da0c2"
+    },
+    {
+      "path": "flash_attn/cute/topk_gather_kv.py",
+      "bytes": 10470,
+      "sha256": "5897ca804286568310d8bfec219355cacc73b907a805fdbce69a31adbf481460"
+    },
+    {
+      "path": "flash_attn/cute/utils.py",
+      "bytes": 36915,
+      "sha256": "6f20cea438a8f06fa410d55baa583d46e6448333846bbcb967100b7880058544"
+    },
+    {
+      "path": "flash_attn_4-0.0.1.dev1+katago.dist-info/INSTALLER",
+      "bytes": 4,
+      "sha256": "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508"
+    },
+    {
+      "path": "flash_attn_4-0.0.1.dev1+katago.dist-info/METADATA",
+      "bytes": 1898,
+      "sha256": "051e198f607fc46b165cd1c57fdc6b0bb718419ac0015b0aad6f8e9f48d4c7a5"
+    },
+    {
+      "path": "flash_attn_4-0.0.1.dev1+katago.dist-info/RECORD",
+      "bytes": 9038,
+      "sha256": "b53de5a84ea18f11777c8a62bf25e68a4a0a51a5885055746d8f1275c49dadbc"
+    },
+    {
+      "path": "flash_attn_4-0.0.1.dev1+katago.dist-info/REQUESTED",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "flash_attn_4-0.0.1.dev1+katago.dist-info/WHEEL",
+      "bytes": 91,
+      "sha256": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1"
+    },
+    {
+      "path": "flash_attn_4-0.0.1.dev1+katago.dist-info/direct_url.json",
+      "bytes": 341,
+      "sha256": "6ab6872b00aecc708c6f894f84debef35c4a26fd00472b54cda3731e598f09b1"
+    },
+    {
+      "path": "flash_attn_4-0.0.1.dev1+katago.dist-info/licenses/AUTHORS",
+      "bytes": 99,
+      "sha256": "4627841c206c9bf990d37cc2ecbfa778a632d85731aafb4ccb59238334d2821d"
+    },
+    {
+      "path": "flash_attn_4-0.0.1.dev1+katago.dist-info/licenses/LICENSE",
+      "bytes": 1558,
+      "sha256": "8c9ccb96c065e706135b6cbad279b721da6156e51f3a5f27c6b3329af9416d73"
+    },
+    {
+      "path": "flash_attn_4-0.0.1.dev1+katago.dist-info/top_level.txt",
+      "bytes": 11,
+      "sha256": "251021102820b079d05f81f87a91c57875350981bf5373522522aede51f90b3e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl-4.7.0.dist-info/INSTALLER",
+      "bytes": 4,
+      "sha256": "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508"
+    },
+    {
+      "path": "nvidia_cutlass_dsl-4.7.0.dist-info/METADATA",
+      "bytes": 2815,
+      "sha256": "d25f0bea66ad9d53dae06b19ce6ffca0365409547033111580a26328f320f2e9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl-4.7.0.dist-info/RECORD",
+      "bytes": 741,
+      "sha256": "8e2a3a9380418e0683b2945c1a7ca6a6d1b11f20138c3398c9d0c91c10949398"
+    },
+    {
+      "path": "nvidia_cutlass_dsl-4.7.0.dist-info/REQUESTED",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "nvidia_cutlass_dsl-4.7.0.dist-info/WHEEL",
+      "bytes": 91,
+      "sha256": "2b6eb4118ce7cd7b09601406aa623c553c4476265836f0d9c16f5c061f7efcc0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl-4.7.0.dist-info/licenses/LICENSE",
+      "bytes": 21683,
+      "sha256": "9ed3a0344d6bf9f08420f268d8aa70f7e3930d248edc2cf1a8107a560b483433"
+    },
+    {
+      "path": "nvidia_cutlass_dsl-4.7.0.dist-info/top_level.txt",
+      "bytes": 1,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/cu12/include/CuteDSLRuntime.h",
+      "bytes": 7914,
+      "sha256": "de449c32299ce49baea996ab0dba493495640e6d16bd603fab948e2dc0f98cab"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/cu12/lib/libcuda_dialect_runtime_static.a",
+      "bytes": 34838,
+      "sha256": "4268f8e70a56e3de5575fc50df7cac130f0f64489d702891a87266f74409ed5b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/cu12/lib/libcute_dsl_runtime.so",
+      "bytes": 42861064,
+      "sha256": "ee98ef287457cf04aad606811947789afd12140cd0f10c826b2e92020fc5363b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/cu12/lib/stubs/aarch64-unknown-linux-gnu/libcute_dsl_runtime.so",
+      "bytes": 70656,
+      "sha256": "439f5023485c00c74754074160cc413753708e69e85c9bd1d00fbcb22a68d4df"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/cu13/include/CuteDSLRuntime.h",
+      "bytes": 7914,
+      "sha256": "de449c32299ce49baea996ab0dba493495640e6d16bd603fab948e2dc0f98cab"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/cu13/lib/libcuda_dialect_runtime_static.a",
+      "bytes": 34838,
+      "sha256": "14f103af65ecd46e81646dedef2e7231a8220269793cb06d51a180c2bde8c647"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/cu13/lib/libcute_dsl_runtime.so",
+      "bytes": 42897960,
+      "sha256": "bc4b6a5ea5f0a44ecc9658b5f98db04a197db50a83b0f2c26dbf768b60fb3ad6"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/cu13/lib/stubs/aarch64-unknown-linux-gnu/libcute_dsl_runtime.so",
+      "bytes": 70656,
+      "sha256": "439f5023485c00c74754074160cc413753708e69e85c9bd1d00fbcb22a68d4df"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py",
+      "bytes": 5040,
+      "sha256": "41f94fc5c074bb5933f9e3ed405936123e5595e3244cbde35cb8d10eea6e5006"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/__init__.py",
+      "bytes": 13540,
+      "sha256": "5341996e80ef7c76e1240d4caf7e8b76672b1595b07bcff9a9287019cad1e7da"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/_cutlass_ir.cu12.cpython-312-x86_64-linux-gnu.so",
+      "bytes": 181825648,
+      "sha256": "6f154f3daaabd28e314c0d90c39f818fb8ae5fce3b58d085b5e05cbdcf14ccc8"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/_cutlass_ir.cu13.cpython-312-x86_64-linux-gnu.so",
+      "bytes": 180935000,
+      "sha256": "e20f9ddef63b8e4257fc26d87b80d15f81cb62104d84e7a6a7d079d913559a75"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/_cutlass_ir/_mlir/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/_cutlass_ir/_mlirExecutionEngine.pyi",
+      "bytes": 597,
+      "sha256": "b851688508e202ba09369003436e84ded5f60a0e5b6eb8224145b3395d5a94e1"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/_cutlass_ir_version_cu12.py",
+      "bytes": 211,
+      "sha256": "23492dbe1de27c8e0e54c88dd2b15035844f565a6a0618d5f684e6ac7742f9e4"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/_cutlass_ir_version_cu13.py",
+      "bytes": 211,
+      "sha256": "391cca11692676cd4d177a1ea1b1fd5ecceed98d1af094a8120c6f22a0636855"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_arith_enum_gen.py",
+      "bytes": 8088,
+      "sha256": "7778a74c79d9cc555d12a9876b30ec9ebcad05d0680932ecc07ab356abdd91e4"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_arith_ops_gen.py",
+      "bytes": 109529,
+      "sha256": "ae779872d0c1ea7bfb3b02ddbc1fc3edebb38dd383a9d109e817aea6f278e0a8"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_builtin_ops_gen.py",
+      "bytes": 6776,
+      "sha256": "466d5ba3390c785dd2dbd1093c555c284a9ca4e0d38346699ce07c586ec120cb"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cf_ops_gen.py",
+      "bytes": 11817,
+      "sha256": "c6058d55ee6e6dc7200fe61acf79ba03dbc8471a56f6a3a93fa79f0fa17fa945"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_core_enum_gen.py",
+      "bytes": 17111,
+      "sha256": "f1b5f33bd70bcb1d1d9deb0041ed717c798f583f1f3ec8c1ff8732e4c3d69ab9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_core_ops_gen.py",
+      "bytes": 173093,
+      "sha256": "d95ff110708e812927c29d24acbc241ff005c9dbb400922bae8d149e98b05cf5"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cuda_enum_gen.py",
+      "bytes": 35172,
+      "sha256": "9e7da3517e6f2fa3c8cb36076fa3216d2f80511c60397cf550a6b85d563aedfc"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cuda_ops_gen.py",
+      "bytes": 306056,
+      "sha256": "bad94851f261bc926c8d3aa37b89a43e0d94e26c655209a810be2b9d59a58aa4"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cute_enum_gen.py",
+      "bytes": 3664,
+      "sha256": "78877854785ee758ce3c7b6fe96f782cf90152b2230d4a957efa872b5bd4e972"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cute_nvgpu_enum_gen.py",
+      "bytes": 47547,
+      "sha256": "c8fcf49c7bbd0e7f0e50a2efa7beb02cc15637eb40e65ab0e6246f2b6c0dc286"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cute_nvgpu_ops_gen.py",
+      "bytes": 158370,
+      "sha256": "0ce88b23e559408a0b1ebfa20d539affef50b83be74e65233dbe2dd72d118a64"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cute_ops_gen.py",
+      "bytes": 272402,
+      "sha256": "f73ee1d3dec138766f3f681d96933a62bdb00cf4799eadb72e765902712cf033"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_func_ops_gen.py",
+      "bytes": 19096,
+      "sha256": "efffe5a9678f29519ae466c68f78d8b5d2d21e2f8aacd9d4eca94b668afef731"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_gpu_enum_gen.py",
+      "bytes": 12434,
+      "sha256": "5ddfc516e85d2d8f311038e8ec294938d832aa0e247b71639fa0f4895295d3ca"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_gpu_ops_gen.py",
+      "bytes": 231424,
+      "sha256": "70b42386b30bf99cb9861c7fa086918617b8ef364c6812b26cb2d913571c2bab"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_iket_enum_gen.py",
+      "bytes": 207,
+      "sha256": "b291eb690f1cd809f3a5ee8ef0a0a5e28d748223419daaba489f5e42a4314e7d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_iket_ops_gen.py",
+      "bytes": 15462,
+      "sha256": "fa691a6007433a9c40f150375d3497fa65a6eca8750a21d3ae3b3d500af0c9f9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_lir_enum_gen.py",
+      "bytes": 2157,
+      "sha256": "013b4a6572969f539faa9a3a398a740ac06adce4a70eda1347265dbba7ca262d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_lir_ops_gen.py",
+      "bytes": 180775,
+      "sha256": "6b5fd3bed13b7c54e421b2454108b03bc066a016261da304e9348defb43b96f0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_llvm_enum_gen.py",
+      "bytes": 30205,
+      "sha256": "3d0d711708fbb6f4da222363a503bef41df8adb1b2361b632aa3a7ac728fe849"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_llvm_ops_gen.py",
+      "bytes": 605612,
+      "sha256": "50bde508daa14718ff07cdb6ca027c338e29a0c42536447dca1dababad8de69c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_math_ops_gen.py",
+      "bytes": 90608,
+      "sha256": "c5c31103bede12971f22cc74bba739270ba0c584e029b4d19e5a2ba85de07dd7"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_nvgpu_enum_gen.py",
+      "bytes": 6409,
+      "sha256": "91c5d0b06882722f9290cc5a1b3bb5d5b39ce3c658c3f27fd371291e0fbf4af4"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_nvgpu_ops_gen.py",
+      "bytes": 68294,
+      "sha256": "4f369a2a80c3828fa077a37d0721f70533655157441f249bcea2a20e9a84dcc4"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_nvvm_enum_gen.py",
+      "bytes": 68460,
+      "sha256": "be38933c74015c29ef3f5161c1055e20e616aa4028cbd6e40070db7a87d45d69"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_nvvm_ops_gen.py",
+      "bytes": 610230,
+      "sha256": "306c0775c0c70e9c3a0493a8771909dbc80001c6e3788779f27980f5cb6ac37e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_ods_common.py",
+      "bytes": 9150,
+      "sha256": "6dba0b066414dd7056758da2257d229f3ade865ff590e45efc07d78f4f32d837"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_pyir_ops_gen.py",
+      "bytes": 4247,
+      "sha256": "2fbde79893a05df20d49721709d606d8a29174a44577491c035b14e1369521ab"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_scf_ops_gen.py",
+      "bytes": 46687,
+      "sha256": "458e40b6768deae77cfb025a287590cabd8427f13a62a3634b8624228bba44a0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_ub_ops_gen.py",
+      "bytes": 3341,
+      "sha256": "d370e46c2bcce3905a7ea68b6246496ff328b062f3943f84b9b7feae53199fdd"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_vector_enum_gen.py",
+      "bytes": 3505,
+      "sha256": "21d664d059fc46b5df4de735709c7ebf736990fe30ea5f9319dce7e1d14ea056"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_vector_ops_gen.py",
+      "bytes": 140371,
+      "sha256": "7934d7bc9609b514ace63704d069d55033706df83c9743ef43e903d396dc5be7"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/arith.py",
+      "bytes": 2978,
+      "sha256": "536dfc741e28bad1014e7930af1ac14c861a70f70ee4a5bd953947cf3b5fd59e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/builtin.py",
+      "bytes": 1076,
+      "sha256": "52b32b8b0f315895bf296b9748a30a953b77b44ce8f3ddc41c9a22daaac4278e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/cf.py",
+      "bytes": 61,
+      "sha256": "b726137ce45d091b8d643e82aa5d8c07e59a14a45ce232611f4f1e95e137b1f9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/core.py",
+      "bytes": 866,
+      "sha256": "f81205aa322c1eafa7203b67e230fcce6562295b2cb1882e880369251d58a3ff"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/cuda.py",
+      "bytes": 7285,
+      "sha256": "7c464583990009bce487a3e26e9732b28ab3f705aced942c985a57efcc0166cf"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/cute.py",
+      "bytes": 645,
+      "sha256": "86fa836c636fcdbb86e26665a3a3abc5c0aaf92cc67a980782e9e9520ec17d32"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/cute_nvgpu.py",
+      "bytes": 657,
+      "sha256": "d8a2457fae2b8e2f079a7165fc3d89d8a3726ff8d6e7b5b7577e48a4700ceda5"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/func.py",
+      "bytes": 12010,
+      "sha256": "034373bb2ac320d425a137f90e9233db506d55a0ea45f46cf8ecf285afffbc62"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/gpu/__init__.py",
+      "bytes": 10986,
+      "sha256": "da264c4e2578f1aaa684e95d60f9d2cc5a48c045782b1f9824332501d4c804c6"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/gpu/passes/__init__.py",
+      "bytes": 60,
+      "sha256": "245e6eccf689d02a91e52409d1076244abefada54b5dbb9e340b1606eb1dc4de"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/iket.py",
+      "bytes": 593,
+      "sha256": "3c64f24fbca7b55027e8952456bb286248e09a598617a96ff0e13e2641e1e9ee"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/lir.py",
+      "bytes": 658,
+      "sha256": "755d503ef695a8c1e438dcc850d5cb122f27140ecc8ba9c30b278b6cb4a003b1"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/llvm.py",
+      "bytes": 429,
+      "sha256": "6afd3f4ae9772ce7416b4f2bc5feebf27963033885b95a844437b706470ad3d3"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/math.py",
+      "bytes": 65,
+      "sha256": "803105406c02aaa5820dbe0975049a04f85a858c1c50f25b1fd7c56d19c5c70a"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/nvgpu.py",
+      "bytes": 156,
+      "sha256": "c18e14076ac79c758e151c3c85e7b2e264d530e11b6be333b128c92fb6dc391c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/nvvm.py",
+      "bytes": 95,
+      "sha256": "adcfef033dfdcf2a4871466decfd30f56792f2ad5baf753a0ac8acd6a40b0d28"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/pyir.py",
+      "bytes": 720,
+      "sha256": "5eb2e42ff28bfdcd836487f061128d952478f3c65a757e20914b277a2b4b337a"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/scf.py",
+      "bytes": 10021,
+      "sha256": "f4331ebb0ec4df0d37ea283846ea63f45aa913aed733c22f8ce658ff706b701a"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/ub.py",
+      "bytes": 61,
+      "sha256": "b143b103fbd7b6a3a99c87819e839290c3d5503c3e473797addaca9c27fc88de"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/vector.py",
+      "bytes": 101,
+      "sha256": "3e84c6fdb15f604818d8de4064b292bce1a6751dd62643e41e2a9b34da32083d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/execution_engine.py",
+      "bytes": 1491,
+      "sha256": "107c65308abe6c1614677acf6184d12533177257fb1da272ce6ba0eeccb0e563"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/extras/meta.py",
+      "bytes": 2967,
+      "sha256": "848401cdf2fe3e73a7c1a9525e4540eb3e7505ffa8afebb77d5c51de6928e54e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/extras/types.py",
+      "bytes": 4433,
+      "sha256": "1280e7ffa096478ec9dc8477fac9c83b46a1e11318d0980e594feb8e8a743ea1"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/ir.py",
+      "bytes": 9593,
+      "sha256": "cb8696c20240ee8624ac73dbf1414bb5a86765e932bddc28cc9ac11737cd0eb7"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/passmanager.py",
+      "bytes": 56,
+      "sha256": "5d60815bf1973ee60545f5e33fce974f89d5fa8d7a647f3ff99b42df532be94e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/rewrite.py",
+      "bytes": 52,
+      "sha256": "fbb1cb79b4faa11a2fbeae5d5caadda7f8245279beade3be1f60de1f16717448"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/runtime/__init__.py",
+      "bytes": 27,
+      "sha256": "bfda5f3075f1f78fa853510d9835b730f4c315fe186ed4b1ce1698c6b1c5f7c3"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/runtime/np_to_memref.py",
+      "bytes": 5635,
+      "sha256": "6031ca30b32796629b969530140d99bdb15060922bac66d51e24a63fde66af23"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/__init__.py",
+      "bytes": 934,
+      "sha256": "1d53a9b8bc47f8a1666bcc22a575d6aecdb8355401b6f36d7967414c688348f9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/arith.py",
+      "bytes": 34727,
+      "sha256": "5423f9895aa905d6dbc315c418d07a743108fed7db42b7ba2fa58c80c64b2075"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/dialect_proxy.py",
+      "bytes": 4473,
+      "sha256": "4899363779832a087b6fefbae99edfb5e98dad1a7d98c2dcbc98341c26129c6d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/gpu.py",
+      "bytes": 2278,
+      "sha256": "690839e88e3fd282d47b3e07c38fb241d47b889bd77aaebbc1dae0e01e5400a1"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/lru_cache_ir.py",
+      "bytes": 2744,
+      "sha256": "af5be8362f8748256131049e0a9806344a341c34ca5ab5e301c204209cdce85a"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/math.py",
+      "bytes": 70113,
+      "sha256": "8dd3618c88d5b1e6bfd70e185b05ab57d59a3c94feb17e6dbc4b697934fa61ec"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/nanobind_compat.py",
+      "bytes": 2408,
+      "sha256": "d382d9d3675c8f529632608df3ac095867d47f771540a5b61353ebaeb64f6dae"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/op.py",
+      "bytes": 22559,
+      "sha256": "da4188d4e693dafa883a464801ab04e1f5730d73b5347041d4bb92acdf68fcb2"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/vector.py",
+      "bytes": 50938,
+      "sha256": "c13326e951c55325ae42c631c7afd7d816b9056ab33f0b136d6b8184b0087829"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/__init__.py",
+      "bytes": 1051,
+      "sha256": "01d57bfdf8cb4e5b3b70c29b86d5e96e2b352839981f6b5efa55cf341ecc8954"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/arch.py",
+      "bytes": 937,
+      "sha256": "f67aad9ba035c8356f77eeb06d89cba7ecb888c1332eb64db127375b7f55b532"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/array.py",
+      "bytes": 145418,
+      "sha256": "f4c12285c9e44d8cd783e5b932b573283079d642f3fb22eefa8fe801eab12d32"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/ast_helpers.py",
+      "bytes": 25321,
+      "sha256": "5b357a0084b72b6c9cc6391921e8a5d08e743652f2b60d649a88bf50957abcfc"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/ast_preprocessor.py",
+      "bytes": 124137,
+      "sha256": "97c9acb67af2bf2fb01d73c39556e906954ede8251a42b73315d0330d3c554c8"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/cache_helpers.py",
+      "bytes": 17425,
+      "sha256": "b0e156e7cba6d21f77a7f2090b938c28378189592a3654123da837868d8de8ab"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/common.py",
+      "bytes": 35373,
+      "sha256": "10e6b0156a025dc0a1f3ce96293b00c1b5b8912f68686b0942f43099ff990bc9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/compiler.py",
+      "bytes": 58816,
+      "sha256": "22d12afa617047e7b4828cb22cb099dfaa54c38a7ff634b5fda843ed03865b97"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/diagnostics.py",
+      "bytes": 83032,
+      "sha256": "031747fe53b83cf2fd39944b1a0db7c6edcadc93991633e0c711635eb9411779"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/dsl.py",
+      "bytes": 132866,
+      "sha256": "15b0a367abdc43b54ab2997439fbdc734fd4e928055593bb5c43b6b8f72fb3d0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/enums.py",
+      "bytes": 5392,
+      "sha256": "c31be76fc2e18b89afd80913efc249a2685954f07f84301543496a9f562e68c3"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/env_manager.py",
+      "bytes": 28302,
+      "sha256": "e30778d8cae13eb4adb077221f2a2bd4eacff3546fbdea89fd62600ac9dddbe9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/export/__init__.py",
+      "bytes": 1083,
+      "sha256": "6a77888af69a74a3ec495f0bfe93fadeaeee3567ce68088453388f9b18b1e5bc"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/export/c_header_generator.py",
+      "bytes": 21993,
+      "sha256": "f30edb50ae0d13b160642b02f5122b2c1a01320825bc6f23d0119695a82ed01b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/export/export.py",
+      "bytes": 11117,
+      "sha256": "8165f185d64de2c96d75ca929324b645e12bdefa3fa440dbf7e359ce8658371a"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/export/external_binary_module.py",
+      "bytes": 6683,
+      "sha256": "ccff0246f8cd02c9666b4c8a896ef077d8996a333d367c39f06c41976e4aa004"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/ffi.py",
+      "bytes": 25359,
+      "sha256": "c0d842c0b43b4fb1123c760c7efbd9166e2d3f8960a18a320b0c9256b27928dc"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/jit_executor.py",
+      "bytes": 65236,
+      "sha256": "06c91ba84b7a1b43b93e0f2de97e872426104ba1773f904c58845d5ae74870ea"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/leaf_utils.py",
+      "bytes": 22619,
+      "sha256": "d47745b9208ee8d5e0f224f5445fb1afd61a00dc2cd81ea3369a653ca71ad5f9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/multi_stage_manager.py",
+      "bytes": 15689,
+      "sha256": "74089f96d67ab3925bea728822622c23280133aec09ff7ec8072e500698bef39"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/native_struct.py",
+      "bytes": 17447,
+      "sha256": "0695f0044e8d78a697546dfd616f8aac9aa836a2790a86c37489ab798f7fa152"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/pointer.py",
+      "bytes": 2006,
+      "sha256": "8c9ce44d377155ad6f312c2892165b7a2e2d90d95f33869bf12a1ef8cc00c5e9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/preprocess_mode.py",
+      "bytes": 3471,
+      "sha256": "4b099cbcb7d9e507d9cbb2dfc5dfffc7a21b8402b2d97079f9ba9f972c5bf65f"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/pyir_meta_table.py",
+      "bytes": 29528,
+      "sha256": "305603d754783fb7cb3dda77bada406aac8b9ce184117f43c2f67ee36374e3fe"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/pyir_preprocessor.py",
+      "bytes": 86488,
+      "sha256": "117a434078d6ce92ac791fd6c34425520094747f358aef6001fa4b8f7edae08c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/pyir_runtime.py",
+      "bytes": 135897,
+      "sha256": "c862ba6f5c2b54ab3d87429fd0358fe97a0950ed8d8debca0a0c746b761d0886"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/runtime/__init__.py",
+      "bytes": 769,
+      "sha256": "3f2e7ac0cde8507b1d8ee9ea6175eba5a36bc65133d39bcb22fe5a8469f6637b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/runtime/cuda.py",
+      "bytes": 32761,
+      "sha256": "49deae87d6c52a7567fa9522b9ac605f544d6f829b7b385389ca320a8d64d9af"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/runtime/dlpack_types.py",
+      "bytes": 2345,
+      "sha256": "be1c0d9b105b7871f359fe8c0143fe03ebe5704bbbc81bb97144c72aa2aa4f5e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/runtime/jit_arg_adapters.py",
+      "bytes": 12645,
+      "sha256": "c103090fa7f92610f2409ce03d832571fab03f86894f873928133f7bd1732be7"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/runtime/stream_adapter.py",
+      "bytes": 1337,
+      "sha256": "5a5d1eff237ecd91ab85437cb4c146d39539664bcb87c132220d1ea3e1fed77e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/swizzle.py",
+      "bytes": 13825,
+      "sha256": "c4b600e94107d48cf54f3208630da71aa3c895cf7ac70615c921c11b88f3cea7"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/torch.py",
+      "bytes": 1714,
+      "sha256": "1055018680db4261fe51dc2784a89cb787952311a5ae5e9567eb539fca8d8604"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/tvm_ffi_builder/__init__.py",
+      "bytes": 1003,
+      "sha256": "6629b6db87a6728593c9a1df33750f7827f9df8247e1eaee264a996bf8f7a0f6"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/tvm_ffi_builder/call_provider.py",
+      "bytes": 11738,
+      "sha256": "2f95ac821ea2b5124f162581370612f946cf2f69580ba2f76c5a220efada81d3"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/tvm_ffi_builder/mlir_builder.py",
+      "bytes": 20412,
+      "sha256": "98df6a1d4437aead0adddd094053883d86f4ce013987d73a6920a4a2c45ba1c4"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/tvm_ffi_builder/spec.py",
+      "bytes": 16403,
+      "sha256": "a7a8240d7dbaa143b10e50cc6ca557bf9c8ac29c501e719b215159b312b7c18c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/tvm_ffi_builder/tvm_ffi_builder.py",
+      "bytes": 105091,
+      "sha256": "b90ad998347f452ee3dd83eb02bc000e61e9e682abb8ee12d330dc42c0234163"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/typing.py",
+      "bytes": 110824,
+      "sha256": "a9776d6930fc075e23e1ff5fb1516b2530f376c3c4d8570780c8437f813142fe"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/__init__.py",
+      "bytes": 659,
+      "sha256": "98a1326d78c37c65dcc4fa36e2b91ff65cc2a564b8952bbc761c1ac0e94cbe8d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/logger.py",
+      "bytes": 3590,
+      "sha256": "9e5858c6baa0c5f5807dd7f9167c1501b75ef0a78297a4282fd0c68ddec9ced3"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/numpy.py",
+      "bytes": 2433,
+      "sha256": "266b2de72b38eec0b0c469a68dfa64f3b7763ee973ad144677dfa90cf6f9c9f8"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/stacktrace.py",
+      "bytes": 6573,
+      "sha256": "2130842a7fcb7352704361b7b55501315a144caf83338c4463c2028f5f4e4662"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/timer.py",
+      "bytes": 1988,
+      "sha256": "da1b98ab2bd561861e43a2d340e72ef2540239a86a4b02a3e9e686895784b123"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/tree_utils.py",
+      "bytes": 33888,
+      "sha256": "ad0c53e97d6fa6acdaa81b124eeb90ec1cacfb595196115646466fa48d89b80c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/vector.py",
+      "bytes": 1016,
+      "sha256": "53520dcee8740266f1b18286f9392b70e3b1bc858472c1ee178584c7a021d647"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/version_info.py",
+      "bytes": 885,
+      "sha256": "4762f12f6071cc5a51acf726701372bae5fc77003e35209a91c47a16d5fee4f0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/compiler/__init__.py",
+      "bytes": 1383,
+      "sha256": "34aae8f18043d8264ed0575f6fae1c2292e0bd23113a9a988f32278020a94cca"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/__init__.py",
+      "bytes": 9763,
+      "sha256": "38f98d9faad2556ed8a0db809b799d9899521e1492024439dd87188257bb0900"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/_tvm_ffi_args_spec_converter.py",
+      "bytes": 21399,
+      "sha256": "d8504cb134317fb218b42ca362de3c8be11277ebccd821510a79933c53f448ef"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/algorithm.py",
+      "bytes": 26353,
+      "sha256": "0ba8d10754343ab2ad2a83a9641a36f55a6bf8e0f635b9edd19a9c0dd7e66cc2"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/__init__.py",
+      "bytes": 4411,
+      "sha256": "a7d860bb865cc52c7e9427b1cad132a5f747d681f53feefe8b887c42b0ddee17"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/clc.py",
+      "bytes": 4870,
+      "sha256": "9e53b3e21e807ac5513aa08753c6dbc6812838c8abaacd24b516b2f4b3543318"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/constants.py",
+      "bytes": 707,
+      "sha256": "deed9efc5dbd9c8049d6b2a35f0f5e200e479b811e63c709df0772bd28514044"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/elect.py",
+      "bytes": 5497,
+      "sha256": "ef42c6f418f54a5cb4ac759dbdf10150a64e93be3d139c02223d5774400e5de6"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/features.py",
+      "bytes": 565,
+      "sha256": "26c8abdff1fcf5e74dd3739f86c460a19fe6811c1a2d030a41259d9df33a5de9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/mbar.py",
+      "bytes": 16864,
+      "sha256": "6f05b86dbc70aeed8ee129f5d8b7c1ad0345a833a49a630a04768d08b177ad52"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/numeric_conversion.py",
+      "bytes": 14051,
+      "sha256": "a8fa5b4f79e7d0513dea46b856cb8eab04ed27359e5d9a7e772db2d6c2f01775"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/nvvm_wrappers.py",
+      "bytes": 177741,
+      "sha256": "6ff681745bf86709b8e0ff14df2862ba3ca502e0c4ffcd073ab37e4556622b60"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/smem.py",
+      "bytes": 8959,
+      "sha256": "d42b750590eb9fe5fe695ef2175bc7bac5d1a5aabbe90972c2cb877a2c3a423a"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/tmem.py",
+      "bytes": 7450,
+      "sha256": "1a1841d41fa59fb98c88d68011c7cbdbc49f3841ee7d25956228c55c3e736fa2"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/atom.py",
+      "bytes": 51093,
+      "sha256": "41a61c0dcc44eb1f852db9e6cf1a42d6098f66e42c7059015d1d04879d3de848"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/core.py",
+      "bytes": 219162,
+      "sha256": "035c764686c4e5a94c1f2432b55ba2e6cc572a27db4d857278ccd785a6f7f6f3"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/__init__.py",
+      "bytes": 1311,
+      "sha256": "ad124783f06ed6b10bc33e4f4107e890bdbcba178460b636debd657b79e7a491"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/algorithm.py",
+      "bytes": 8024,
+      "sha256": "854b299b5129d8060161fe8fdb72f643936e8b8b83df96d60db4361c8bce2e41"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/core.py",
+      "bytes": 21342,
+      "sha256": "40667c20c4c87ed3608ad161bc9947de558c59b49e2ac9af578cbf28a20438e6"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/host_runtime.py",
+      "bytes": 3657,
+      "sha256": "19748903b3b4b760e12b0ecdc9ca96875dcb4761a6a89668b0aba5652502e493"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/iket/__init__.py",
+      "bytes": 866,
+      "sha256": "9834b70a4c00029e7954f85a7da4643fb274c302e8225807a6ef481ee9606cf4"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/iket/dag.py",
+      "bytes": 5546,
+      "sha256": "720899ca9ab78257aef59a1f999167f90fb64984042ce288a6a58ba538ce0f80"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/iket/iket.py",
+      "bytes": 13379,
+      "sha256": "fc9a2fcb53e86c30eb381ff5e66f47bca0348af7e3fd140ffafd2155163c244d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/math.py",
+      "bytes": 3425,
+      "sha256": "2f767c619fc70ba81bcf0fc1d5d595298bed0d8d262aac710132275b6a683e51"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/memory.py",
+      "bytes": 12670,
+      "sha256": "b22b828673a80f11e1f85d78ec25a32c294d2edd38b566fe089cc47fa70de102"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/pipeline.py",
+      "bytes": 43398,
+      "sha256": "ad9f37ca9810ec8c050244701c0e49bdb476acff69be48f7c769346f037059fa"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/utils.py",
+      "bytes": 19183,
+      "sha256": "cf7331b49ee13584d0f154118fe2a3c3aa10925ac4182362fc13c6dfb08de552"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/export/__init__.py",
+      "bytes": 2003,
+      "sha256": "46fe9928fe7350fec6aaa92cf6b01ead884a495a0f959b0b4def675cc7e44396"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/export/aot_config.py",
+      "bytes": 9384,
+      "sha256": "409bea3d04d9ea274ee27e69ccdef73f513a3e6be72697cb2bd10b209667f5d8"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/export/c_header_generator.py",
+      "bytes": 12251,
+      "sha256": "4c26386a3862c25d1bebd63b7b6f0fdef1bfd4aae01e3389c3a67301c254953b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/export/export.py",
+      "bytes": 2189,
+      "sha256": "de24abf5e0d85485f1e004964b0a281da58ffd9054a3203395ed8bd0e218ce3c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/export/load.py",
+      "bytes": 849,
+      "sha256": "5b7eef1d468a4a4568fb11a7a199b9f60db390bc2cef1fa20b8a481f0fb5203e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/ffi.py",
+      "bytes": 2084,
+      "sha256": "12c987ba76bd13ae7d6a9a44a9383216247ff2caab0a01740df4e84cc2cbdc2c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/math.py",
+      "bytes": 832,
+      "sha256": "415403b336cd31230a2455313391d25f97e9607921d3716fa33bc4af39e4464c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/metadata.py",
+      "bytes": 31255,
+      "sha256": "55272566e6ec3f289bb3377c973dc48021dc7a3ad607e025c5173850da660b51"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/__init__.py",
+      "bytes": 917,
+      "sha256": "662862781b9722d15ef2cc35054ea3166f3c83032779879eb66aa5153f5cfa2a"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/common.py",
+      "bytes": 21953,
+      "sha256": "c17c59c963e8fe4b7ab635cc76a19b4fc4e649fbfa8f72c4740fd7fa6ba43364"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/cpasync/__init__.py",
+      "bytes": 1340,
+      "sha256": "9e424136176266861908a5bb51f878b1347894064fd5820d69d456cfc1c33151"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/cpasync/copy.py",
+      "bytes": 61801,
+      "sha256": "088bd67d411af561ecfe45daa15444ae0a1703e0bb95b152c93e4e00fe60704b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/cpasync/helpers.py",
+      "bytes": 32925,
+      "sha256": "88247e84368ba44e735ed5759886ee3f8e1cb76c7b2a1747421d8b7eb4e44244"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/helpers.py",
+      "bytes": 21538,
+      "sha256": "273199d000f4994946076aa2a7a9c6b70cb10cf614677ac678e63d82d581bf36"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/tcgen05/__init__.py",
+      "bytes": 2116,
+      "sha256": "0072cafd367d4b5012c89ffd0c22bfaa311a88315c4d545251b2c5b7bd380128"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/tcgen05/copy.py",
+      "bytes": 36450,
+      "sha256": "6264df83ea3a0b1f9827dda988655d7b68e38018abbe5294e407f4b00555c51b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/tcgen05/helpers.py",
+      "bytes": 14023,
+      "sha256": "cadbb1d6403dd6501cca6c0c76b3629d9fe16bc445e1c4a3ef88c80b94d3661c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/tcgen05/mma.py",
+      "bytes": 82437,
+      "sha256": "766dfeb78751ecad919de39ef647598d9399ebca611c06f6ab7de0888b357a31"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warp/__init__.py",
+      "bytes": 972,
+      "sha256": "49750097dbd6a999f21ccc950513eac5caf016cdf6e8e69a01e326a946308a7b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warp/copy.py",
+      "bytes": 11637,
+      "sha256": "968ab604e072ad806574d2b0f875db75e0ced33cb844cf3d447a2ce2ddfe0544"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warp/mma.py",
+      "bytes": 26969,
+      "sha256": "afd7a67d9ecc87494929f1099d2e2da42371034ca55a8db5a7052e25c0d7c773"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warpgroup/__init__.py",
+      "bytes": 1453,
+      "sha256": "3227f7aee253334c5faf66d30829eafc5e16c34cdcf6f874a96d79c451991d05"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warpgroup/helpers.py",
+      "bytes": 4172,
+      "sha256": "d401958faa24fa31171b260cb86c8982de25aa8225df741a92568bd912308e1c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warpgroup/mma.py",
+      "bytes": 25045,
+      "sha256": "d2e82671a5a76ed98fc4518be1eeddf4db03a6ee852f99b46d53980edc93dc9b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/runtime.py",
+      "bytes": 34976,
+      "sha256": "73b5e1184af42a1aa3cc643830310535f048c9af9b89506113293a2f156a764d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/tensor.py",
+      "bytes": 120399,
+      "sha256": "c0707b064be449f726ffb895a6a745ffa9ea7cc814da3b97f86ce8c1597b6a27"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/testing.py",
+      "bytes": 34347,
+      "sha256": "3d6a614de4ef6b6da534bdc33cf07b479e447edff6d98847a322dbe79ecd2d65"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/tuple.py",
+      "bytes": 18135,
+      "sha256": "4e4f043a2c16fdad5fd640b06416392471b3a26a862385afc997dcad2a7e405b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cute/typing.py",
+      "bytes": 30701,
+      "sha256": "25b800bf5e062c80431e9da4fd6e78924927c0dfd723995fd38728ed2f07ff39"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/__init__.py",
+      "bytes": 1938,
+      "sha256": "f335e8af69ec5a4581803ee3555a37238fd3659644289ea1de192490b9dab25f"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cuda_event_adapter.py",
+      "bytes": 2175,
+      "sha256": "f1f3b1447cd0ed458062b515a2e9eddf92c23944960665bfe127a9c9bfba5219"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cuda_jit_executor.py",
+      "bytes": 13060,
+      "sha256": "1589949f04c39184dc3ef9287720b029bb4f8e1161fb8e20a416977cb6bf6583"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cuda_library_adapter.py",
+      "bytes": 2168,
+      "sha256": "162724b0ed0b40f9871bf3ed8ae9ec550bedb71ba2e0979531b48507b224174f"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cuda_stream_adapter.py",
+      "bytes": 2437,
+      "sha256": "3d587f8424e47691e51af61c001065dbf828c0bfecc21172321994a955599275"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cutlass.py",
+      "bytes": 140134,
+      "sha256": "d71f620450dacc0c36dc83a1a8744180948faace60dc3448c83a8a22c1bafcbe"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py",
+      "bytes": 31918,
+      "sha256": "b22a01ed6d9ee7fb42bacae38c79e0cf85f8b118ca6edfcec9e75e1bc732e8f4"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cutlass_ast_decorators_pyir.py",
+      "bytes": 11731,
+      "sha256": "c95628c51cc5537c80d5e705bf71cc6402a4a4277a2bfa069a7dcb973d9a6c74"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cutlass_function.py",
+      "bytes": 14071,
+      "sha256": "a445a738d0d8bd8f4cb798b559b7b0e3462fbd007d37f82feca5bdf523ee11f1"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/tvm_ffi_provider.py",
+      "bytes": 41837,
+      "sha256": "54c569f7fefc014f09c54c460d7095c76d5ef327b2daf47fca2d7db1d90224ce"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/__init__.py",
+      "bytes": 2660,
+      "sha256": "fb7f4994fd2267cefeae8efa5a40429bb8afc49b8dab1426a69d51449a566f31"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/cuda/__init__.py",
+      "bytes": 1062,
+      "sha256": "2dea13d5439da75262fca045d3bfa653ee38def93ae93b5855c71e88e6d5b10d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/cuda/tensor_map.py",
+      "bytes": 53148,
+      "sha256": "7ceb19ca10c5014dc371e5e370dbdfe19f5f564e5ca9d7f6b6e7d21ba60b465b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/primitives/__init__.py",
+      "bytes": 2467,
+      "sha256": "c95faf565e9d171bc198f4ea51b93ad6a898bfa0a46d5fa8f5fd838db299e165"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/primitives/descriptors.py",
+      "bytes": 46829,
+      "sha256": "b4045a40311e7261fcd449646c8ba3c17efa24ee5dede4c689089c43ef04ce82"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/primitives/gpu_ops.py",
+      "bytes": 42321,
+      "sha256": "00b4c8ebf4c1c0b40a39295aef8a3b2cf31a33e443c5ef5dfba14d1d9142f691"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/primitives/hybrid_ops.py",
+      "bytes": 1783,
+      "sha256": "35f4d6e2b1d861456cb856288f28a05c3b3abad7dbd65822f2e38e0a3fdf8b94"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/primitives/nvvm_wrapper.py",
+      "bytes": 415061,
+      "sha256": "029193fb8643c73a1c7f9d771bd28c9c04a0b0127314fcc2223e08f4e26802ff"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/__init__.py",
+      "bytes": 1401,
+      "sha256": "f6aea85a14f1af4b3348f2e5d878e57ed5e5293e58928e96e1d7ef1d8b1470d0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/enums.py",
+      "bytes": 10239,
+      "sha256": "7870e93c57f1ca517a5ff948c910a6883c480647dc092146a876a29ecf1c2736"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/exhaustive_checker.py",
+      "bytes": 53524,
+      "sha256": "da735965bdfe79bde0386f7174193e5d599a8c61076da2f83da844c1e77663cb"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/memory.py",
+      "bytes": 26103,
+      "sha256": "320a75a624ed428546db5dcc4170c257592452cc7c29195c356c354bf03abdda"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/pipeline.py",
+      "bytes": 14343,
+      "sha256": "df98f32fb2f4a735455cdf5db804790ee44ce7f102f46eb98a2f3816dfba3ba9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/pipeline_group.py",
+      "bytes": 39515,
+      "sha256": "4c2bd530f5edd897f962a07f9adee4057379061eb91b28c4c8490624367287e7"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/resources.py",
+      "bytes": 157316,
+      "sha256": "24ee9adff27ad8730ed53fd6f146487f2b3f4182d3389831257ebfa0c6c9cd5b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/schedule_builder.py",
+      "bytes": 61379,
+      "sha256": "1f577ca604ca925dd6fe70e5f0b87c9c257de6088dd14aba701cc2608dd30177"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/schedule_legacy_adapter.py",
+      "bytes": 17927,
+      "sha256": "b064f9586075963d1b57dabb529332d52711b35a39e30758419b4525825b462b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/task.py",
+      "bytes": 163354,
+      "sha256": "a266785511f8e296ef379ba35944d415a38a3885088cc88d72e185c2b3e2b309"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/task_scheduling/task_manager.py",
+      "bytes": 212247,
+      "sha256": "4be74ffb7e739e1c92f0538efd2d6a0f9427ec0a322b50e44191038c31a1050f"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/impl_utils.py",
+      "bytes": 1325,
+      "sha256": "ae26685b9fdd87aa7513715ab4c07f34d1d5b22a8fc312d4b550fb3593ca730d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/jax/__init__.py",
+      "bytes": 3252,
+      "sha256": "4ebf09531f1c5728ab4a6d35a7b7c7dc19172d32684f436560da74f041ae7225"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/jax/compile.py",
+      "bytes": 8790,
+      "sha256": "fbe1a35efbac00e7dc68fdd29eea63fc65d0aa3d813dd66b7a1f536ff765dd5a"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/jax/ffi.py",
+      "bytes": 9907,
+      "sha256": "104a8ddb8d7a366cc3aa7852078adf30faa5cde3b7217464955b582483dd3bc5"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/jax/primitive.py",
+      "bytes": 14585,
+      "sha256": "0c1c8284bddcae4b2ce8a856acda6a968b6c6e8006d1472d843032f70fa40242"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/jax/testing.py",
+      "bytes": 8592,
+      "sha256": "6b372ff045c31e98bdb41cbe2dbdb97d745b1ec5e7b6fad853c21430ab9fd52d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/jax/types.py",
+      "bytes": 29223,
+      "sha256": "f1d6948e33deba0b9121a01fe5ed80ee2ef29ef71722f132c884ac53aecd8b0e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/__init__.py",
+      "bytes": 2004,
+      "sha256": "af2be0b5cfcca8e6e95e59025a25aa8fcebf23a392a8261f11c57b28b48b40ad"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/helpers.py",
+      "bytes": 36748,
+      "sha256": "87baa220853a4f64179300293f747f75a9f10008f5df3c91bdbc4f5c7d74243c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/profiling.py",
+      "bytes": 2569,
+      "sha256": "9347f2df9e18d133f1b4a7c4efa4cf6423da386f5acb96455487150859a098fe"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/sm100.py",
+      "bytes": 52654,
+      "sha256": "4e7c4ce1f19f4d470adcbda7052740af36820a99fa74fcf9d01627fb52ff8def"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/sm90.py",
+      "bytes": 54104,
+      "sha256": "2d5fae60151278072a92dd21ffc445c16932abdcd69bb070cdcf87f9a179a32a"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/py.typed",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/runtime.py",
+      "bytes": 13149,
+      "sha256": "6e43106edd0767e72f514fe542cc1f00d1f5d31b5afdddccffbbc856e157b5f9"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/testing.py",
+      "bytes": 39856,
+      "sha256": "0a4a25f653e70a3d38787c1262ef8328a342f33264e1b213fe805603af398200"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/torch.py",
+      "bytes": 11987,
+      "sha256": "75d8007c4fb0dc4c1b1924899d463e297ae6473cf3d01dde54c9bd874156ff9d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/__init__.py",
+      "bytes": 5373,
+      "sha256": "b51fa279ebbfa598c13795105c51bdb6ace7ff52e3babd9b6e24f7e096d5abfb"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/blackwell_helpers.py",
+      "bytes": 76793,
+      "sha256": "b4aa719f4bb4af9e721ce77b9a23b4d141c5c01b4b59d8dc18811e4a157df0cb"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/block.py",
+      "bytes": 8903,
+      "sha256": "0d6e1b80d8b4a6ccedc25222e17e62edfab3cc2a93201af081d34ca8e7a00b22"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/blockscaled_layout.py",
+      "bytes": 20578,
+      "sha256": "e9627e0ddef5b9cdcdf1f325e983e78398af95e7189135f7039c1ee9d0ccaed8"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/distributed.py",
+      "bytes": 17575,
+      "sha256": "1c1717a473a4962a827116ebf6218cde9a7daaf15a37bf78b15ca45fa2fa79e6"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/dynamic_persistent_tile_scheduler.py",
+      "bytes": 22639,
+      "sha256": "bb26b4d246b733e395828a5343220ecae3681722dd78f7f3569878a7e98d296d"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/gemm/__init__.py",
+      "bytes": 582,
+      "sha256": "71385d756788a3c04f701ec60c095240eb6200f7b0364c9d4891bf08ae13b560"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/gemm/sm100.py",
+      "bytes": 19161,
+      "sha256": "2804d40b3d8ee139c067183b36e4d15d04eb106c5b09d0b5fb624007db1611a2"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/gemm/tensor_utils.py",
+      "bytes": 13896,
+      "sha256": "ccc885423f52926d71c81d0a3c8002682eaf1230e3984dd68ed314ac0e9f2b32"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/grouped_gemm_persistent_tile_scheduler.py",
+      "bytes": 47865,
+      "sha256": "e1dddc093e55ebb5f871919cf38eed210c750480164612372a4cbfed6244c10f"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/hardware_info.py",
+      "bytes": 8504,
+      "sha256": "5a45ae55d2092095eb9d02a8b78d4eb831285ba2815d3139d77c2823a7cfb864"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/hopper_helpers.py",
+      "bytes": 15220,
+      "sha256": "7ea64a834da1ddb9cc103c5be88643b7c6354785e8489990f17e13f81e09ab79"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/layout.py",
+      "bytes": 2257,
+      "sha256": "012f579e70ab1aafd6857bc558fa6528d8766781c0dbbd9e1a81c04925d298ac"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/mixed_cluster_params.py",
+      "bytes": 4519,
+      "sha256": "aa5aca37fac6da992dedb0deca801fdd43962ca88dea97048d91ded620ce08de"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/mixed_input_helpers.py",
+      "bytes": 44026,
+      "sha256": "093b4d26075f51c3793afc83a958d951ab3a3a5a768753562ae1869c00198bdd"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/print_latex.py",
+      "bytes": 17752,
+      "sha256": "362340618207a2d785b9e75f0f3c6b0fb09b0a114c62bcd8461433471d047285"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/profiling.py",
+      "bytes": 7230,
+      "sha256": "31d8d817f397320d1ab642d8fbfab597dab85e7fe8d7ffd904983d1cbef1b9cd"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/smem_allocator.py",
+      "bytes": 20442,
+      "sha256": "73b422bea99a8ac6808a80c0092a06956f75ad949567c94ba2c9fd4ce4989bb3"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/static_persistent_tile_scheduler.py",
+      "bytes": 33581,
+      "sha256": "143262db20907312199961a5eb73827b3d549ed56d81694a715e8a651950cb4b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/tensor_helpers.py",
+      "bytes": 3352,
+      "sha256": "5705c5bd0859276d79ea40c10b6b36bbf5cc3597d7d656023140d8bc2f5ed72e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/tensormap_manager.py",
+      "bytes": 7380,
+      "sha256": "76a757b9534e01a85101f56ecd325224fd0e13160dc9c613824cd3626906bc2b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/cutlass/utils/tmem_allocator.py",
+      "bytes": 27992,
+      "sha256": "ea851156784a8aa756893c064807722ef4f5397650f7b1df6cb576ed5098f153"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/__init__.py",
+      "bytes": 4082,
+      "sha256": "ea89f97ef6e8c931f153525cfe0d4aca2b02b15becc1db3741fba7639351ddc2"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/__init__.pyi",
+      "bytes": 4779,
+      "sha256": "90634314d15ae32f31c8bd5d820820aa1877e2bd0eb3cd8a6660e2160b6ba34e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/_build_config.py",
+      "bytes": 61,
+      "sha256": "c2527dadfff00cdc229a42cc8eac3255917f5846e1759a0294cfb7b66a56c691"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/_core.cpython-312-x86_64-linux-gnu.so",
+      "bytes": 1304304,
+      "sha256": "ae4d6150f14cd91488d36e7833826f8c330373a54bf455419ad81ebd6abd60c3"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/cli/__init__.py",
+      "bytes": 80,
+      "sha256": "a6071c05fa17e4962be09601d0a8aba0a684c3a33bf0d9f894c0dbf8fa107cb7"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/cli/base.py",
+      "bytes": 10759,
+      "sha256": "34abb13e7730a65beaeaf04b164687de4d23af798e76961aa7a1e279652b821b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/cli/common.py",
+      "bytes": 2059,
+      "sha256": "43b32d33a49b172cc34cea187a703c13de3d94d1bfefdb3325a2ba3a6ddfd400"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/cli/main.py",
+      "bytes": 872,
+      "sha256": "62d32b837e557d5a46abe3120bcc09b6d183fc6bc4b652b7482e107d800b8702"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/cli/postprocess_cmd.py",
+      "bytes": 4224,
+      "sha256": "de71fbe0c02691cac5d054e1514af45275a4aae847c94fb209ad79fe4e7159de"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/cli/run_iket.py",
+      "bytes": 16740,
+      "sha256": "e3541e497354d54577fd2b2bf2be82c0edfbf4096e51b2f2a6d1f8d203089945"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/core/__init__.py",
+      "bytes": 185,
+      "sha256": "122fb1078a83fb3304828bed82ed5c0e6734f779a3313566fb9871b8eb492b5f"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/core/smodel.py",
+      "bytes": 197,
+      "sha256": "98a1e8523867119dbbe89ae0bdc350dc94499b03a09db9f4a9525fa53ede9f82"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/core/smodel.pyi",
+      "bytes": 1463,
+      "sha256": "688c2b58962151158d3968492e2a39a1c016675c95bfe9c2a89ce45e0df07534"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/iket_lib.cpython-312-x86_64-linux-gnu.so",
+      "bytes": 517872,
+      "sha256": "3129da345f92c131a84b47e97278fc3ada054053e1186b80704b20f8d967531c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/libiket_cubin_info.so",
+      "bytes": 1749400,
+      "sha256": "7ee839130c6bd129b04908a807c066118a459ebea644a59ecb6e41fbb323c103"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/profiler/__init__.py",
+      "bytes": 530,
+      "sha256": "df04a9972e12a67a35fc19c9276c59519f867a155cee3e0fe9ef9d88e512b606"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/profiler/calltrack.py",
+      "bytes": 2786,
+      "sha256": "5c26ed896f9668ddca4cacd90b8e513cf8e3d467fe8c543b4496e43c5647810e"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/profiler/libsmodel_injection.so",
+      "bytes": 2421184,
+      "sha256": "83be54bd06e2cd82b2f6c17bbee6c925d049acae8d880242d4a5d5509a29e122"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/profiler/perfetto_trace_pb2.py",
+      "bytes": 605217,
+      "sha256": "f8f47716209aedecc9e3a2118dd1352cd0ced84e658fd6e7676092e61e563db4"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/profiler/perfetto_viewer_template.py",
+      "bytes": 6862,
+      "sha256": "d91087f62bbe097c1c6ff26c78f29385ba46555908fa5e157cbde445bbc6f9d4"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/profiler/postprocess.py",
+      "bytes": 56199,
+      "sha256": "c8f40e152c2463149a7a2028ee4f8f9d685a4cbf1d68ac5a49017bf1546c74bb"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/profiler/tracker_record.py",
+      "bytes": 8816,
+      "sha256": "010b423b7bfb7b433489d7dc07052c86d4081a7ae073b4a891519c311d239a2b"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/profiler/utils.py",
+      "bytes": 16773,
+      "sha256": "7b5ac86810a189138e20da30c0da118e239d96f2e73bc758b8ee2f76ce984f2c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl/dsl_packages/iket/utils.py",
+      "bytes": 2183,
+      "sha256": "850eb90e7272ec4dcd49c75c05c4b6871d1a8995462120d12244bca860cfb8d0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_base-4.7.0.dist-info/INSTALLER",
+      "bytes": 4,
+      "sha256": "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_base-4.7.0.dist-info/METADATA",
+      "bytes": 2867,
+      "sha256": "3b9312c1ff69dfee16fc9cb08186db22a6be4ebd5662a1ac0081a779c552e39a"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_base-4.7.0.dist-info/RECORD",
+      "bytes": 20998,
+      "sha256": "32afd1dbf6c94e2e3e6c31565c5172ab8d8acdb6208b1e907fd59d0ae69f61e7"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_base-4.7.0.dist-info/REQUESTED",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_base-4.7.0.dist-info/WHEEL",
+      "bytes": 113,
+      "sha256": "ee2ee0c7d3560958ee28adf0436b96e61839e751c87f18b666a1f6ff47ad4e67"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_base-4.7.0.dist-info/entry_points.txt",
+      "bytes": 54,
+      "sha256": "2c6777d27f30308533c3d85128825eae463d4b2157084015466a4e0078f2abaa"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_base-4.7.0.dist-info/licenses/LICENSE",
+      "bytes": 21683,
+      "sha256": "9ed3a0344d6bf9f08420f268d8aa70f7e3930d248edc2cf1a8107a560b483433"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_base-4.7.0.dist-info/top_level.txt",
+      "bytes": 19,
+      "sha256": "583e0263ef2958f4f3568a841b12df9eb6d028ce72ff72d4e3f08fd8b4ca6bf0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_core-4.7.0.dist-info/INSTALLER",
+      "bytes": 4,
+      "sha256": "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_core-4.7.0.dist-info/METADATA",
+      "bytes": 2816,
+      "sha256": "072e7c6a9ad723b4b6b7dd23de3eb6181ea8f0c59f0b6d7ff3f4a2e2324d19a6"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_core-4.7.0.dist-info/RECORD",
+      "bytes": 38213,
+      "sha256": "3e58364976a5e79ddc270d64dec0588028848b8ea7ec189ae3c442e81d958f57"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_core-4.7.0.dist-info/REQUESTED",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_core-4.7.0.dist-info/WHEEL",
+      "bytes": 91,
+      "sha256": "2b6eb4118ce7cd7b09601406aa623c553c4476265836f0d9c16f5c061f7efcc0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_core-4.7.0.dist-info/licenses/LICENSE",
+      "bytes": 21683,
+      "sha256": "9ed3a0344d6bf9f08420f268d8aa70f7e3930d248edc2cf1a8107a560b483433"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_core-4.7.0.dist-info/top_level.txt",
+      "bytes": 19,
+      "sha256": "583e0263ef2958f4f3568a841b12df9eb6d028ce72ff72d4e3f08fd8b4ca6bf0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu12-4.7.0.dist-info/INSTALLER",
+      "bytes": 4,
+      "sha256": "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu12-4.7.0.dist-info/METADATA",
+      "bytes": 2867,
+      "sha256": "8a43fd55beff822d18ccb9df64aef2d5aab830e9ffc0420424495cad83fc054c"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu12-4.7.0.dist-info/RECORD",
+      "bytes": 1625,
+      "sha256": "1aab4bec03434cbf7e631a1a307286c71115aa5fd9ebbd0f11d6eeacf8523389"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu12-4.7.0.dist-info/REQUESTED",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu12-4.7.0.dist-info/WHEEL",
+      "bytes": 113,
+      "sha256": "ee2ee0c7d3560958ee28adf0436b96e61839e751c87f18b666a1f6ff47ad4e67"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu12-4.7.0.dist-info/licenses/LICENSE",
+      "bytes": 21683,
+      "sha256": "9ed3a0344d6bf9f08420f268d8aa70f7e3930d248edc2cf1a8107a560b483433"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu12-4.7.0.dist-info/top_level.txt",
+      "bytes": 19,
+      "sha256": "583e0263ef2958f4f3568a841b12df9eb6d028ce72ff72d4e3f08fd8b4ca6bf0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu13-4.7.0.dist-info/INSTALLER",
+      "bytes": 4,
+      "sha256": "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu13-4.7.0.dist-info/METADATA",
+      "bytes": 2867,
+      "sha256": "2158c422a6c5a5fe1cd53a2078af4e039b21f48eba3c4e31374cb42444562498"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu13-4.7.0.dist-info/RECORD",
+      "bytes": 1625,
+      "sha256": "43d61ead31a4d99bda89ab9740ceefecd745f7cff231fa840cb5937668ce8054"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu13-4.7.0.dist-info/REQUESTED",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu13-4.7.0.dist-info/WHEEL",
+      "bytes": 113,
+      "sha256": "ee2ee0c7d3560958ee28adf0436b96e61839e751c87f18b666a1f6ff47ad4e67"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu13-4.7.0.dist-info/licenses/LICENSE",
+      "bytes": 21683,
+      "sha256": "9ed3a0344d6bf9f08420f268d8aa70f7e3930d248edc2cf1a8107a560b483433"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_libs_cu13-4.7.0.dist-info/top_level.txt",
+      "bytes": 19,
+      "sha256": "583e0263ef2958f4f3568a841b12df9eb6d028ce72ff72d4e3f08fd8b4ca6bf0"
+    },
+    {
+      "path": "nvidia_cutlass_dsl_packages.pth",
+      "bytes": 116,
+      "sha256": "cc710b99ddb3d76361a70461461d274212a979d00c381d821fce5bb3ad9cf246"
+    },
+    {
+      "path": "quack/__init__.py",
+      "bytes": 967,
+      "sha256": "6b3c86136ab29e2c407812367ab6ba6189fd13cd603c8c81299da576d3f509d4"
+    },
+    {
+      "path": "quack/activation.py",
+      "bytes": 39061,
+      "sha256": "0e25ebdd0e82fe9d56eb0b810e34f9b8dcdf1d43fb0b0e0b1404cba74c5ecf6d"
+    },
+    {
+      "path": "quack/autotuner.py",
+      "bytes": 24451,
+      "sha256": "9b2cc53aeea24db73e8a8f2df67b1be409d4e38ce51e670426c9205220b4cf2e"
+    },
+    {
+      "path": "quack/bench/__init__.py",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "quack/bench/bench_utils.py",
+      "bytes": 8386,
+      "sha256": "3997c7627625891efea35a5a11d6a4750f184b6db24a73b03e3c31bb07d7a711"
+    },
+    {
+      "path": "quack/bench/cublaslt_quant_out.py",
+      "bytes": 8547,
+      "sha256": "2ed9345b849288bac54004dc0c6abbb8acdcedb51605f75f1a57609b3a59be03"
+    },
+    {
+      "path": "quack/blockscaled/__init__.py",
+      "bytes": 2025,
+      "sha256": "3ba8fd80bbf8ccd486dca5fa3837d3b97a63d92e217c24a998863a8c73a83ba1"
+    },
+    {
+      "path": "quack/blockscaled/nvfp4_utils.py",
+      "bytes": 49010,
+      "sha256": "4d26f1fbad8c13ec774296379716898e7e66abc1deb033625d0accf33c9f18d1"
+    },
+    {
+      "path": "quack/blockscaled/operand.py",
+      "bytes": 47359,
+      "sha256": "8b1af37f41ee660151899ca36ca760ce3014325a6afa91845cc13bff8ee714a7"
+    },
+    {
+      "path": "quack/blockscaled/quantize.py",
+      "bytes": 29193,
+      "sha256": "1e435bc8874dd540bd266a6754217802885e7a06b1c5acb680f51432be710275"
+    },
+    {
+      "path": "quack/blockscaled/quantize_utils.py",
+      "bytes": 11430,
+      "sha256": "2161376f56093ddee0b521cb8fc735e734338d929651972b51d9649850eb4dfd"
+    },
+    {
+      "path": "quack/blockscaled/utils.py",
+      "bytes": 41441,
+      "sha256": "9af5d38ce436dbbecaaca71a75e730c16134cfa3c84e53c755f5169e4d7cee5b"
+    },
+    {
+      "path": "quack/broadcast_utils.py",
+      "bytes": 1195,
+      "sha256": "33b2acbf0f8641293028aedd86b3c1beeb2007a4aad2aafade87f856c10e6b6d"
+    },
+    {
+      "path": "quack/cache/__init__.py",
+      "bytes": 2457,
+      "sha256": "3e19dc7f6eecd30e087e7052189666e49ebbc4432ba38092f374e688e9c81079"
+    },
+    {
+      "path": "quack/cache/_pool_preload.py",
+      "bytes": 3579,
+      "sha256": "d02ea3b6345048e15c3c0b2033e529dac626941a3481dbedc7abb956720af7df"
+    },
+    {
+      "path": "quack/cache/async_compile.py",
+      "bytes": 24071,
+      "sha256": "249c927410503016c5cbc6f4ecc376a51bd856c729e8e5e123ce43a67c8af61b"
+    },
+    {
+      "path": "quack/cache/jit.py",
+      "bytes": 14821,
+      "sha256": "09a1d8f626d31500e175556b3cd8f68dfc60599cf102f1df9c22aac781ac7193"
+    },
+    {
+      "path": "quack/compile_utils.py",
+      "bytes": 2566,
+      "sha256": "9d708639188592d22ab1fc98370d66ebd9ebf08cba88b6673fcfb1d07b214321"
+    },
+    {
+      "path": "quack/complex.py",
+      "bytes": 11391,
+      "sha256": "5a660d75ef55dd90cb68eb7bb6d0a78c7e03c5a85a9f8f8fbcb7e81c71d4fa3a"
+    },
+    {
+      "path": "quack/copy_utils.py",
+      "bytes": 72142,
+      "sha256": "55259633cde52a4200b0f3c8ec0f55e266e6b629ae7d254b5a7b13d0cb448045"
+    },
+    {
+      "path": "quack/cross_entropy.py",
+      "bytes": 28384,
+      "sha256": "4013711bac75a5ecb94dcab24a12b39c601977e602e4c732c8b71cab2eb94db7"
+    },
+    {
+      "path": "quack/cute_dsl_utils.py",
+      "bytes": 10593,
+      "sha256": "2bd1b37789b31962ab2d2fb15e1a08a6a2f5568adfca573419a746ed81f3d5c7"
+    },
+    {
+      "path": "quack/distributed/__init__.py",
+      "bytes": 505,
+      "sha256": "c4a337dca09fbfd544360a7cc90f66b2255806ffc191fed016687b6b2f61300e"
+    },
+    {
+      "path": "quack/distributed/all_gather_gemm.py",
+      "bytes": 57716,
+      "sha256": "85e82db46f4dad34383a6daed91cacdf4ad9e0a5db754f01ade9dd0910126fd7"
+    },
+    {
+      "path": "quack/dsl/__init__.py",
+      "bytes": 529,
+      "sha256": "d7703f7c338ff342e19c996938f87a54e359d0d62de7a671890ff0a692fce602"
+    },
+    {
+      "path": "quack/dsl/cute_dsl_ptxas.py",
+      "bytes": 9911,
+      "sha256": "8db6a6e9f530ce6e17e4265cdbd2debe5597040cdb79d5aede3ea12bfda51260"
+    },
+    {
+      "path": "quack/dsl/cute_tensor.py",
+      "bytes": 6310,
+      "sha256": "97567c5cdcc1490b87c11291ea05f9f927b50d1dfd368551fc9115d8825bbdea"
+    },
+    {
+      "path": "quack/dsl/cute_tensor_indexing.py",
+      "bytes": 5182,
+      "sha256": "d509cfae77a49040979201c2e4d598e89c720e64d37f99200a5088630c4c7c6d"
+    },
+    {
+      "path": "quack/dsl/mixed_constexpr_if.py",
+      "bytes": 6441,
+      "sha256": "b3933a07ab187691ce28db2941dab8f7093abd1199df7cace3ef2d95acf4a000"
+    },
+    {
+      "path": "quack/dsl/smem_struct.py",
+      "bytes": 4273,
+      "sha256": "a623233ccfb0cbcc3f220e88648fc03a856978ab0a4847acef13f16367a25822"
+    },
+    {
+      "path": "quack/dsl/torch_library_op.py",
+      "bytes": 3940,
+      "sha256": "7e7185f34c795cead71a84b36958df925bb49ce065d2e2621955b7cfbd9a478b"
+    },
+    {
+      "path": "quack/epilogue/__init__.py",
+      "bytes": 1653,
+      "sha256": "dd3e7fce36df1a981c40ea05284ee8716b06e6088869b47640929c1889406105"
+    },
+    {
+      "path": "quack/epilogue/frontend.py",
+      "bytes": 87900,
+      "sha256": "1fc3c4a0914a23c04e69dfef03232f7efb85e03bbb8a7c6e515509d9582d6f4a"
+    },
+    {
+      "path": "quack/epilogue/head_rmsnorm.py",
+      "bytes": 1229,
+      "sha256": "b64b9055efbf1d0e04b3298e9e88f3b620452da024a74ef9ca9c8a59aeaa7a5b"
+    },
+    {
+      "path": "quack/epilogue/library.py",
+      "bytes": 37754,
+      "sha256": "374c95060989c11d20476bec2e60ab54e7faccd92021367f87db28832238f65f"
+    },
+    {
+      "path": "quack/epilogue/math.py",
+      "bytes": 5996,
+      "sha256": "6800226f82c21d77bbe7070b8baf890b1fa8dfcd29b53682e3cc63d0ddf26564"
+    },
+    {
+      "path": "quack/epilogue/mixin.py",
+      "bytes": 14717,
+      "sha256": "8979576089b42035c1c11cc5fa459e3dab4509548b5db2429b5f98a86c25d6ab"
+    },
+    {
+      "path": "quack/epilogue/ops.py",
+      "bytes": 142047,
+      "sha256": "71f244b1dc79405cc7e541e699be1fd44688e192426c281433ff1b1ff7708d82"
+    },
+    {
+      "path": "quack/epilogue/quantize_out.py",
+      "bytes": 50306,
+      "sha256": "cd4e0da5a74bd9d4f911bdda3b90aeede7cc04d7f67ccddd22858093ef8a8bba"
+    },
+    {
+      "path": "quack/epilogue/rotary.py",
+      "bytes": 32088,
+      "sha256": "646410bd66bfc44710abffb8af8cc4f20685822392345547d5a9ccb953117337"
+    },
+    {
+      "path": "quack/epilogue/scaled_exp.py",
+      "bytes": 4889,
+      "sha256": "a0d8c0aec2403a5c5fa2d43589509c84a278761d80c8585ad71990aeec7fc6ce"
+    },
+    {
+      "path": "quack/epilogue/visit.py",
+      "bytes": 19955,
+      "sha256": "9132378e13b00fee98c749029c874e42a293ac98a499746f968c850157e40466"
+    },
+    {
+      "path": "quack/fast_math.py",
+      "bytes": 4212,
+      "sha256": "4781e18b037d523d3e7f1e517b4e2253761219743d175fd56a0b410173c42cd4"
+    },
+    {
+      "path": "quack/gemm.py",
+      "bytes": 39365,
+      "sha256": "2aa12bc6a85a1a8dcdf2b1a6d19e70b6a3ce56d598bda0196d206b9fb1341fcf"
+    },
+    {
+      "path": "quack/gemm_base.py",
+      "bytes": 61390,
+      "sha256": "c1a6eef4c90f93905e072f6604f577abc2bdefc3fd429b444857c8e18257cca1"
+    },
+    {
+      "path": "quack/gemm_config.py",
+      "bytes": 13438,
+      "sha256": "608a9488f24f11a43dcfe8a92235728debe83611d37587ec6a5495e5255b4009"
+    },
+    {
+      "path": "quack/gemm_default_epi.py",
+      "bytes": 7109,
+      "sha256": "a38d45694b389351a06769abfb7c134a8c9aca5d354d843f3287fe55501bfe5a"
+    },
+    {
+      "path": "quack/gemm_iface.py",
+      "bytes": 15496,
+      "sha256": "1b77136a7d43832e1eed8bd611de9be00f8ed22d2c743956875f965eca71ecc3"
+    },
+    {
+      "path": "quack/gemm_interface.py",
+      "bytes": 146362,
+      "sha256": "6215031bf8a870d16a1be224ecad21042076d62096f4621f477d63371eab92d3"
+    },
+    {
+      "path": "quack/gemm_runtime/__init__.py",
+      "bytes": 400,
+      "sha256": "3b60bca920240acf318c50776df095ef7daad2e81e17a127286694da7ff4414a"
+    },
+    {
+      "path": "quack/gemm_runtime/autotune.py",
+      "bytes": 17564,
+      "sha256": "eb7345f6de79995185ded2418d1cf9fce24429eab1ca29006c1d0a8eb2aa8cff"
+    },
+    {
+      "path": "quack/gemm_runtime/host.py",
+      "bytes": 21944,
+      "sha256": "96da5c3fee70d909e4b19a1c8d13b6e63346e05ff930ed36ce4d93d6bb9ac987"
+    },
+    {
+      "path": "quack/gemm_runtime/identity.py",
+      "bytes": 18674,
+      "sha256": "1aba6a71eaaa94c18ec1faa1f72a1a6b25ac5c607276a2e8b8129d8229d66150"
+    },
+    {
+      "path": "quack/gemm_runtime/torch_op.py",
+      "bytes": 14245,
+      "sha256": "a833f4d2a7bebb1d2bbac6ee8d00f2c3b25e0707cd6be83798b4d342c76df86b"
+    },
+    {
+      "path": "quack/gemm_sm100.py",
+      "bytes": 159555,
+      "sha256": "a60ed28ddd2bb45ee4b054bcec9bbc50bbc7a3beeb86a12798037bfa85b13215"
+    },
+    {
+      "path": "quack/gemm_sm120.py",
+      "bytes": 95200,
+      "sha256": "5dac69f91a5b1dfd395f3ddcc09175b84c69fdea9501b46c6a6ee436f080a67c"
+    },
+    {
+      "path": "quack/gemm_sm80.py",
+      "bytes": 6047,
+      "sha256": "40af41818594ca59d34b2d55f563052fa866d8a0f01b3a228bb384ad74cb1a06"
+    },
+    {
+      "path": "quack/gemm_sm90.py",
+      "bytes": 109965,
+      "sha256": "47fbbed39d9450196881e50c92a67dc9fd8a328916f18eafd4cef4674ef9713f"
+    },
+    {
+      "path": "quack/gemm_symmetric.py",
+      "bytes": 14064,
+      "sha256": "17747fbc7cb6b93b8e55adad9815904fd1f2c4ccefd7c1b3ec05958f8377f33e"
+    },
+    {
+      "path": "quack/gemm_tvm_ffi_utils.py",
+      "bytes": 37396,
+      "sha256": "5057c96d3451a7312bb75df35e539c930955e1e61a56b72fc4efda983e7cac57"
+    },
+    {
+      "path": "quack/gemm_w4.py",
+      "bytes": 10253,
+      "sha256": "e6e78c838ab854fc21c7da8f7eda72b7a6af47882ba5c37f581debb7bfc3ad8d"
+    },
+    {
+      "path": "quack/jax_utils.py",
+      "bytes": 4190,
+      "sha256": "cfd08ab8cd876d85e48226fcfa654d12f239585d87c4197c7204c29a2a2c4eeb"
+    },
+    {
+      "path": "quack/layout_utils.py",
+      "bytes": 17231,
+      "sha256": "b949dd0dc3467dc26c0828886eb61c6395fbcdc22ff270f03991b7367a528af1"
+    },
+    {
+      "path": "quack/linear.py",
+      "bytes": 15113,
+      "sha256": "ca72f0f37d5b1c1d6668faf40d73b4e11e464be8fda64f98c37eeff9378d221e"
+    },
+    {
+      "path": "quack/linear_cross_entropy.py",
+      "bytes": 33058,
+      "sha256": "2f0fde76bc5f828f5a07f45312abb1bbea3f920557511ea73146e92eed2b8d97"
+    },
+    {
+      "path": "quack/mlp.py",
+      "bytes": 12940,
+      "sha256": "8c937a8f3036f5a1e21b9032cd3ff9d9d7d864d6e80380eddf7d21977a3e6325"
+    },
+    {
+      "path": "quack/nvmmh_heuristic.py",
+      "bytes": 5803,
+      "sha256": "228a2c5a6fa75bbee251ea43cd549677f86137c4246ac2571db630315977f29d"
+    },
+    {
+      "path": "quack/operand_transform/__init__.py",
+      "bytes": 2002,
+      "sha256": "cf8e4d82559d382feb9056a9217f0a1ecb79ec1a19f28b231527efe4662c95c2"
+    },
+    {
+      "path": "quack/operand_transform/formats/__init__.py",
+      "bytes": 22238,
+      "sha256": "85e09e86e035fb662d7c1ab6dafce77c78e9eb980048c27109bdd9079b97f4ad"
+    },
+    {
+      "path": "quack/operand_transform/formats/qtip.py",
+      "bytes": 23004,
+      "sha256": "09b88454c079f56d9598a0b1ff504d41d722fc502156b3666d4bb3d4a862898d"
+    },
+    {
+      "path": "quack/operand_transform/frontend.py",
+      "bytes": 22884,
+      "sha256": "323da2dbd93b3ee48d57842148b558a57f58df4a90e4549984a97d4a66cb3c27"
+    },
+    {
+      "path": "quack/operand_transform/host.py",
+      "bytes": 15150,
+      "sha256": "ff8417929f7a101d0c516b947fed33e0b6a112fe198cd9fcdfe3a7bc6d9b4072"
+    },
+    {
+      "path": "quack/operand_transform/kinds.py",
+      "bytes": 13035,
+      "sha256": "ea09f06001360d5e8d2427a7651aab569e24f9ff8b2a161b87e5c075110cc4f3"
+    },
+    {
+      "path": "quack/operand_transform/rng.py",
+      "bytes": 2788,
+      "sha256": "4240197756c3d0395c17eed87adaa9ce81235fad9d986676f037d228c477631b"
+    },
+    {
+      "path": "quack/operand_transform/transform.py",
+      "bytes": 32782,
+      "sha256": "66657d598909908531935d0371df9c056d210617cab9cade72ee7faffa375b8b"
+    },
+    {
+      "path": "quack/pipeline.py",
+      "bytes": 31673,
+      "sha256": "273e2333a1b34e350af639f36c199c1fefb6f3f18e1dc1aab2f222024b6625b7"
+    },
+    {
+      "path": "quack/pipeline_checks.py",
+      "bytes": 4570,
+      "sha256": "302de33e4753fd9cfde0717954bcaf28799f91feb55688d70e38de71647656a9"
+    },
+    {
+      "path": "quack/reduce.py",
+      "bytes": 21159,
+      "sha256": "98bfbefbf08cff8cb2dce443724c8def9b388c7275ea63fbdec574db923904d4"
+    },
+    {
+      "path": "quack/reduction_base.py",
+      "bytes": 4116,
+      "sha256": "801185dff436d1cb9141f153c6980056932053bff0e716b0ec82fdd8558ecc3d"
+    },
+    {
+      "path": "quack/rms_final_reduce.py",
+      "bytes": 5037,
+      "sha256": "cc0904bf4a8c21a27efb74bdc328854acb890004395adbc24a60bac83fd306f8"
+    },
+    {
+      "path": "quack/rmsnorm.py",
+      "bytes": 73185,
+      "sha256": "1ed6a9bc196903195c179d3333c76c39432fdefdd857f5e95f1379f83c277ffb"
+    },
+    {
+      "path": "quack/rmsnorm_config.py",
+      "bytes": 20498,
+      "sha256": "5cb2fda1917dbed125c772c3075a7640f07c5264f9b926c35b2a3d1a79261772"
+    },
+    {
+      "path": "quack/rotary.py",
+      "bytes": 34694,
+      "sha256": "21956bde45a1eb3386dc5721e4df89f1fa2d0a0df5283851ec8cbad794b01fde"
+    },
+    {
+      "path": "quack/rounding.py",
+      "bytes": 55558,
+      "sha256": "693f1175b988752293c5a19e533fe68245ee48dfd46b38316e2283bf41d35da8"
+    },
+    {
+      "path": "quack/sm100_utils.py",
+      "bytes": 6783,
+      "sha256": "3abfd14454b6fed883e3c133311e528adb307a7e31fc1e6eefaa4918f0e29fd0"
+    },
+    {
+      "path": "quack/sm80_utils.py",
+      "bytes": 971,
+      "sha256": "d323a046c94022af01ecc4bcb4892066e8a538c224627243525edcda08dd9338"
+    },
+    {
+      "path": "quack/sm90_utils.py",
+      "bytes": 11016,
+      "sha256": "7a8537490c17e213e7deeb526c0a8bbfa97c5cc7066cbb69bf604a3c0da0567b"
+    },
+    {
+      "path": "quack/softmax.py",
+      "bytes": 15260,
+      "sha256": "1a57455919efc7888065fb94e6e4d83bfdcaf00486ea4921fe9b0f2a0ff41bd5"
+    },
+    {
+      "path": "quack/softmax_jax.py",
+      "bytes": 1886,
+      "sha256": "1b9d9b4e87b6376e814f7c993def3edd21f6a93616e9875065fcbdba2fa3005b"
+    },
+    {
+      "path": "quack/sort/bitonic_sort.py",
+      "bytes": 4816,
+      "sha256": "9b658652d6a73c135c8dfe157b51ee526e8fb26c1a8919c85574bb0d8e2bf404"
+    },
+    {
+      "path": "quack/sort/generate_sorting_networks.py",
+      "bytes": 14478,
+      "sha256": "31bcc2671ebb60990e46a9d9e5d8bd4bf13c072e0ec3fbcc7a01ebc470c6486e"
+    },
+    {
+      "path": "quack/sort/sorting_networks.py",
+      "bytes": 9686,
+      "sha256": "97fdbace2de05c3ff3fad9e6d9e01ccd1ae613e99b6b3d342a6a87e8e362bcbf"
+    },
+    {
+      "path": "quack/sort/utils.py",
+      "bytes": 1034,
+      "sha256": "9627ee19384c9380f55717c05180f1aeb5331f0c4b1a02dda229e913c5153778"
+    },
+    {
+      "path": "quack/spec/__init__.py",
+      "bytes": 113,
+      "sha256": "819b22bf1f323e4d1393b1aacc7a4eb6b8cdd9bddd481d3f30d295b74fdef2ab"
+    },
+    {
+      "path": "quack/spec/mma.py",
+      "bytes": 7419,
+      "sha256": "dd249088c9249dc6f7bee6a873d0e4afaf3bbc807111fee2727b1d589bf9ab9f"
+    },
+    {
+      "path": "quack/spec/smem.py",
+      "bytes": 5696,
+      "sha256": "d4c6bd507f9f8d9bb75467c8a801fc99aa79e3bf7c517eb31c5a9fdfc523f640"
+    },
+    {
+      "path": "quack/spec/tensor_spec.py",
+      "bytes": 65964,
+      "sha256": "f2f098660f667141441ea24123c1e3901b460b8ece74b68ca5fdfa206d4690bd"
+    },
+    {
+      "path": "quack/spec/tma.py",
+      "bytes": 9626,
+      "sha256": "0c3f2b0120fea1cbdfcede4c6f8a0c8cfe5d9ef7541720889a896f3767b9ed0c"
+    },
+    {
+      "path": "quack/spec/tmem.py",
+      "bytes": 11856,
+      "sha256": "01a34dc09ff86fb9e3453778d08b03f3e01c18435dc260e1430ce10b600710f5"
+    },
+    {
+      "path": "quack/split_k_reduce.py",
+      "bytes": 14648,
+      "sha256": "98443049a761e80706cec5e8adfbe709fecfb198c29cfc4513bbc8e73b783895"
+    },
+    {
+      "path": "quack/sync/__init__.py",
+      "bytes": 292,
+      "sha256": "7e8d1126866383a2de0f5f77a19c47c99519d25e83ebddaf22259910c155a6d8"
+    },
+    {
+      "path": "quack/sync/barrier.py",
+      "bytes": 6626,
+      "sha256": "cca678538f3d6fca24e9fcafe8014301095240de3113ab05dc05a01a0d44421f"
+    },
+    {
+      "path": "quack/tensormap_manager.py",
+      "bytes": 4890,
+      "sha256": "b702cb7424bab3cf81098221e1761d3ed1375d7e0e0004879259ec1acb339cf8"
+    },
+    {
+      "path": "quack/testing/__init__.py",
+      "bytes": 386,
+      "sha256": "1787ce2e0fbb7b931165453eda429da51f97ca4ad4872de1ae4ad791ed77f7ed"
+    },
+    {
+      "path": "quack/testing/pytest_plugin.py",
+      "bytes": 26319,
+      "sha256": "a5151db9f85ec5eff4f3da3dbaf4436f83fc32981a0c2f1fa6ace601964d1365"
+    },
+    {
+      "path": "quack/testing/trace.py",
+      "bytes": 1471,
+      "sha256": "fe954d1ceca2bf59a09ef18a5b2ed19ab7a1789cd4671db6f7e7cc268419268d"
+    },
+    {
+      "path": "quack/tile_scheduler.py",
+      "bytes": 74610,
+      "sha256": "10e3aff35a2fd80746cb4e48ceb234db1486cee838bd83cc61a37cb5c2861d94"
+    },
+    {
+      "path": "quack/topk.py",
+      "bytes": 22158,
+      "sha256": "f477b78053fd306ba9d7e1500613dcc28efde1e2e4c601fd1431179188f06cf3"
+    },
+    {
+      "path": "quack/trace.py",
+      "bytes": 423,
+      "sha256": "9e61da79f34bbbb93d32323e2cf62619eebd594d54ba637a0fb20302d5fdb26b"
+    },
+    {
+      "path": "quack/transform/__init__.py",
+      "bytes": 282,
+      "sha256": "ccdea9cf6bea671fbc009fd2c3559ea0c1eaec9924ee4a916cef616c9900c180"
+    },
+    {
+      "path": "quack/transform/hadamard.py",
+      "bytes": 39128,
+      "sha256": "498fdc3b86128740da88489e624a9fa382a4cdce8f722a0bdcea2e8933b9c44d"
+    },
+    {
+      "path": "quack/utils.py",
+      "bytes": 6853,
+      "sha256": "fc5b08b1c8dac663928ff83a7eb87880b801ea2b8867a7b711e18dba729606ec"
+    },
+    {
+      "path": "quack/varlen_utils.py",
+      "bytes": 11073,
+      "sha256": "50e9a7950340e6ef6f907716fe9cf16f456392aa64eb3d21d128c49bd91b791d"
+    },
+    {
+      "path": "quack_kernels-0.6.4.dist-info/INSTALLER",
+      "bytes": 4,
+      "sha256": "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508"
+    },
+    {
+      "path": "quack_kernels-0.6.4.dist-info/METADATA",
+      "bytes": 838,
+      "sha256": "eaabd9cf98c8747d22a0dbc0330587561210440e9504e7bf594c78ea8a08af1c"
+    },
+    {
+      "path": "quack_kernels-0.6.4.dist-info/RECORD",
+      "bytes": 15902,
+      "sha256": "755bbc6cd7b67b4632cd28b8a87d9a4ec8f2ce2c3b6e134c06d291053d3f427c"
+    },
+    {
+      "path": "quack_kernels-0.6.4.dist-info/REQUESTED",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "quack_kernels-0.6.4.dist-info/WHEEL",
+      "bytes": 91,
+      "sha256": "69e6228a0d35958183cc1812f07c565ce837b95eb51bd8a33acba9fa4f68d6c9"
+    },
+    {
+      "path": "quack_kernels-0.6.4.dist-info/licenses/LICENSE",
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "path": "quack_kernels-0.6.4.dist-info/top_level.txt",
+      "bytes": 6,
+      "sha256": "e9ee09affbcd25b65363094efc085ffec0de1c3134cdca9c7fb2ded7514ac71a"
+    }
+  ],
+  "cuda_files": [
+    {
+      "path": "bin/nvcc",
+      "bytes": 34436656,
+      "sha256": "0d3511aa5fe86ae6565618aeebbdd2a7e4fe8affa1980787071199e1cdae07dc"
+    },
+    {
+      "path": "bin/ptxas",
+      "bytes": 48342408,
+      "sha256": "afd8d1e1fa6e310f7faee44f6621e4c1315fb7fd6da7d4d87414358e12a651dc"
+    },
+    {
+      "path": "nvvm/libdevice/libdevice.10.bc",
+      "bytes": 465424,
+      "sha256": "d9ac788435fd8c34da4aa070971cfa4d54bfc027fa93f639a447f79947d06ea9"
+    },
+    {
+      "path": "nvvm/lib64/libnvvm.so.4.0.0",
+      "bytes": 65367552,
+      "sha256": "e55af1135e987372355d19d66cb74e1a1e99c32ac98ffad14fb567eef16e4f77"
+    }
+  ],
+  "known_dependency_conflict": {
+    "quack-kernels": "0.6.4 declares nvidia-cutlass-dsl==4.6.2",
+    "actual_tested_nvidia-cutlass-dsl": "4.7.0",
+    "installation": "Use the explicit pinned set with --no-deps; do not silently resolve or upgrade it."
+  },
+  "archive_availability": {
+    "flash_attn_wheel": {
+      "filename": "flash_attn_4-0.0.1.dev1+katago-py3-none-any.whl",
+      "sha256": "9ce90d0c89282558f53df3b0a44844c32050f4f4a1dc59f2d0ebd7a578f8366c",
+      "source_commit": "145b1010051dbfd4bdc41a0ae55d495b08d7a458",
+      "available_in_original_wsl_source_builds": true
+    },
+    "other_wheel_archive_hashes": null,
+    "limitation": "Installed codegen files are byte-locked; this is not an offline wheelhouse. Retrieve exact licensed packages before rebuilding elsewhere, then verify this lock."
+  }
+}

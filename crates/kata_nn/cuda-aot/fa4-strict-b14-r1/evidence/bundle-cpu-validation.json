@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "completed_utc": "2026-09-08T16:32:45.306809+00:00",
+  "status": "CPU_VALIDATION_PASS",
+  "windows_bundle_verify": "PASS",
+  "wsl_bundle_and_toolchain_verify": "PASS",
+  "locked_codegen_files": 499,
+  "integrity_tests": {
+    "passed": 6,
+    "failed": 0,
+    "seconds": 0.317,
+    "coverage": [
+      "relocated package identity without subprocesses",
+      "runtime byte corruption",
+      "source corruption independent of runtime identity",
+      "escaping manifest path",
+      "extra file",
+      "missing evidence"
+    ]
+  },
+  "gpu_executed": false,
+  "compiler_executed": false,
+  "verification_script_sha256": "3725125c8b39ec97f1d903094a59b00154cf9699163e96d488896333cf67339d",
+  "test_script_sha256": "530a32d7b99cba10f2b741ec9d0b5265c807b65e6f315fe3298ab2ac87f73a9b",
+  "runtime_fingerprint": "sha256:e142b91fe865445357aa754015d4ed9693ff8f9aa4a65eb631dbb9183c17fbc0",
+  "commands": [
+    "./.venv/Scripts/python.exe scripts/probe/fa4_strict_bundle.py verify",
+    "./.venv/Scripts/python.exe -m unittest discover -s scripts/probe -p test_fa4_strict_bundle.py -v",
+    "wsl.exe -d Ubuntu-24.04 -- /root/katagomo-fullflow/.final-migration-env/venv/bin/python /mnt/d/code/Rust_KataGo/scripts/probe/fa4_strict_bundle.py verify-toolchain"
+  ]
+}

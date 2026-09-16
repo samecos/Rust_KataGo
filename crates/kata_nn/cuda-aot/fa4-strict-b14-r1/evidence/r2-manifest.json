@@ -1,0 +1,1599 @@
+{
+  "schema": 1,
+  "status": "EXPORTED_UNVERIFIED",
+  "build_completed": true,
+  "numeric_verified": false,
+  "production_eligible": false,
+  "artifacts": [
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/cute_dsl_cutlass___call___strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__FakeTensorFloat161436112324158721152321_FakeTensorFloat161436112324158721152321_FakeTensorFloat16143611.mlir",
+      "bytes": 780786,
+      "sha256": "e0815309ff7bd15f8aefe4f947fddb9fdf362f89b09446e130a3760bf7fe410d"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/cute_dsl_cutlass___call___strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__FakeTensorFloat161436112324158721152321_FakeTensorFloat161436112324158721152321_FakeTensorFloat16143611_clean.mlir",
+      "bytes": 229171,
+      "sha256": "fc1cb15609e6d3a5828f12f45784cc5764cf6542e12dce110574525c53e973b0"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/cutlass___call___strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__FakeTensorFloat161436112324158721152321_FakeTensorFloat161436112324158721152321_FakeTensorFloat16143611.sm_120.cubin",
+      "bytes": 319296,
+      "sha256": "90341b6d5c54a69e983a7e7d8b62956748785ad44c3e4e1b2734b92f3da46749"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/cutlass___call___strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__FakeTensorFloat161436112324158721152321_FakeTensorFloat161436112324158721152321_FakeTensorFloat16143611.sm_120.ptx",
+      "bytes": 184057,
+      "sha256": "0856940c9f8a2054468c83b04614825ad68c2ea65b98e2083cc9e294aeb84011"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/fa4_strict_b14_m128_n96_fp32.h",
+      "bytes": 3095,
+      "sha256": "eac72c5ab57ab5ea5b842922fc3ad02bac5f549f7fd88f3000ce2c7f78f00e4c"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/fa4_strict_b14_m128_n96_fp32.o",
+      "bytes": 329472,
+      "sha256": "591fc66fb61c05c59a4834b8bec4adbb8709f30df06c5f0aa1783837ad695b47"
+    }
+  ],
+  "generator": {
+    "path": "/mnt/d/code/Rust_KataGo/scripts/probe/build_fa4_strict.py",
+    "bytes": 23704,
+    "sha256": "444bf26328eb95492e8cd252d764fc6fa5492d9d9d444ea85ac1824c40bf80e7"
+  },
+  "started_utc": "2026-09-08T13:10:18.663712+00:00",
+  "preparation_runtime": {
+    "python": "/root/katagomo-fullflow/.final-migration-env/venv/bin/python",
+    "version": "3.12.13 (main, Aug  7 2026, 02:25:39) [Clang 22.1.3 ]"
+  },
+  "parameters": {
+    "batch": 14,
+    "sequence": 361,
+    "heads": 12,
+    "head_dim": 32,
+    "tile_m": 128,
+    "tile_n": 96,
+    "stages": 1,
+    "threads": 128,
+    "qk_accumulator": "fp32",
+    "pv_accumulator": "fp32",
+    "input_output": "fp16",
+    "p_boundary": "FP32 exp/sum, then half before PV",
+    "scale_abi": "natural FP32 scale; never multiply by log2(e)",
+    "sample_natural_scale_f32": 0.1767767071723938,
+    "qkv_shape_bshd": [
+      14,
+      361,
+      12,
+      32
+    ],
+    "qkv_stride_elements": [
+      415872,
+      1152,
+      32,
+      1
+    ],
+    "output_stride_elements": [
+      138624,
+      384,
+      32,
+      1
+    ],
+    "mLSE": null
+  },
+  "abi_status": "must derive from this export; static fake descriptors may change the old ABI",
+  "acceptance": "codegen semantic audit, attention reference, TF3/ONNX all-head gates and clean ABBA pending",
+  "source_hashes": [
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/source/original/build_aot.py",
+      "bytes": 11544,
+      "sha256": "7178d0ef3ee793b61aa932df00117fb1c2cba08e0b2d4c581998502dc26f8765"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/source/original/flash_fwd.py",
+      "bytes": 53524,
+      "sha256": "3b97ed4cb20bb867d97fdea7eb03a86ccf32fc4b6f0c8e1ef0302ff1b4728045"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/source/original/flash_fwd_sm120.py",
+      "bytes": 2203,
+      "sha256": "abd017add69914e46f0fcfc017ad51c3d07d79fd87d15f969036ddd82bcc7da2"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/source/original/mask.py",
+      "bytes": 77082,
+      "sha256": "93f265c7a02295c4b63027fc8c10fe3a371669f579415e2f3a0480d069a6558b"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/source/original/softmax.py",
+      "bytes": 29406,
+      "sha256": "3ed1d321d7086615c20b9f930d03d8aecd3759a8d507fccf7bbee8cc391f2198"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/source/strict_flash_fwd.py",
+      "bytes": 53792,
+      "sha256": "39c3ad181b16e20efb554605e3e3cc5c87b57c9e6aefa6c9393a0f7921bb3d78"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/source/strict_flash_fwd_sm120.py",
+      "bytes": 2194,
+      "sha256": "903f390ea395ea8fdcdea3333124124cf95fb28eb3cc76b66db377a6e3d7644b"
+    },
+    {
+      "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/source/strict_softmax.py",
+      "bytes": 4477,
+      "sha256": "2189afa893faf57d6f5175de0ab19ea0cb024365f4ba71a1a8880fe5ea7ab087"
+    }
+  ],
+  "source_ast_audit": "PASS",
+  "reference_toolchain": {
+    "executable": "/root/katagomo-fullflow/.final-migration-env/venv/bin/python",
+    "version": "3.12.13 (main, Aug  7 2026, 02:25:39) [Clang 22.1.3 ]",
+    "distributions": {
+      "flash-attn-4": "0.0.1.dev1+katago",
+      "nvidia-cutlass-dsl": "4.7.0",
+      "quack-kernels": "0.6.4",
+      "torch": "2.13.0"
+    },
+    "module_sources": {
+      "flash_attn.cute.flash_fwd": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_fwd.py",
+        "sha256": "3b97ed4cb20bb867d97fdea7eb03a86ccf32fc4b6f0c8e1ef0302ff1b4728045"
+      },
+      "flash_attn.cute.flash_fwd_sm120": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_fwd_sm120.py",
+        "sha256": "abd017add69914e46f0fcfc017ad51c3d07d79fd87d15f969036ddd82bcc7da2"
+      },
+      "flash_attn.cute.mask": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/mask.py",
+        "sha256": "93f265c7a02295c4b63027fc8c10fe3a371669f579415e2f3a0480d069a6558b"
+      },
+      "flash_attn.cute.softmax": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/softmax.py",
+        "sha256": "3ed1d321d7086615c20b9f930d03d8aecd3759a8d507fccf7bbee8cc391f2198"
+      }
+    }
+  },
+  "reference_metadata": {
+    "path": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-reference/fa4_b14_cc6434eb7cd02bdd.json",
+    "bytes": 2250,
+    "sha256": "c8427e96113055cad10f6ee760bff5a316a34a10ef24241595756b6fc2cf4a2c"
+  },
+  "build_environment": {
+    "CUDA_VISIBLE_DEVICES": "",
+    "CUDA_HOME": "/usr/local/cuda-13.3",
+    "CUDA_PATH": "/usr/local/cuda-13.3",
+    "FLASH_ATTENTION_ARCH": "sm_120",
+    "CUTE_DSL_ARCH": "sm_120",
+    "CUTE_DSL_PTXAS_PATH": "/usr/local/cuda-13.3/bin/ptxas",
+    "FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED": "0",
+    "CUTE_DSL_KEEP": "ir-debug,ir,ptx,cubin",
+    "CUTE_DSL_DUMP_DIR": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2",
+    "CUTE_DSL_CACHE_DIR": "/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/.dsl-cache",
+    "CUTE_DSL_DISABLE_FILE_CACHING": "1",
+    "CUTE_DSL_LINEINFO": "1"
+  },
+  "build_toolchain": {
+    "python": "/root/katagomo-fullflow/.final-migration-env/venv/bin/python",
+    "version": "3.12.13 (main, Aug  7 2026, 02:25:39) [Clang 22.1.3 ]",
+    "distributions": {
+      "flash-attn-4": "0.0.1.dev1+katago",
+      "nvidia-cutlass-dsl": "4.7.0",
+      "quack-kernels": "0.6.4",
+      "torch": "2.13.0"
+    },
+    "nvcc": {
+      "path": "/usr/local/cuda-13.3/bin/nvcc",
+      "output": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Jun_09_02:43:40_PM_PDT_2026\nCuda compilation tools, release 13.3, V13.3.73\nBuild cuda_13.3.r13.3/compiler.38244171_0"
+    },
+    "ptxas": {
+      "path": "/usr/local/cuda-13.3/bin/ptxas",
+      "output": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Jun_09_02:43:40_PM_PDT_2026\nCuda compilation tools, release 13.3, V13.3.73\nBuild cuda_13.3.r13.3/compiler.38244171_0"
+    },
+    "math_source": {
+      "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/math.py",
+      "bytes": 70113,
+      "sha256": "8dd3618c88d5b1e6bfd70e185b05ab57d59a3c94feb17e6dbc4b697934fa61ec"
+    },
+    "module_sources": {
+      "cutlass": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/__init__.py",
+        "bytes": 5040,
+        "sha256": "41f94fc5c074bb5933f9e3ed405936123e5595e3244cbde35cb8d10eea6e5006"
+      },
+      "cutlass._mlir._mlir_libs": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/__init__.py",
+        "bytes": 13540,
+        "sha256": "5341996e80ef7c76e1240d4caf7e8b76672b1595b07bcff9a9287019cad1e7da"
+      },
+      "cutlass._mlir.dialects._arith_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_arith_enum_gen.py",
+        "bytes": 8088,
+        "sha256": "7778a74c79d9cc555d12a9876b30ec9ebcad05d0680932ecc07ab356abdd91e4"
+      },
+      "cutlass._mlir.dialects._arith_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_arith_ops_gen.py",
+        "bytes": 109529,
+        "sha256": "ae779872d0c1ea7bfb3b02ddbc1fc3edebb38dd383a9d109e817aea6f278e0a8"
+      },
+      "cutlass._mlir.dialects._builtin_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_builtin_ops_gen.py",
+        "bytes": 6776,
+        "sha256": "466d5ba3390c785dd2dbd1093c555c284a9ca4e0d38346699ce07c586ec120cb"
+      },
+      "cutlass._mlir.dialects._cf_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cf_ops_gen.py",
+        "bytes": 11817,
+        "sha256": "c6058d55ee6e6dc7200fe61acf79ba03dbc8471a56f6a3a93fa79f0fa17fa945"
+      },
+      "cutlass._mlir.dialects._core_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_core_enum_gen.py",
+        "bytes": 17111,
+        "sha256": "f1b5f33bd70bcb1d1d9deb0041ed717c798f583f1f3ec8c1ff8732e4c3d69ab9"
+      },
+      "cutlass._mlir.dialects._core_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_core_ops_gen.py",
+        "bytes": 173093,
+        "sha256": "d95ff110708e812927c29d24acbc241ff005c9dbb400922bae8d149e98b05cf5"
+      },
+      "cutlass._mlir.dialects._cuda_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cuda_enum_gen.py",
+        "bytes": 35172,
+        "sha256": "9e7da3517e6f2fa3c8cb36076fa3216d2f80511c60397cf550a6b85d563aedfc"
+      },
+      "cutlass._mlir.dialects._cuda_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cuda_ops_gen.py",
+        "bytes": 306056,
+        "sha256": "bad94851f261bc926c8d3aa37b89a43e0d94e26c655209a810be2b9d59a58aa4"
+      },
+      "cutlass._mlir.dialects._cute_nvgpu_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cute_nvgpu_enum_gen.py",
+        "bytes": 47547,
+        "sha256": "c8fcf49c7bbd0e7f0e50a2efa7beb02cc15637eb40e65ab0e6246f2b6c0dc286"
+      },
+      "cutlass._mlir.dialects._cute_nvgpu_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cute_nvgpu_ops_gen.py",
+        "bytes": 158370,
+        "sha256": "0ce88b23e559408a0b1ebfa20d539affef50b83be74e65233dbe2dd72d118a64"
+      },
+      "cutlass._mlir.dialects._cute_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_cute_ops_gen.py",
+        "bytes": 272402,
+        "sha256": "f73ee1d3dec138766f3f681d96933a62bdb00cf4799eadb72e765902712cf033"
+      },
+      "cutlass._mlir.dialects._func_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_func_ops_gen.py",
+        "bytes": 19096,
+        "sha256": "efffe5a9678f29519ae466c68f78d8b5d2d21e2f8aacd9d4eca94b668afef731"
+      },
+      "cutlass._mlir.dialects._gpu_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_gpu_enum_gen.py",
+        "bytes": 12434,
+        "sha256": "5ddfc516e85d2d8f311038e8ec294938d832aa0e247b71639fa0f4895295d3ca"
+      },
+      "cutlass._mlir.dialects._gpu_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_gpu_ops_gen.py",
+        "bytes": 231424,
+        "sha256": "70b42386b30bf99cb9861c7fa086918617b8ef364c6812b26cb2d913571c2bab"
+      },
+      "cutlass._mlir.dialects._iket_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_iket_enum_gen.py",
+        "bytes": 207,
+        "sha256": "b291eb690f1cd809f3a5ee8ef0a0a5e28d748223419daaba489f5e42a4314e7d"
+      },
+      "cutlass._mlir.dialects._iket_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_iket_ops_gen.py",
+        "bytes": 15462,
+        "sha256": "fa691a6007433a9c40f150375d3497fa65a6eca8750a21d3ae3b3d500af0c9f9"
+      },
+      "cutlass._mlir.dialects._lir_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_lir_enum_gen.py",
+        "bytes": 2157,
+        "sha256": "013b4a6572969f539faa9a3a398a740ac06adce4a70eda1347265dbba7ca262d"
+      },
+      "cutlass._mlir.dialects._lir_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_lir_ops_gen.py",
+        "bytes": 180775,
+        "sha256": "6b5fd3bed13b7c54e421b2454108b03bc066a016261da304e9348defb43b96f0"
+      },
+      "cutlass._mlir.dialects._llvm_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_llvm_enum_gen.py",
+        "bytes": 30205,
+        "sha256": "3d0d711708fbb6f4da222363a503bef41df8adb1b2361b632aa3a7ac728fe849"
+      },
+      "cutlass._mlir.dialects._llvm_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_llvm_ops_gen.py",
+        "bytes": 605612,
+        "sha256": "50bde508daa14718ff07cdb6ca027c338e29a0c42536447dca1dababad8de69c"
+      },
+      "cutlass._mlir.dialects._math_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_math_ops_gen.py",
+        "bytes": 90608,
+        "sha256": "c5c31103bede12971f22cc74bba739270ba0c584e029b4d19e5a2ba85de07dd7"
+      },
+      "cutlass._mlir.dialects._nvgpu_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_nvgpu_enum_gen.py",
+        "bytes": 6409,
+        "sha256": "91c5d0b06882722f9290cc5a1b3bb5d5b39ce3c658c3f27fd371291e0fbf4af4"
+      },
+      "cutlass._mlir.dialects._nvgpu_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_nvgpu_ops_gen.py",
+        "bytes": 68294,
+        "sha256": "4f369a2a80c3828fa077a37d0721f70533655157441f249bcea2a20e9a84dcc4"
+      },
+      "cutlass._mlir.dialects._nvvm_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_nvvm_enum_gen.py",
+        "bytes": 68460,
+        "sha256": "be38933c74015c29ef3f5161c1055e20e616aa4028cbd6e40070db7a87d45d69"
+      },
+      "cutlass._mlir.dialects._nvvm_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_nvvm_ops_gen.py",
+        "bytes": 610230,
+        "sha256": "306c0775c0c70e9c3a0493a8771909dbc80001c6e3788779f27980f5cb6ac37e"
+      },
+      "cutlass._mlir.dialects._ods_common": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_ods_common.py",
+        "bytes": 9150,
+        "sha256": "6dba0b066414dd7056758da2257d229f3ade865ff590e45efc07d78f4f32d837"
+      },
+      "cutlass._mlir.dialects._pyir_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_pyir_ops_gen.py",
+        "bytes": 4247,
+        "sha256": "2fbde79893a05df20d49721709d606d8a29174a44577491c035b14e1369521ab"
+      },
+      "cutlass._mlir.dialects._scf_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_scf_ops_gen.py",
+        "bytes": 46687,
+        "sha256": "458e40b6768deae77cfb025a287590cabd8427f13a62a3634b8624228bba44a0"
+      },
+      "cutlass._mlir.dialects._ub_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_ub_ops_gen.py",
+        "bytes": 3341,
+        "sha256": "d370e46c2bcce3905a7ea68b6246496ff328b062f3943f84b9b7feae53199fdd"
+      },
+      "cutlass._mlir.dialects._vector_enum_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_vector_enum_gen.py",
+        "bytes": 3505,
+        "sha256": "21d664d059fc46b5df4de735709c7ebf736990fe30ea5f9319dce7e1d14ea056"
+      },
+      "cutlass._mlir.dialects._vector_ops_gen": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/_vector_ops_gen.py",
+        "bytes": 140371,
+        "sha256": "7934d7bc9609b514ace63704d069d55033706df83c9743ef43e903d396dc5be7"
+      },
+      "cutlass._mlir.dialects.arith": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/arith.py",
+        "bytes": 2978,
+        "sha256": "536dfc741e28bad1014e7930af1ac14c861a70f70ee4a5bd953947cf3b5fd59e"
+      },
+      "cutlass._mlir.dialects.builtin": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/builtin.py",
+        "bytes": 1076,
+        "sha256": "52b32b8b0f315895bf296b9748a30a953b77b44ce8f3ddc41c9a22daaac4278e"
+      },
+      "cutlass._mlir.dialects.cf": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/cf.py",
+        "bytes": 61,
+        "sha256": "b726137ce45d091b8d643e82aa5d8c07e59a14a45ce232611f4f1e95e137b1f9"
+      },
+      "cutlass._mlir.dialects.core": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/core.py",
+        "bytes": 866,
+        "sha256": "f81205aa322c1eafa7203b67e230fcce6562295b2cb1882e880369251d58a3ff"
+      },
+      "cutlass._mlir.dialects.cuda": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/cuda.py",
+        "bytes": 7285,
+        "sha256": "7c464583990009bce487a3e26e9732b28ab3f705aced942c985a57efcc0166cf"
+      },
+      "cutlass._mlir.dialects.cute": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/cute.py",
+        "bytes": 645,
+        "sha256": "86fa836c636fcdbb86e26665a3a3abc5c0aaf92cc67a980782e9e9520ec17d32"
+      },
+      "cutlass._mlir.dialects.cute_nvgpu": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/cute_nvgpu.py",
+        "bytes": 657,
+        "sha256": "d8a2457fae2b8e2f079a7165fc3d89d8a3726ff8d6e7b5b7577e48a4700ceda5"
+      },
+      "cutlass._mlir.dialects.func": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/func.py",
+        "bytes": 12010,
+        "sha256": "034373bb2ac320d425a137f90e9233db506d55a0ea45f46cf8ecf285afffbc62"
+      },
+      "cutlass._mlir.dialects.gpu": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/gpu/__init__.py",
+        "bytes": 10986,
+        "sha256": "da264c4e2578f1aaa684e95d60f9d2cc5a48c045782b1f9824332501d4c804c6"
+      },
+      "cutlass._mlir.dialects.iket": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/iket.py",
+        "bytes": 593,
+        "sha256": "3c64f24fbca7b55027e8952456bb286248e09a598617a96ff0e13e2641e1e9ee"
+      },
+      "cutlass._mlir.dialects.lir": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/lir.py",
+        "bytes": 658,
+        "sha256": "755d503ef695a8c1e438dcc850d5cb122f27140ecc8ba9c30b278b6cb4a003b1"
+      },
+      "cutlass._mlir.dialects.llvm": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/llvm.py",
+        "bytes": 429,
+        "sha256": "6afd3f4ae9772ce7416b4f2bc5feebf27963033885b95a844437b706470ad3d3"
+      },
+      "cutlass._mlir.dialects.math": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/math.py",
+        "bytes": 65,
+        "sha256": "803105406c02aaa5820dbe0975049a04f85a858c1c50f25b1fd7c56d19c5c70a"
+      },
+      "cutlass._mlir.dialects.nvgpu": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/nvgpu.py",
+        "bytes": 156,
+        "sha256": "c18e14076ac79c758e151c3c85e7b2e264d530e11b6be333b128c92fb6dc391c"
+      },
+      "cutlass._mlir.dialects.nvvm": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/nvvm.py",
+        "bytes": 95,
+        "sha256": "adcfef033dfdcf2a4871466decfd30f56792f2ad5baf753a0ac8acd6a40b0d28"
+      },
+      "cutlass._mlir.dialects.pyir": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/pyir.py",
+        "bytes": 720,
+        "sha256": "5eb2e42ff28bfdcd836487f061128d952478f3c65a757e20914b277a2b4b337a"
+      },
+      "cutlass._mlir.dialects.scf": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/scf.py",
+        "bytes": 10021,
+        "sha256": "f4331ebb0ec4df0d37ea283846ea63f45aa913aed733c22f8ce658ff706b701a"
+      },
+      "cutlass._mlir.dialects.ub": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/ub.py",
+        "bytes": 61,
+        "sha256": "b143b103fbd7b6a3a99c87819e839290c3d5503c3e473797addaca9c27fc88de"
+      },
+      "cutlass._mlir.dialects.vector": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/dialects/vector.py",
+        "bytes": 101,
+        "sha256": "3e84c6fdb15f604818d8de4064b292bce1a6751dd62643e41e2a9b34da32083d"
+      },
+      "cutlass._mlir.execution_engine": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/execution_engine.py",
+        "bytes": 1491,
+        "sha256": "107c65308abe6c1614677acf6184d12533177257fb1da272ce6ba0eeccb0e563"
+      },
+      "cutlass._mlir.extras.meta": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/extras/meta.py",
+        "bytes": 2967,
+        "sha256": "848401cdf2fe3e73a7c1a9525e4540eb3e7505ffa8afebb77d5c51de6928e54e"
+      },
+      "cutlass._mlir.extras.types": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/extras/types.py",
+        "bytes": 4433,
+        "sha256": "1280e7ffa096478ec9dc8477fac9c83b46a1e11318d0980e594feb8e8a743ea1"
+      },
+      "cutlass._mlir.ir": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/ir.py",
+        "bytes": 9593,
+        "sha256": "cb8696c20240ee8624ac73dbf1414bb5a86765e932bddc28cc9ac11737cd0eb7"
+      },
+      "cutlass._mlir.passmanager": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/passmanager.py",
+        "bytes": 56,
+        "sha256": "5d60815bf1973ee60545f5e33fce974f89d5fa8d7a647f3ff99b42df532be94e"
+      },
+      "cutlass._mlir_helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/__init__.py",
+        "bytes": 934,
+        "sha256": "1d53a9b8bc47f8a1666bcc22a575d6aecdb8355401b6f36d7967414c688348f9"
+      },
+      "cutlass._mlir_helpers.arith": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/arith.py",
+        "bytes": 34727,
+        "sha256": "5423f9895aa905d6dbc315c418d07a743108fed7db42b7ba2fa58c80c64b2075"
+      },
+      "cutlass._mlir_helpers.dialect_proxy": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/dialect_proxy.py",
+        "bytes": 4473,
+        "sha256": "4899363779832a087b6fefbae99edfb5e98dad1a7d98c2dcbc98341c26129c6d"
+      },
+      "cutlass._mlir_helpers.gpu": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/gpu.py",
+        "bytes": 2278,
+        "sha256": "690839e88e3fd282d47b3e07c38fb241d47b889bd77aaebbc1dae0e01e5400a1"
+      },
+      "cutlass._mlir_helpers.lru_cache_ir": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/lru_cache_ir.py",
+        "bytes": 2744,
+        "sha256": "af5be8362f8748256131049e0a9806344a341c34ca5ab5e301c204209cdce85a"
+      },
+      "cutlass._mlir_helpers.math": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/math.py",
+        "bytes": 70113,
+        "sha256": "8dd3618c88d5b1e6bfd70e185b05ab57d59a3c94feb17e6dbc4b697934fa61ec"
+      },
+      "cutlass._mlir_helpers.nanobind_compat": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/nanobind_compat.py",
+        "bytes": 2408,
+        "sha256": "d382d9d3675c8f529632608df3ac095867d47f771540a5b61353ebaeb64f6dae"
+      },
+      "cutlass._mlir_helpers.op": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/op.py",
+        "bytes": 22559,
+        "sha256": "da4188d4e693dafa883a464801ab04e1f5730d73b5347041d4bb92acdf68fcb2"
+      },
+      "cutlass._mlir_helpers.vector": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir_helpers/vector.py",
+        "bytes": 50938,
+        "sha256": "c13326e951c55325ae42c631c7afd7d816b9056ab33f0b136d6b8184b0087829"
+      },
+      "cutlass.base_dsl": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/__init__.py",
+        "bytes": 1051,
+        "sha256": "01d57bfdf8cb4e5b3b70c29b86d5e96e2b352839981f6b5efa55cf341ecc8954"
+      },
+      "cutlass.base_dsl.arch": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/arch.py",
+        "bytes": 937,
+        "sha256": "f67aad9ba035c8356f77eeb06d89cba7ecb888c1332eb64db127375b7f55b532"
+      },
+      "cutlass.base_dsl.array": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/array.py",
+        "bytes": 145418,
+        "sha256": "f4c12285c9e44d8cd783e5b932b573283079d642f3fb22eefa8fe801eab12d32"
+      },
+      "cutlass.base_dsl.ast_helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/ast_helpers.py",
+        "bytes": 25321,
+        "sha256": "5b357a0084b72b6c9cc6391921e8a5d08e743652f2b60d649a88bf50957abcfc"
+      },
+      "cutlass.base_dsl.ast_preprocessor": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/ast_preprocessor.py",
+        "bytes": 124137,
+        "sha256": "97c9acb67af2bf2fb01d73c39556e906954ede8251a42b73315d0330d3c554c8"
+      },
+      "cutlass.base_dsl.cache_helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/cache_helpers.py",
+        "bytes": 17425,
+        "sha256": "b0e156e7cba6d21f77a7f2090b938c28378189592a3654123da837868d8de8ab"
+      },
+      "cutlass.base_dsl.common": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/common.py",
+        "bytes": 35373,
+        "sha256": "10e6b0156a025dc0a1f3ce96293b00c1b5b8912f68686b0942f43099ff990bc9"
+      },
+      "cutlass.base_dsl.compiler": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/compiler.py",
+        "bytes": 58816,
+        "sha256": "22d12afa617047e7b4828cb22cb099dfaa54c38a7ff634b5fda843ed03865b97"
+      },
+      "cutlass.base_dsl.diagnostics": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/diagnostics.py",
+        "bytes": 83032,
+        "sha256": "031747fe53b83cf2fd39944b1a0db7c6edcadc93991633e0c711635eb9411779"
+      },
+      "cutlass.base_dsl.dsl": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/dsl.py",
+        "bytes": 132866,
+        "sha256": "15b0a367abdc43b54ab2997439fbdc734fd4e928055593bb5c43b6b8f72fb3d0"
+      },
+      "cutlass.base_dsl.enums": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/enums.py",
+        "bytes": 5392,
+        "sha256": "c31be76fc2e18b89afd80913efc249a2685954f07f84301543496a9f562e68c3"
+      },
+      "cutlass.base_dsl.env_manager": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/env_manager.py",
+        "bytes": 28302,
+        "sha256": "e30778d8cae13eb4adb077221f2a2bd4eacff3546fbdea89fd62600ac9dddbe9"
+      },
+      "cutlass.base_dsl.export": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/export/__init__.py",
+        "bytes": 1083,
+        "sha256": "6a77888af69a74a3ec495f0bfe93fadeaeee3567ce68088453388f9b18b1e5bc"
+      },
+      "cutlass.base_dsl.export.c_header_generator": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/export/c_header_generator.py",
+        "bytes": 21993,
+        "sha256": "f30edb50ae0d13b160642b02f5122b2c1a01320825bc6f23d0119695a82ed01b"
+      },
+      "cutlass.base_dsl.export.export": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/export/export.py",
+        "bytes": 11117,
+        "sha256": "8165f185d64de2c96d75ca929324b645e12bdefa3fa440dbf7e359ce8658371a"
+      },
+      "cutlass.base_dsl.export.external_binary_module": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/export/external_binary_module.py",
+        "bytes": 6683,
+        "sha256": "ccff0246f8cd02c9666b4c8a896ef077d8996a333d367c39f06c41976e4aa004"
+      },
+      "cutlass.base_dsl.ffi": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/ffi.py",
+        "bytes": 25359,
+        "sha256": "c0d842c0b43b4fb1123c760c7efbd9166e2d3f8960a18a320b0c9256b27928dc"
+      },
+      "cutlass.base_dsl.jit_executor": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/jit_executor.py",
+        "bytes": 65236,
+        "sha256": "06c91ba84b7a1b43b93e0f2de97e872426104ba1773f904c58845d5ae74870ea"
+      },
+      "cutlass.base_dsl.leaf_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/leaf_utils.py",
+        "bytes": 22619,
+        "sha256": "d47745b9208ee8d5e0f224f5445fb1afd61a00dc2cd81ea3369a653ca71ad5f9"
+      },
+      "cutlass.base_dsl.multi_stage_manager": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/multi_stage_manager.py",
+        "bytes": 15689,
+        "sha256": "74089f96d67ab3925bea728822622c23280133aec09ff7ec8072e500698bef39"
+      },
+      "cutlass.base_dsl.native_struct": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/native_struct.py",
+        "bytes": 17447,
+        "sha256": "0695f0044e8d78a697546dfd616f8aac9aa836a2790a86c37489ab798f7fa152"
+      },
+      "cutlass.base_dsl.pointer": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/pointer.py",
+        "bytes": 2006,
+        "sha256": "8c9ce44d377155ad6f312c2892165b7a2e2d90d95f33869bf12a1ef8cc00c5e9"
+      },
+      "cutlass.base_dsl.preprocess_mode": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/preprocess_mode.py",
+        "bytes": 3471,
+        "sha256": "4b099cbcb7d9e507d9cbb2dfc5dfffc7a21b8402b2d97079f9ba9f972c5bf65f"
+      },
+      "cutlass.base_dsl.pyir_meta_table": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/pyir_meta_table.py",
+        "bytes": 29528,
+        "sha256": "305603d754783fb7cb3dda77bada406aac8b9ce184117f43c2f67ee36374e3fe"
+      },
+      "cutlass.base_dsl.pyir_preprocessor": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/pyir_preprocessor.py",
+        "bytes": 86488,
+        "sha256": "117a434078d6ce92ac791fd6c34425520094747f358aef6001fa4b8f7edae08c"
+      },
+      "cutlass.base_dsl.pyir_runtime": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/pyir_runtime.py",
+        "bytes": 135897,
+        "sha256": "c862ba6f5c2b54ab3d87429fd0358fe97a0950ed8d8debca0a0c746b761d0886"
+      },
+      "cutlass.base_dsl.runtime": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/runtime/__init__.py",
+        "bytes": 769,
+        "sha256": "3f2e7ac0cde8507b1d8ee9ea6175eba5a36bc65133d39bcb22fe5a8469f6637b"
+      },
+      "cutlass.base_dsl.runtime.cuda": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/runtime/cuda.py",
+        "bytes": 32761,
+        "sha256": "49deae87d6c52a7567fa9522b9ac605f544d6f829b7b385389ca320a8d64d9af"
+      },
+      "cutlass.base_dsl.runtime.dlpack_types": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/runtime/dlpack_types.py",
+        "bytes": 2345,
+        "sha256": "be1c0d9b105b7871f359fe8c0143fe03ebe5704bbbc81bb97144c72aa2aa4f5e"
+      },
+      "cutlass.base_dsl.runtime.jit_arg_adapters": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/runtime/jit_arg_adapters.py",
+        "bytes": 12645,
+        "sha256": "c103090fa7f92610f2409ce03d832571fab03f86894f873928133f7bd1732be7"
+      },
+      "cutlass.base_dsl.swizzle": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/swizzle.py",
+        "bytes": 13825,
+        "sha256": "c4b600e94107d48cf54f3208630da71aa3c895cf7ac70615c921c11b88f3cea7"
+      },
+      "cutlass.base_dsl.tvm_ffi_builder": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/tvm_ffi_builder/__init__.py",
+        "bytes": 1003,
+        "sha256": "6629b6db87a6728593c9a1df33750f7827f9df8247e1eaee264a996bf8f7a0f6"
+      },
+      "cutlass.base_dsl.tvm_ffi_builder.call_provider": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/tvm_ffi_builder/call_provider.py",
+        "bytes": 11738,
+        "sha256": "2f95ac821ea2b5124f162581370612f946cf2f69580ba2f76c5a220efada81d3"
+      },
+      "cutlass.base_dsl.tvm_ffi_builder.mlir_builder": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/tvm_ffi_builder/mlir_builder.py",
+        "bytes": 20412,
+        "sha256": "98df6a1d4437aead0adddd094053883d86f4ce013987d73a6920a4a2c45ba1c4"
+      },
+      "cutlass.base_dsl.tvm_ffi_builder.spec": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/tvm_ffi_builder/spec.py",
+        "bytes": 16403,
+        "sha256": "a7a8240d7dbaa143b10e50cc6ca557bf9c8ac29c501e719b215159b312b7c18c"
+      },
+      "cutlass.base_dsl.tvm_ffi_builder.tvm_ffi_builder": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/tvm_ffi_builder/tvm_ffi_builder.py",
+        "bytes": 105091,
+        "sha256": "b90ad998347f452ee3dd83eb02bc000e61e9e682abb8ee12d330dc42c0234163"
+      },
+      "cutlass.base_dsl.typing": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/typing.py",
+        "bytes": 110824,
+        "sha256": "a9776d6930fc075e23e1ff5fb1516b2530f376c3c4d8570780c8437f813142fe"
+      },
+      "cutlass.base_dsl.utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/__init__.py",
+        "bytes": 659,
+        "sha256": "98a1326d78c37c65dcc4fa36e2b91ff65cc2a564b8952bbc761c1ac0e94cbe8d"
+      },
+      "cutlass.base_dsl.utils.logger": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/logger.py",
+        "bytes": 3590,
+        "sha256": "9e5858c6baa0c5f5807dd7f9167c1501b75ef0a78297a4282fd0c68ddec9ced3"
+      },
+      "cutlass.base_dsl.utils.stacktrace": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/stacktrace.py",
+        "bytes": 6573,
+        "sha256": "2130842a7fcb7352704361b7b55501315a144caf83338c4463c2028f5f4e4662"
+      },
+      "cutlass.base_dsl.utils.timer": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/timer.py",
+        "bytes": 1988,
+        "sha256": "da1b98ab2bd561861e43a2d340e72ef2540239a86a4b02a3e9e686895784b123"
+      },
+      "cutlass.base_dsl.utils.tree_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/utils/tree_utils.py",
+        "bytes": 33888,
+        "sha256": "ad0c53e97d6fa6acdaa81b124eeb90ec1cacfb595196115646466fa48d89b80c"
+      },
+      "cutlass.base_dsl.vector": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/vector.py",
+        "bytes": 1016,
+        "sha256": "53520dcee8740266f1b18286f9392b70e3b1bc858472c1ee178584c7a021d647"
+      },
+      "cutlass.base_dsl.version_info": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/base_dsl/version_info.py",
+        "bytes": 885,
+        "sha256": "4762f12f6071cc5a51acf726701372bae5fc77003e35209a91c47a16d5fee4f0"
+      },
+      "cutlass.cute": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/__init__.py",
+        "bytes": 9763,
+        "sha256": "38f98d9faad2556ed8a0db809b799d9899521e1492024439dd87188257bb0900"
+      },
+      "cutlass.cute._tvm_ffi_args_spec_converter": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/_tvm_ffi_args_spec_converter.py",
+        "bytes": 21399,
+        "sha256": "d8504cb134317fb218b42ca362de3c8be11277ebccd821510a79933c53f448ef"
+      },
+      "cutlass.cute.algorithm": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/algorithm.py",
+        "bytes": 26353,
+        "sha256": "0ba8d10754343ab2ad2a83a9641a36f55a6bf8e0f635b9edd19a9c0dd7e66cc2"
+      },
+      "cutlass.cute.arch": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/__init__.py",
+        "bytes": 4411,
+        "sha256": "a7d860bb865cc52c7e9427b1cad132a5f747d681f53feefe8b887c42b0ddee17"
+      },
+      "cutlass.cute.arch.clc": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/clc.py",
+        "bytes": 4870,
+        "sha256": "9e53b3e21e807ac5513aa08753c6dbc6812838c8abaacd24b516b2f4b3543318"
+      },
+      "cutlass.cute.arch.constants": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/constants.py",
+        "bytes": 707,
+        "sha256": "deed9efc5dbd9c8049d6b2a35f0f5e200e479b811e63c709df0772bd28514044"
+      },
+      "cutlass.cute.arch.elect": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/elect.py",
+        "bytes": 5497,
+        "sha256": "ef42c6f418f54a5cb4ac759dbdf10150a64e93be3d139c02223d5774400e5de6"
+      },
+      "cutlass.cute.arch.mbar": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/mbar.py",
+        "bytes": 16864,
+        "sha256": "6f05b86dbc70aeed8ee129f5d8b7c1ad0345a833a49a630a04768d08b177ad52"
+      },
+      "cutlass.cute.arch.numeric_conversion": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/numeric_conversion.py",
+        "bytes": 14051,
+        "sha256": "a8fa5b4f79e7d0513dea46b856cb8eab04ed27359e5d9a7e772db2d6c2f01775"
+      },
+      "cutlass.cute.arch.nvvm_wrappers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/nvvm_wrappers.py",
+        "bytes": 177741,
+        "sha256": "6ff681745bf86709b8e0ff14df2862ba3ca502e0c4ffcd073ab37e4556622b60"
+      },
+      "cutlass.cute.arch.smem": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/smem.py",
+        "bytes": 8959,
+        "sha256": "d42b750590eb9fe5fe695ef2175bc7bac5d1a5aabbe90972c2cb877a2c3a423a"
+      },
+      "cutlass.cute.arch.tmem": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/arch/tmem.py",
+        "bytes": 7450,
+        "sha256": "1a1841d41fa59fb98c88d68011c7cbdbc49f3841ee7d25956228c55c3e736fa2"
+      },
+      "cutlass.cute.atom": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/atom.py",
+        "bytes": 51093,
+        "sha256": "41a61c0dcc44eb1f852db9e6cf1a42d6098f66e42c7059015d1d04879d3de848"
+      },
+      "cutlass.cute.core": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/core.py",
+        "bytes": 219162,
+        "sha256": "035c764686c4e5a94c1f2432b55ba2e6cc572a27db4d857278ccd785a6f7f6f3"
+      },
+      "cutlass.cute.experimental": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/__init__.py",
+        "bytes": 1311,
+        "sha256": "ad124783f06ed6b10bc33e4f4107e890bdbcba178460b636debd657b79e7a491"
+      },
+      "cutlass.cute.experimental.algorithm": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/algorithm.py",
+        "bytes": 8024,
+        "sha256": "854b299b5129d8060161fe8fdb72f643936e8b8b83df96d60db4361c8bce2e41"
+      },
+      "cutlass.cute.experimental.core": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/core.py",
+        "bytes": 21342,
+        "sha256": "40667c20c4c87ed3608ad161bc9947de558c59b49e2ac9af578cbf28a20438e6"
+      },
+      "cutlass.cute.experimental.host_runtime": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/host_runtime.py",
+        "bytes": 3657,
+        "sha256": "19748903b3b4b760e12b0ecdc9ca96875dcb4761a6a89668b0aba5652502e493"
+      },
+      "cutlass.cute.experimental.iket": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/iket/__init__.py",
+        "bytes": 866,
+        "sha256": "9834b70a4c00029e7954f85a7da4643fb274c302e8225807a6ef481ee9606cf4"
+      },
+      "cutlass.cute.experimental.iket.dag": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/iket/dag.py",
+        "bytes": 5546,
+        "sha256": "720899ca9ab78257aef59a1f999167f90fb64984042ce288a6a58ba538ce0f80"
+      },
+      "cutlass.cute.experimental.iket.iket": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/iket/iket.py",
+        "bytes": 13379,
+        "sha256": "fc9a2fcb53e86c30eb381ff5e66f47bca0348af7e3fd140ffafd2155163c244d"
+      },
+      "cutlass.cute.experimental.math": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/math.py",
+        "bytes": 3425,
+        "sha256": "2f767c619fc70ba81bcf0fc1d5d595298bed0d8d262aac710132275b6a683e51"
+      },
+      "cutlass.cute.experimental.memory": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/memory.py",
+        "bytes": 12670,
+        "sha256": "b22b828673a80f11e1f85d78ec25a32c294d2edd38b566fe089cc47fa70de102"
+      },
+      "cutlass.cute.experimental.pipeline": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/pipeline.py",
+        "bytes": 43398,
+        "sha256": "ad9f37ca9810ec8c050244701c0e49bdb476acff69be48f7c769346f037059fa"
+      },
+      "cutlass.cute.experimental.utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/experimental/utils.py",
+        "bytes": 19183,
+        "sha256": "cf7331b49ee13584d0f154118fe2a3c3aa10925ac4182362fc13c6dfb08de552"
+      },
+      "cutlass.cute.export": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/export/__init__.py",
+        "bytes": 2003,
+        "sha256": "46fe9928fe7350fec6aaa92cf6b01ead884a495a0f959b0b4def675cc7e44396"
+      },
+      "cutlass.cute.export.c_header_generator": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/export/c_header_generator.py",
+        "bytes": 12251,
+        "sha256": "4c26386a3862c25d1bebd63b7b6f0fdef1bfd4aae01e3389c3a67301c254953b"
+      },
+      "cutlass.cute.export.export": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/export/export.py",
+        "bytes": 2189,
+        "sha256": "de24abf5e0d85485f1e004964b0a281da58ffd9054a3203395ed8bd0e218ce3c"
+      },
+      "cutlass.cute.export.load": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/export/load.py",
+        "bytes": 849,
+        "sha256": "5b7eef1d468a4a4568fb11a7a199b9f60db390bc2cef1fa20b8a481f0fb5203e"
+      },
+      "cutlass.cute.ffi": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/ffi.py",
+        "bytes": 2084,
+        "sha256": "12c987ba76bd13ae7d6a9a44a9383216247ff2caab0a01740df4e84cc2cbdc2c"
+      },
+      "cutlass.cute.math": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/math.py",
+        "bytes": 832,
+        "sha256": "415403b336cd31230a2455313391d25f97e9607921d3716fa33bc4af39e4464c"
+      },
+      "cutlass.cute.nvgpu": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/__init__.py",
+        "bytes": 917,
+        "sha256": "662862781b9722d15ef2cc35054ea3166f3c83032779879eb66aa5153f5cfa2a"
+      },
+      "cutlass.cute.nvgpu.common": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/common.py",
+        "bytes": 21953,
+        "sha256": "c17c59c963e8fe4b7ab635cc76a19b4fc4e649fbfa8f72c4740fd7fa6ba43364"
+      },
+      "cutlass.cute.nvgpu.cpasync": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/cpasync/__init__.py",
+        "bytes": 1340,
+        "sha256": "9e424136176266861908a5bb51f878b1347894064fd5820d69d456cfc1c33151"
+      },
+      "cutlass.cute.nvgpu.cpasync.copy": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/cpasync/copy.py",
+        "bytes": 61801,
+        "sha256": "088bd67d411af561ecfe45daa15444ae0a1703e0bb95b152c93e4e00fe60704b"
+      },
+      "cutlass.cute.nvgpu.cpasync.helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/cpasync/helpers.py",
+        "bytes": 32925,
+        "sha256": "88247e84368ba44e735ed5759886ee3f8e1cb76c7b2a1747421d8b7eb4e44244"
+      },
+      "cutlass.cute.nvgpu.helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/helpers.py",
+        "bytes": 21538,
+        "sha256": "273199d000f4994946076aa2a7a9c6b70cb10cf614677ac678e63d82d581bf36"
+      },
+      "cutlass.cute.nvgpu.tcgen05": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/tcgen05/__init__.py",
+        "bytes": 2116,
+        "sha256": "0072cafd367d4b5012c89ffd0c22bfaa311a88315c4d545251b2c5b7bd380128"
+      },
+      "cutlass.cute.nvgpu.tcgen05.copy": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/tcgen05/copy.py",
+        "bytes": 36450,
+        "sha256": "6264df83ea3a0b1f9827dda988655d7b68e38018abbe5294e407f4b00555c51b"
+      },
+      "cutlass.cute.nvgpu.tcgen05.helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/tcgen05/helpers.py",
+        "bytes": 14023,
+        "sha256": "cadbb1d6403dd6501cca6c0c76b3629d9fe16bc445e1c4a3ef88c80b94d3661c"
+      },
+      "cutlass.cute.nvgpu.tcgen05.mma": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/tcgen05/mma.py",
+        "bytes": 82437,
+        "sha256": "766dfeb78751ecad919de39ef647598d9399ebca611c06f6ab7de0888b357a31"
+      },
+      "cutlass.cute.nvgpu.warp": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warp/__init__.py",
+        "bytes": 972,
+        "sha256": "49750097dbd6a999f21ccc950513eac5caf016cdf6e8e69a01e326a946308a7b"
+      },
+      "cutlass.cute.nvgpu.warp.copy": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warp/copy.py",
+        "bytes": 11637,
+        "sha256": "968ab604e072ad806574d2b0f875db75e0ced33cb844cf3d447a2ce2ddfe0544"
+      },
+      "cutlass.cute.nvgpu.warp.mma": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warp/mma.py",
+        "bytes": 26969,
+        "sha256": "afd7a67d9ecc87494929f1099d2e2da42371034ca55a8db5a7052e25c0d7c773"
+      },
+      "cutlass.cute.nvgpu.warpgroup": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warpgroup/__init__.py",
+        "bytes": 1453,
+        "sha256": "3227f7aee253334c5faf66d30829eafc5e16c34cdcf6f874a96d79c451991d05"
+      },
+      "cutlass.cute.nvgpu.warpgroup.helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warpgroup/helpers.py",
+        "bytes": 4172,
+        "sha256": "d401958faa24fa31171b260cb86c8982de25aa8225df741a92568bd912308e1c"
+      },
+      "cutlass.cute.nvgpu.warpgroup.mma": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/nvgpu/warpgroup/mma.py",
+        "bytes": 25045,
+        "sha256": "d2e82671a5a76ed98fc4518be1eeddf4db03a6ee852f99b46d53980edc93dc9b"
+      },
+      "cutlass.cute.runtime": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/runtime.py",
+        "bytes": 34976,
+        "sha256": "73b5e1184af42a1aa3cc643830310535f048c9af9b89506113293a2f156a764d"
+      },
+      "cutlass.cute.tensor": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/tensor.py",
+        "bytes": 120399,
+        "sha256": "c0707b064be449f726ffb895a6a745ffa9ea7cc814da3b97f86ce8c1597b6a27"
+      },
+      "cutlass.cute.testing": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/testing.py",
+        "bytes": 34347,
+        "sha256": "3d6a614de4ef6b6da534bdc33cf07b479e447edff6d98847a322dbe79ecd2d65"
+      },
+      "cutlass.cute.tuple": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/tuple.py",
+        "bytes": 18135,
+        "sha256": "4e4f043a2c16fdad5fd640b06416392471b3a26a862385afc997dcad2a7e405b"
+      },
+      "cutlass.cute.typing": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cute/typing.py",
+        "bytes": 30701,
+        "sha256": "25b800bf5e062c80431e9da4fd6e78924927c0dfd723995fd38728ed2f07ff39"
+      },
+      "cutlass.cutlass_dsl": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/__init__.py",
+        "bytes": 1938,
+        "sha256": "f335e8af69ec5a4581803ee3555a37238fd3659644289ea1de192490b9dab25f"
+      },
+      "cutlass.cutlass_dsl.cuda_event_adapter": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cuda_event_adapter.py",
+        "bytes": 2175,
+        "sha256": "f1f3b1447cd0ed458062b515a2e9eddf92c23944960665bfe127a9c9bfba5219"
+      },
+      "cutlass.cutlass_dsl.cuda_jit_executor": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cuda_jit_executor.py",
+        "bytes": 13060,
+        "sha256": "1589949f04c39184dc3ef9287720b029bb4f8e1161fb8e20a416977cb6bf6583"
+      },
+      "cutlass.cutlass_dsl.cuda_library_adapter": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cuda_library_adapter.py",
+        "bytes": 2168,
+        "sha256": "162724b0ed0b40f9871bf3ed8ae9ec550bedb71ba2e0979531b48507b224174f"
+      },
+      "cutlass.cutlass_dsl.cuda_stream_adapter": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cuda_stream_adapter.py",
+        "bytes": 2437,
+        "sha256": "3d587f8424e47691e51af61c001065dbf828c0bfecc21172321994a955599275"
+      },
+      "cutlass.cutlass_dsl.cutlass": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cutlass.py",
+        "bytes": 140134,
+        "sha256": "d71f620450dacc0c36dc83a1a8744180948faace60dc3448c83a8a22c1bafcbe"
+      },
+      "cutlass.cutlass_dsl.cutlass_ast_decorators": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py",
+        "bytes": 31918,
+        "sha256": "b22a01ed6d9ee7fb42bacae38c79e0cf85f8b118ca6edfcec9e75e1bc732e8f4"
+      },
+      "cutlass.cutlass_dsl.tvm_ffi_provider": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/cutlass_dsl/tvm_ffi_provider.py",
+        "bytes": 41837,
+        "sha256": "54c569f7fefc014f09c54c460d7095c76d5ef327b2daf47fca2d7db1d90224ce"
+      },
+      "cutlass.experimental": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/__init__.py",
+        "bytes": 2660,
+        "sha256": "fb7f4994fd2267cefeae8efa5a40429bb8afc49b8dab1426a69d51449a566f31"
+      },
+      "cutlass.experimental.primitives": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/primitives/__init__.py",
+        "bytes": 2467,
+        "sha256": "c95faf565e9d171bc198f4ea51b93ad6a898bfa0a46d5fa8f5fd838db299e165"
+      },
+      "cutlass.experimental.primitives.descriptors": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/primitives/descriptors.py",
+        "bytes": 46829,
+        "sha256": "b4045a40311e7261fcd449646c8ba3c17efa24ee5dede4c689089c43ef04ce82"
+      },
+      "cutlass.experimental.primitives.hybrid_ops": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/primitives/hybrid_ops.py",
+        "bytes": 1783,
+        "sha256": "35f4d6e2b1d861456cb856288f28a05c3b3abad7dbd65822f2e38e0a3fdf8b94"
+      },
+      "cutlass.experimental.primitives.nvvm_wrapper": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/experimental/primitives/nvvm_wrapper.py",
+        "bytes": 415061,
+        "sha256": "029193fb8643c73a1c7f9d771bd28c9c04a0b0127314fcc2223e08f4e26802ff"
+      },
+      "cutlass.jax": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/jax/__init__.py",
+        "bytes": 3252,
+        "sha256": "4ebf09531f1c5728ab4a6d35a7b7c7dc19172d32684f436560da74f041ae7225"
+      },
+      "cutlass.pipeline": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/__init__.py",
+        "bytes": 2004,
+        "sha256": "af2be0b5cfcca8e6e95e59025a25aa8fcebf23a392a8261f11c57b28b48b40ad"
+      },
+      "cutlass.pipeline.helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/helpers.py",
+        "bytes": 36748,
+        "sha256": "87baa220853a4f64179300293f747f75a9f10008f5df3c91bdbc4f5c7d74243c"
+      },
+      "cutlass.pipeline.profiling": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/profiling.py",
+        "bytes": 2569,
+        "sha256": "9347f2df9e18d133f1b4a7c4efa4cf6423da386f5acb96455487150859a098fe"
+      },
+      "cutlass.pipeline.sm100": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/sm100.py",
+        "bytes": 52654,
+        "sha256": "4e7c4ce1f19f4d470adcbda7052740af36820a99fa74fcf9d01627fb52ff8def"
+      },
+      "cutlass.pipeline.sm90": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/pipeline/sm90.py",
+        "bytes": 54104,
+        "sha256": "2d5fae60151278072a92dd21ffc445c16932abdcd69bb070cdcf87f9a179a32a"
+      },
+      "cutlass.runtime": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/runtime.py",
+        "bytes": 13149,
+        "sha256": "6e43106edd0767e72f514fe542cc1f00d1f5d31b5afdddccffbbc856e157b5f9"
+      },
+      "cutlass.testing": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/testing.py",
+        "bytes": 39856,
+        "sha256": "0a4a25f653e70a3d38787c1262ef8328a342f33264e1b213fe805603af398200"
+      },
+      "cutlass.utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/__init__.py",
+        "bytes": 5373,
+        "sha256": "b51fa279ebbfa598c13795105c51bdb6ace7ff52e3babd9b6e24f7e096d5abfb"
+      },
+      "cutlass.utils.blackwell_helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/blackwell_helpers.py",
+        "bytes": 76793,
+        "sha256": "b4aa719f4bb4af9e721ce77b9a23b4d141c5c01b4b59d8dc18811e4a157df0cb"
+      },
+      "cutlass.utils.block": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/block.py",
+        "bytes": 8903,
+        "sha256": "0d6e1b80d8b4a6ccedc25222e17e62edfab3cc2a93201af081d34ca8e7a00b22"
+      },
+      "cutlass.utils.blockscaled_layout": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/blockscaled_layout.py",
+        "bytes": 20578,
+        "sha256": "e9627e0ddef5b9cdcdf1f325e983e78398af95e7189135f7039c1ee9d0ccaed8"
+      },
+      "cutlass.utils.distributed": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/distributed.py",
+        "bytes": 17575,
+        "sha256": "1c1717a473a4962a827116ebf6218cde9a7daaf15a37bf78b15ca45fa2fa79e6"
+      },
+      "cutlass.utils.dynamic_persistent_tile_scheduler": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/dynamic_persistent_tile_scheduler.py",
+        "bytes": 22639,
+        "sha256": "bb26b4d246b733e395828a5343220ecae3681722dd78f7f3569878a7e98d296d"
+      },
+      "cutlass.utils.gemm": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/gemm/__init__.py",
+        "bytes": 582,
+        "sha256": "71385d756788a3c04f701ec60c095240eb6200f7b0364c9d4891bf08ae13b560"
+      },
+      "cutlass.utils.gemm.sm100": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/gemm/sm100.py",
+        "bytes": 19161,
+        "sha256": "2804d40b3d8ee139c067183b36e4d15d04eb106c5b09d0b5fb624007db1611a2"
+      },
+      "cutlass.utils.grouped_gemm_persistent_tile_scheduler": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/grouped_gemm_persistent_tile_scheduler.py",
+        "bytes": 47865,
+        "sha256": "e1dddc093e55ebb5f871919cf38eed210c750480164612372a4cbfed6244c10f"
+      },
+      "cutlass.utils.hardware_info": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/hardware_info.py",
+        "bytes": 8504,
+        "sha256": "5a45ae55d2092095eb9d02a8b78d4eb831285ba2815d3139d77c2823a7cfb864"
+      },
+      "cutlass.utils.hopper_helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/hopper_helpers.py",
+        "bytes": 15220,
+        "sha256": "7ea64a834da1ddb9cc103c5be88643b7c6354785e8489990f17e13f81e09ab79"
+      },
+      "cutlass.utils.layout": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/layout.py",
+        "bytes": 2257,
+        "sha256": "012f579e70ab1aafd6857bc558fa6528d8766781c0dbbd9e1a81c04925d298ac"
+      },
+      "cutlass.utils.mixed_cluster_params": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/mixed_cluster_params.py",
+        "bytes": 4519,
+        "sha256": "aa5aca37fac6da992dedb0deca801fdd43962ca88dea97048d91ded620ce08de"
+      },
+      "cutlass.utils.mixed_input_helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/mixed_input_helpers.py",
+        "bytes": 44026,
+        "sha256": "093b4d26075f51c3793afc83a958d951ab3a3a5a768753562ae1869c00198bdd"
+      },
+      "cutlass.utils.print_latex": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/print_latex.py",
+        "bytes": 17752,
+        "sha256": "362340618207a2d785b9e75f0f3c6b0fb09b0a114c62bcd8461433471d047285"
+      },
+      "cutlass.utils.profiling": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/profiling.py",
+        "bytes": 7230,
+        "sha256": "31d8d817f397320d1ab642d8fbfab597dab85e7fe8d7ffd904983d1cbef1b9cd"
+      },
+      "cutlass.utils.smem_allocator": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/smem_allocator.py",
+        "bytes": 20442,
+        "sha256": "73b422bea99a8ac6808a80c0092a06956f75ad949567c94ba2c9fd4ce4989bb3"
+      },
+      "cutlass.utils.static_persistent_tile_scheduler": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/static_persistent_tile_scheduler.py",
+        "bytes": 33581,
+        "sha256": "143262db20907312199961a5eb73827b3d549ed56d81694a715e8a651950cb4b"
+      },
+      "cutlass.utils.tensor_helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/tensor_helpers.py",
+        "bytes": 3352,
+        "sha256": "5705c5bd0859276d79ea40c10b6b36bbf5cc3597d7d656023140d8bc2f5ed72e"
+      },
+      "cutlass.utils.tensormap_manager": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/tensormap_manager.py",
+        "bytes": 7380,
+        "sha256": "76a757b9534e01a85101f56ecd325224fd0e13160dc9c613824cd3626906bc2b"
+      },
+      "cutlass.utils.tmem_allocator": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/utils/tmem_allocator.py",
+        "bytes": 27992,
+        "sha256": "ea851156784a8aa756893c064807722ef4f5397650f7b1df6cb576ed5098f153"
+      },
+      "flash_attn.cute": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/__init__.py",
+        "bytes": 367,
+        "sha256": "50713012c3a5e8045f368672342aea6eeeb3b3ce0968cb5639b1f158b9499487"
+      },
+      "flash_attn.cute.ampere_helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/ampere_helpers.py",
+        "bytes": 3706,
+        "sha256": "cadac170a7da379e27c36d044360480d710cfa88d082dad2b9decd58e4847111"
+      },
+      "flash_attn.cute.barrier": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/barrier.py",
+        "bytes": 2054,
+        "sha256": "767af807aa7521b8d15ee6c9534f4745a7ad2224b0da2b816cc49ccb9ea6c119"
+      },
+      "flash_attn.cute.blackwell_helpers": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/blackwell_helpers.py",
+        "bytes": 49894,
+        "sha256": "134679d00bdc93a10b69611269782911812bc0c19f0d30eb472e1d21dd3dc423"
+      },
+      "flash_attn.cute.block_info": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/block_info.py",
+        "bytes": 7667,
+        "sha256": "c7cd78131b43d6a3906e19405236fd7d4d556d626ff4726de571b443c19c00d5"
+      },
+      "flash_attn.cute.block_sparse_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/block_sparse_utils.py",
+        "bytes": 72281,
+        "sha256": "c3e71e79986e658bb26cffae2d20683e8ad3509c0ee2674fb79fbe35f641c593"
+      },
+      "flash_attn.cute.block_sparsity": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/block_sparsity.py",
+        "bytes": 28290,
+        "sha256": "9331cb2abd4be4da87a74c0839b665d5f914ac6f51cb97491e97b26199668ac9"
+      },
+      "flash_attn.cute.cache_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/cache_utils.py",
+        "bytes": 9975,
+        "sha256": "ded91c4f65ea434386eacf200cbcc9f1c604ad8b9b7dcbbe80e3264d794c00df"
+      },
+      "flash_attn.cute.copy_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/copy_utils.py",
+        "bytes": 12656,
+        "sha256": "0f563eeeb6654602d1541f7202b7b88386c4dbdbd24ad6b0825834d65e508c09"
+      },
+      "flash_attn.cute.cu_blocks_kernel": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/cu_blocks_kernel.py",
+        "bytes": 6795,
+        "sha256": "aebbf862f2b90d13f3b1c50ee79ef49ce7babec7f61d37cfcd426bf2ab113a09"
+      },
+      "flash_attn.cute.cute_dsl_ptxas": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/cute_dsl_ptxas.py",
+        "bytes": 5122,
+        "sha256": "21f0674c9f5a99d7c339092e49d5822d387b0a4673888becff1ac073cb5ac619"
+      },
+      "flash_attn.cute.cute_dsl_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/cute_dsl_utils.py",
+        "bytes": 9849,
+        "sha256": "ea4a3c935dc31d381b969f1b86631eaa44c9e22cc096bd12d130c81a2a1f92bb"
+      },
+      "flash_attn.cute.fa_logging": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/fa_logging.py",
+        "bytes": 2915,
+        "sha256": "bc71edfa4b1cb7af64b78def09e790ff4c6fe64ab4fcf8e3d9699f44e8d3c0a0"
+      },
+      "flash_attn.cute.fast_math": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/fast_math.py",
+        "bytes": 492,
+        "sha256": "7e5f822bf4d0ba36967558f3ae9a1408b410cb726c31222cd61703569d1be738"
+      },
+      "flash_attn.cute.flash_bwd": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_bwd.py",
+        "bytes": 67705,
+        "sha256": "80cb6bfb436160d73b7214529f94d28b7333c98dff75a53d20552eb33645fea2"
+      },
+      "flash_attn.cute.flash_bwd_mla_dk_sm100": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_bwd_mla_dk_sm100.py",
+        "bytes": 47799,
+        "sha256": "10990b4471c9d137726280f8e582c5400ef26b2e85aebaa08097ec00d85f1cff"
+      },
+      "flash_attn.cute.flash_bwd_mla_dq_dqv_sm100": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_bwd_mla_dq_dqv_sm100.py",
+        "bytes": 55330,
+        "sha256": "84546f26b52ce6cd2887e12711dc26f777ab35d0b9451cf3a7629e6c5c8c358e"
+      },
+      "flash_attn.cute.flash_bwd_mla_sm100": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_bwd_mla_sm100.py",
+        "bytes": 90389,
+        "sha256": "7add176d5a739b0fe63597559fe040f7cd58c016ba39716c98f5d6080b3f689e"
+      },
+      "flash_attn.cute.flash_bwd_postprocess": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_bwd_postprocess.py",
+        "bytes": 32030,
+        "sha256": "df88b299cb938197abc145c3a85262515d1d810633229d0f929239e8291e8ce8"
+      },
+      "flash_attn.cute.flash_bwd_preprocess": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_bwd_preprocess.py",
+        "bytes": 20702,
+        "sha256": "b43ec797cb57938ee887a1576eb05aff0c1ead686e073ed4f426b47dc7a7c830"
+      },
+      "flash_attn.cute.flash_bwd_sm100": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_bwd_sm100.py",
+        "bytes": 190135,
+        "sha256": "c90418e754de6e7b5cba8cf89c53754aea5a2d6584438bdd6c8910762c7a257e"
+      },
+      "flash_attn.cute.flash_bwd_sm120": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_bwd_sm120.py",
+        "bytes": 2041,
+        "sha256": "ad2d802c97dbf654fd03724bcfa91702b18acec8518e5dd4a33f137ba238bf7d"
+      },
+      "flash_attn.cute.flash_bwd_sm90": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_bwd_sm90.py",
+        "bytes": 84147,
+        "sha256": "2170fcc979bd6843e73fb81133e3af23fc4d73e29b537a41a5e9a3f06492d840"
+      },
+      "flash_attn.cute.flash_fwd": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_fwd.py",
+        "bytes": 53524,
+        "sha256": "3b97ed4cb20bb867d97fdea7eb03a86ccf32fc4b6f0c8e1ef0302ff1b4728045"
+      },
+      "flash_attn.cute.flash_fwd_combine": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_fwd_combine.py",
+        "bytes": 34142,
+        "sha256": "f8e7f1369b892a0e4b6175e2980966348390b0ee3b1014ba195292653ebee1ae"
+      },
+      "flash_attn.cute.flash_fwd_mla_sm100": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_fwd_mla_sm100.py",
+        "bytes": 136821,
+        "sha256": "d73a9e5629b2e5af21622763674de63af430740723b84d8cd93c49f2f57392be"
+      },
+      "flash_attn.cute.flash_fwd_sm100": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_fwd_sm100.py",
+        "bytes": 165752,
+        "sha256": "f5928a15a7aa559084d14aa12cc2c95efdc89c7b3a1f0d20219b24103a32456f"
+      },
+      "flash_attn.cute.flash_fwd_sm120": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_fwd_sm120.py",
+        "bytes": 2203,
+        "sha256": "abd017add69914e46f0fcfc017ad51c3d07d79fd87d15f969036ddd82bcc7da2"
+      },
+      "flash_attn.cute.flash_fwd_sm90": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/flash_fwd_sm90.py",
+        "bytes": 68282,
+        "sha256": "0261f8c67cef82cbfb3125637be1ade912fc9afd0ccc33d8bb5e1de9236eef1c"
+      },
+      "flash_attn.cute.interface": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/interface.py",
+        "bytes": 160946,
+        "sha256": "b0af7198dd03d639f549b70ada9e64f2ab7674936c6a508205190b537d8f45f8"
+      },
+      "flash_attn.cute.mask": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/mask.py",
+        "bytes": 77082,
+        "sha256": "93f265c7a02295c4b63027fc8c10fe3a371669f579415e2f3a0480d069a6558b"
+      },
+      "flash_attn.cute.mma_sm100_desc": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/mma_sm100_desc.py",
+        "bytes": 10900,
+        "sha256": "ac6ec28b2f1a4b797c391a7807b88f83b430452d418262c3dfa7b0f3516e39f9"
+      },
+      "flash_attn.cute.named_barrier": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/named_barrier.py",
+        "bytes": 1753,
+        "sha256": "1f80f96b690a2888ee1301d377665db6e9dd74b402f80eaa867d38f7294d813b"
+      },
+      "flash_attn.cute.pack_gqa": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/pack_gqa.py",
+        "bytes": 11565,
+        "sha256": "82ad3a7c44ab4d7b0cffc248aebfedeeadacade8ae2eabb231fddf343e8755cd"
+      },
+      "flash_attn.cute.paged_kv": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/paged_kv.py",
+        "bytes": 9615,
+        "sha256": "95e84b59b3b3f84cefaa33e477332a9a1f311ef51f42960a3968a0d1eee8665a"
+      },
+      "flash_attn.cute.pipeline": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/pipeline.py",
+        "bytes": 14543,
+        "sha256": "849bce91c72be0a5c7458979e10c8290f45e05253a83600e30fb9540c61ed56a"
+      },
+      "flash_attn.cute.prepare_scheduler": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/prepare_scheduler.py",
+        "bytes": 14514,
+        "sha256": "6823d3033f88acf91d664ce127928d73a37629afd9fd376b03ae76130c180cb8"
+      },
+      "flash_attn.cute.seqlen_info": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/seqlen_info.py",
+        "bytes": 11805,
+        "sha256": "640d2433702635d68d4f0b94e9fa2d6b81da48b7f62056270b1b1fd480c72f30"
+      },
+      "flash_attn.cute.sm100_hd256_2cta_fmha_backward": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/sm100_hd256_2cta_fmha_backward.py",
+        "bytes": 8675,
+        "sha256": "08d65e70c90fcd1927337a2dce42962c9759f66152255135c43073b02df7d07a"
+      },
+      "flash_attn.cute.sm100_hd256_2cta_fmha_backward_dkdvkernel": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/sm100_hd256_2cta_fmha_backward_dkdvkernel.py",
+        "bytes": 142048,
+        "sha256": "891ec6b0526eeecc9c59b8d43c4d23719d9efd4b8c722d806e0c680ca972801b"
+      },
+      "flash_attn.cute.sm100_hd256_2cta_fmha_backward_dqkernel": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/sm100_hd256_2cta_fmha_backward_dqkernel.py",
+        "bytes": 117086,
+        "sha256": "1aea91ccd068be8b6c88621ba995d86168955bcfc9326fd3c8a94a36db0c4e7f"
+      },
+      "flash_attn.cute.sm100_hd256_2cta_fmha_forward": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/sm100_hd256_2cta_fmha_forward.py",
+        "bytes": 92133,
+        "sha256": "7bc1fefbff85ac503115ee64a61440b1973b91b8c8bca376b25589e964c5f160"
+      },
+      "flash_attn.cute.softmax": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/softmax.py",
+        "bytes": 29406,
+        "sha256": "3ed1d321d7086615c20b9f930d03d8aecd3759a8d507fccf7bbee8cc391f2198"
+      },
+      "flash_attn.cute.testing": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/testing.py",
+        "bytes": 17976,
+        "sha256": "3342b4475126666e5bff050316cd2a586852f7c82eb23fd21172470cc40a15ff"
+      },
+      "flash_attn.cute.tile_scheduler": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/tile_scheduler.py",
+        "bytes": 85451,
+        "sha256": "569393dcbdd91a8c873ebce93e8e9928f1b31d5bd9784fa2303683f1162da0c2"
+      },
+      "flash_attn.cute.topk_gather_kv": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/topk_gather_kv.py",
+        "bytes": 10470,
+        "sha256": "5897ca804286568310d8bfec219355cacc73b907a805fdbce69a31adbf481460"
+      },
+      "flash_attn.cute.utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/flash_attn/cute/utils.py",
+        "bytes": 36915,
+        "sha256": "6f20cea438a8f06fa410d55baa583d46e6448333846bbcb967100b7880058544"
+      },
+      "quack": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/__init__.py",
+        "bytes": 967,
+        "sha256": "6b3c86136ab29e2c407812367ab6ba6189fd13cd603c8c81299da576d3f509d4"
+      },
+      "quack.autotuner": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/autotuner.py",
+        "bytes": 24451,
+        "sha256": "9b2cc53aeea24db73e8a8f2df67b1be409d4e38ce51e670426c9205220b4cf2e"
+      },
+      "quack.bench": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/bench/__init__.py",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "quack.bench.bench_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/bench/bench_utils.py",
+        "bytes": 8386,
+        "sha256": "3997c7627625891efea35a5a11d6a4750f184b6db24a73b03e3c31bb07d7a711"
+      },
+      "quack.cache": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/cache/__init__.py",
+        "bytes": 2457,
+        "sha256": "3e19dc7f6eecd30e087e7052189666e49ebbc4432ba38092f374e688e9c81079"
+      },
+      "quack.cache.async_compile": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/cache/async_compile.py",
+        "bytes": 24071,
+        "sha256": "249c927410503016c5cbc6f4ecc376a51bd856c729e8e5e123ce43a67c8af61b"
+      },
+      "quack.cache.jit": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/cache/jit.py",
+        "bytes": 14821,
+        "sha256": "09a1d8f626d31500e175556b3cd8f68dfc60599cf102f1df9c22aac781ac7193"
+      },
+      "quack.compile_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/compile_utils.py",
+        "bytes": 2566,
+        "sha256": "9d708639188592d22ab1fc98370d66ebd9ebf08cba88b6673fcfb1d07b214321"
+      },
+      "quack.copy_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/copy_utils.py",
+        "bytes": 72142,
+        "sha256": "55259633cde52a4200b0f3c8ec0f55e266e6b629ae7d254b5a7b13d0cb448045"
+      },
+      "quack.cross_entropy": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/cross_entropy.py",
+        "bytes": 28384,
+        "sha256": "4013711bac75a5ecb94dcab24a12b39c601977e602e4c732c8b71cab2eb94db7"
+      },
+      "quack.cute_dsl_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/cute_dsl_utils.py",
+        "bytes": 10593,
+        "sha256": "2bd1b37789b31962ab2d2fb15e1a08a6a2f5568adfca573419a746ed81f3d5c7"
+      },
+      "quack.dsl": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/dsl/__init__.py",
+        "bytes": 529,
+        "sha256": "d7703f7c338ff342e19c996938f87a54e359d0d62de7a671890ff0a692fce602"
+      },
+      "quack.dsl.cute_dsl_ptxas": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/dsl/cute_dsl_ptxas.py",
+        "bytes": 9911,
+        "sha256": "8db6a6e9f530ce6e17e4265cdbd2debe5597040cdb79d5aede3ea12bfda51260"
+      },
+      "quack.dsl.cute_tensor": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/dsl/cute_tensor.py",
+        "bytes": 6310,
+        "sha256": "97567c5cdcc1490b87c11291ea05f9f927b50d1dfd368551fc9115d8825bbdea"
+      },
+      "quack.dsl.cute_tensor_indexing": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/dsl/cute_tensor_indexing.py",
+        "bytes": 5182,
+        "sha256": "d509cfae77a49040979201c2e4d598e89c720e64d37f99200a5088630c4c7c6d"
+      },
+      "quack.dsl.mixed_constexpr_if": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/dsl/mixed_constexpr_if.py",
+        "bytes": 6441,
+        "sha256": "b3933a07ab187691ce28db2941dab8f7093abd1199df7cace3ef2d95acf4a000"
+      },
+      "quack.dsl.torch_library_op": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/dsl/torch_library_op.py",
+        "bytes": 3940,
+        "sha256": "7e7185f34c795cead71a84b36958df925bb49ce065d2e2621955b7cfbd9a478b"
+      },
+      "quack.layout_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/layout_utils.py",
+        "bytes": 17231,
+        "sha256": "b949dd0dc3467dc26c0828886eb61c6395fbcdc22ff270f03991b7367a528af1"
+      },
+      "quack.pipeline": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/pipeline.py",
+        "bytes": 31673,
+        "sha256": "273e2333a1b34e350af639f36c199c1fefb6f3f18e1dc1aab2f222024b6625b7"
+      },
+      "quack.reduce": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/reduce.py",
+        "bytes": 21159,
+        "sha256": "98bfbefbf08cff8cb2dce443724c8def9b388c7275ea63fbdec574db923904d4"
+      },
+      "quack.reduction_base": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/reduction_base.py",
+        "bytes": 4116,
+        "sha256": "801185dff436d1cb9141f153c6980056932053bff0e716b0ec82fdd8558ecc3d"
+      },
+      "quack.rmsnorm": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/rmsnorm.py",
+        "bytes": 73185,
+        "sha256": "1ed6a9bc196903195c179d3333c76c39432fdefdd857f5e95f1379f83c277ffb"
+      },
+      "quack.rmsnorm_config": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/rmsnorm_config.py",
+        "bytes": 20498,
+        "sha256": "5cb2fda1917dbed125c772c3075a7640f07c5264f9b926c35b2a3d1a79261772"
+      },
+      "quack.rounding": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/rounding.py",
+        "bytes": 55558,
+        "sha256": "693f1175b988752293c5a19e533fe68245ee48dfd46b38316e2283bf41d35da8"
+      },
+      "quack.sm90_utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/sm90_utils.py",
+        "bytes": 11016,
+        "sha256": "7a8537490c17e213e7deeb526c0a8bbfa97c5cc7066cbb69bf604a3c0da0567b"
+      },
+      "quack.softmax": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/softmax.py",
+        "bytes": 15260,
+        "sha256": "1a57455919efc7888065fb94e6e4d83bfdcaf00486ea4921fe9b0f2a0ff41bd5"
+      },
+      "quack.utils": {
+        "path": "/root/katagomo-fullflow/.final-migration-env/venv/lib/python3.12/site-packages/quack/utils.py",
+        "bytes": 6853,
+        "sha256": "fc5b08b1c8dac663928ff83a7eb87880b801ea2b8867a7b711e18dba729606ec"
+      }
+    }
+  },
+  "ir_diagnostic_capture": {
+    "raw_before_clone_parse": true,
+    "source_line_info": true,
+    "reason": "first attempt failed parsing the clean IR clone, before arithmetic lowering",
+    "arithmetic_changed_since_first_attempt": false,
+    "state_handle_revision": "local aliases avoid self dataclass rebinding to nested-loop SSA"
+  },
+  "codegen_semantics_verified": false
+}

@@ -1,0 +1,81 @@
+#define NOMINMAX
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cublasLt.h>
+#include <cutlass/gemm/device/gemm.h>
+#include <cutlass/epilogue/thread/linear_combination.h>
+#include <windows.h>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <iomanip>
+#include <vector>
+#include <string>
+#include <memory>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <type_traits>
+#include <algorithm>
+namespace fs=std::filesystem;
+constexpr int M=5054,N=1152,K=384,WARM=80,ITER=1000;
+constexpr size_t COUNT=size_t(M)*N,COEF=361*192,WS=32*1024*1024;
+constexpr const char* kLtIdentity="150000000f0000000c00000001000000000000000000000000000000000000000100000028fe0100020000000200000002000200440000000000000000000000";
+void need(bool b,const std::string& s){if(!b)throw std::runtime_error(s);}
+void ck(cudaError_t s,const char* x){need(s==cudaSuccess,std::string(x)+": "+cudaGetErrorString(s));}
+void ltck(cublasStatus_t s,const char* x){need(s==CUBLAS_STATUS_SUCCESS,std::string(x)+": "+std::to_string(s));}
+void dr(CUresult s,const char* x){need(s==CUDA_SUCCESS,std::string(x)+": "+std::to_string(s));}
+std::string quote(const std::string& s){std::string r="\"";for(char c:s){if(c=='\\'||c=='\"')r+='\\';r+=c;}return r+'\"';}
+template<class T>std::vector<T> load(const fs::path& p,size_t n){need(fs::file_size(p)==n*sizeof(T),"file size: "+p.string());std::vector<T> v(n);std::ifstream f(p,std::ios::binary);f.read(reinterpret_cast<char*>(v.data()),n*sizeof(T));need(bool(f),"file read");return v;}
+template<class T>void raw(const fs::path& p,const std::vector<T>& v){need(!fs::exists(p),"fresh file");std::ofstream f(p,std::ios::binary);f.write(reinterpret_cast<const char*>(v.data()),v.size()*sizeof(T));need(bool(f),"file write");}
+struct Barrier{std::mutex m;std::condition_variable c;int n=0,g=0;bool failed=false;void wait(){std::unique_lock<std::mutex> l(m);int k=g;if(++n==2){n=0;++g;c.notify_all();}else c.wait(l,[&]{return k!=g||failed;});need(!failed,"peer failed");}void abort(){std::lock_guard<std::mutex> l(m);failed=true;c.notify_all();}};
+struct Stream{cudaStream_t p{};Stream(){ck(cudaStreamCreateWithFlags(&p,cudaStreamNonBlocking),"stream");}~Stream(){cudaStreamDestroy(p);}void sync(){ck(cudaStreamSynchronize(p),"sync");}};
+struct Event{cudaEvent_t p{};Event(){ck(cudaEventCreate(&p),"event");}~Event(){cudaEventDestroy(p);}};
+template<class T>struct Buffer{T *base{},*p{};size_t count;std::vector<unsigned char> initial;static constexpr size_t G=512;
+  Buffer(const std::vector<T>& v,Stream& s):count(v.size()),initial((count+2*G)*sizeof(T),0xa5){std::memcpy(initial.data()+G*sizeof(T),v.data(),count*sizeof(T));ck(cudaMalloc(reinterpret_cast<void**>(&base),initial.size()),"allocate");p=base+G;ck(cudaMemcpyAsync(base,initial.data(),initial.size(),cudaMemcpyHostToDevice,s.p),"upload");s.sync();}
+  ~Buffer(){cudaFree(base);}std::vector<T> read(Stream& s,bool readonly=false){std::vector<unsigned char> b(initial.size());ck(cudaMemcpyAsync(b.data(),base,b.size(),cudaMemcpyDeviceToHost,s.p),"download");s.sync();size_t bytes=G*sizeof(T);need(!memcmp(b.data(),initial.data(),bytes)&&!memcmp(b.data()+b.size()-bytes,initial.data()+b.size()-bytes,bytes),"guard changed");if(readonly)need(b==initial,"readonly changed");std::vector<T> v(count);memcpy(v.data(),b.data()+bytes,count*sizeof(T));return v;}
+};
+using Gemm=cutlass::gemm::device::Gemm<cutlass::half_t,cutlass::layout::RowMajor,cutlass::half_t,cutlass::layout::ColumnMajor,cutlass::half_t,cutlass::layout::RowMajor,float,cutlass::arch::OpClassTensorOp,cutlass::arch::Sm80,cutlass::gemm::GemmShape<128,64,32>,cutlass::gemm::GemmShape<64,32,32>,cutlass::gemm::GemmShape<16,8,16>,cutlass::epilogue::thread::LinearCombination<cutlass::half_t,8,float,float>,cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<1>,3,8,8,false>;
+static_assert(std::is_same<Gemm::ElementAccumulator,float>::value,"FP32 accumulation");
+__device__ float exact_h2f(unsigned short h){float f;asm("cvt.f32.f16 %0, %1;":"=f"(f):"h"(h));return f;}
+__device__ unsigned short exact_f2h(float f){unsigned short h;asm("cvt.rn.f16.f32 %0, %1;":"=h"(h):"f"(f));return h;}
+#include "iterator.cuh"
+using N128Gemm=cutlass::gemm::device::Gemm<cutlass::half_t,cutlass::layout::RowMajor,cutlass::half_t,cutlass::layout::ColumnMajor,cutlass::half_t,cutlass::layout::RowMajor,float,cutlass::arch::OpClassTensorOp,cutlass::arch::Sm80,cutlass::gemm::GemmShape<128,128,32>,cutlass::gemm::GemmShape<64,64,32>,cutlass::gemm::GemmShape<16,8,16>,cutlass::epilogue::thread::LinearCombination<cutlass::half_t,8,float,float>,cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<1>,3,8,8,false>;
+#include "n128_iterator.cuh"
+static_assert(N128Kernel::kThreadCount==128 && N128Kernel::Mma::Detail::kStages==3,"audited geometry");
+static_assert(sizeof(N128Kernel::Params)==400 && sizeof(N128Kernel::SharedStorage)==49152,"audited ABI and shared allocation");
+static_assert(std::is_same<N128Gemm::ElementAccumulator,float>::value,"FP32 MMA");
+static_assert(std::is_same<N128Gemm::EpilogueOutputOp,Gemm::EpilogueOutputOp>::value,"original half boundaries");
+extern "C" __global__ void classic_n128_qkv_rope(CUTLASS_GRID_CONSTANT N128Kernel::Params const params){
+  extern __shared__ int storage[];
+  N128Kernel op;op(params,*reinterpret_cast<N128Kernel::SharedStorage*>(storage));
+}
+
+struct Lt{cublasLtHandle_t handle{};cublasLtMatmulDesc_t desc{};cublasLtMatrixLayout_t a{},b{},c{};cublasLtMatmulAlgo_t algo{};std::string identity;int returned=0;
+  Lt(){ltck(cublasLtCreate(&handle),"Lt handle");ltck(cublasLtMatmulDescCreate(&desc,CUBLAS_COMPUTE_32F,CUDA_R_32F),"Lt FP32");cublasOperation_t ta=CUBLAS_OP_T,tb=CUBLAS_OP_N;ltck(cublasLtMatmulDescSetAttribute(desc,CUBLASLT_MATMUL_DESC_TRANSA,&ta,sizeof(ta)),"TA");ltck(cublasLtMatmulDescSetAttribute(desc,CUBLASLT_MATMUL_DESC_TRANSB,&tb,sizeof(tb)),"TB");ltck(cublasLtMatrixLayoutCreate(&a,CUDA_R_16F,K,N,K),"weight");ltck(cublasLtMatrixLayoutCreate(&b,CUDA_R_16F,K,M,K),"input");ltck(cublasLtMatrixLayoutCreate(&c,CUDA_R_16F,N,M,N),"output");cublasLtMatmulPreference_t pref{};ltck(cublasLtMatmulPreferenceCreate(&pref),"pref");ltck(cublasLtMatmulPreferenceSetAttribute(pref,CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,&WS,sizeof(WS)),"workspace");cublasLtMatmulHeuristicResult_t pool[8]{};ltck(cublasLtMatmulAlgoGetHeuristic(handle,desc,a,b,c,c,pref,8,pool,&returned),"heuristic");cublasLtMatmulPreferenceDestroy(pref);bool found=false;for(int i=0;i<returned;++i)if(pool[i].workspaceSize<=WS){need(pool[i].state==CUBLAS_STATUS_SUCCESS,"selected state");algo=pool[i].algo;found=true;break;}need(found,"first filtered algorithm");std::ostringstream s;for(auto v:reinterpret_cast<const unsigned char(&)[sizeof(algo)]>(algo))s<<std::hex<<std::setw(2)<<std::setfill('0')<<int(v);identity=s.str();need(identity==kLtIdentity,"production QKV algorithm identity");
+    cublasComputeType_t compute{};cudaDataType_t scale{};size_t sz=0;ltck(cublasLtMatmulDescGetAttribute(desc,CUBLASLT_MATMUL_DESC_COMPUTE_TYPE,&compute,sizeof(compute),&sz),"read compute");need(compute==CUBLAS_COMPUTE_32F&&sz==sizeof(compute),"FP32 compute");ltck(cublasLtMatmulDescGetAttribute(desc,CUBLASLT_MATMUL_DESC_SCALE_TYPE,&scale,sizeof(scale),&sz),"read scale");need(scale==CUDA_R_32F&&sz==sizeof(scale),"FP32 scale");
+  }~Lt(){cublasLtMatmulDescDestroy(desc);cublasLtMatrixLayoutDestroy(a);cublasLtMatrixLayoutDestroy(b);cublasLtMatrixLayoutDestroy(c);cublasLtDestroy(handle);}
+};
+struct Lane{Stream stream;Buffer<unsigned short> input,weight,output,scratch;Buffer<float> co,sn;void* workspace{};Kernel::Params params,raw_params;dim3 grid,block;cudaFuncAttributes attributes{};int occupancy=0;std::vector<unsigned short> reference;
+  Lane(const fs::path& p):input(load<unsigned short>(p/"input.f16le",size_t(M)*K),stream),weight(load<unsigned short>(p/"weight-tn.f16le",size_t(N)*K),stream),output(std::vector<unsigned short>(COUNT,0x3555),stream),scratch(std::vector<unsigned short>(COUNT,0x3555),stream),co(load<float>(p/"cos.f32le",COEF),stream),sn(load<float>(p/"sin.f32le",COEF),stream),reference(load<unsigned short>(p/"expected.f16le",COUNT)){
+    ck(cudaMalloc(&workspace,WS),"lane workspace");Gemm::Arguments a({M,N,K},{reinterpret_cast<cutlass::half_t*>(input.p),K},{reinterpret_cast<cutlass::half_t*>(weight.p),K},{reinterpret_cast<cutlass::half_t*>(output.p),N},{reinterpret_cast<cutlass::half_t*>(output.p),N},{1.0f,0.0f},1);need(Gemm::can_implement(a)==cutlass::Status::kSuccess,"candidate supported");Gemm::ThreadblockSwizzle swizzle;auto tiled=swizzle.get_tiled_shape(a.problem_size,{128,64,32},1);params=Kernel::Params{a.problem_size,tiled,a.ref_A.non_const_ref(),a.ref_B.non_const_ref(),a.ref_C.non_const_ref(),a.ref_D,a.epilogue,nullptr,a.gather_A_indices,a.gather_B_indices,a.scatter_D_indices};raw_params=params;params.params_D.co=co.p;params.params_D.sn=sn.p;need(!raw_params.params_D.co && !raw_params.params_D.sn,"raw params disabled");grid=swizzle.get_grid_shape(tiled);block=dim3(Kernel::kThreadCount);need(grid.x==40&&grid.y==18&&grid.z==1,"candidate grid");ck(cudaFuncSetAttribute(immutable_qkv_rope<true>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(Kernel::SharedStorage)),"fused smem");ck(cudaFuncSetAttribute(immutable_qkv_rope<false>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(Kernel::SharedStorage)),"raw smem");ck(cudaFuncGetAttributes(&attributes,immutable_qkv_rope<true>),"fused attributes");ck(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occupancy,immutable_qkv_rope<true>,128,sizeof(Kernel::SharedStorage)),"potential occupancy");
+  }~Lane(){cudaFree(workspace);}
+  void gemm(bool candidate,Lt& lt){if(candidate)immutable_qkv_rope<false><<<grid,block,sizeof(Kernel::SharedStorage),stream.p>>>(raw_params);else{const float alpha=1,beta=0;ltck(cublasLtMatmul(lt.handle,lt.desc,&alpha,weight.p,lt.a,input.p,lt.b,&beta,output.p,lt.c,output.p,lt.c,&lt.algo,workspace,WS,stream.p),"production QKV");}ck(cudaPeekAtLastError(),"GEMM launch");}
+  void rope(CUfunction f){auto x=reinterpret_cast<CUdeviceptr>(output.p),c=reinterpret_cast<CUdeviceptr>(co.p),s=reinterpret_cast<CUdeviceptr>(sn.p),y=reinterpret_cast<CUdeviceptr>(scratch.p);void* args[]={&x,&c,&s,&y};dr(cuLaunchKernel(f,948,1,1,1024,1,1,0,reinterpret_cast<CUstream>(stream.p),args,nullptr),"bound original RoPE");}
+  void run(bool candidate,Lt& lt,CUfunction f){if(candidate){immutable_qkv_rope<true><<<grid,block,sizeof(Kernel::SharedStorage),stream.p>>>(params);ck(cudaPeekAtLastError(),"fused QKV-RoPE");}else{gemm(false,lt);rope(f);}}
+  std::vector<unsigned short> snapshot(const fs::path& p,bool combine,bool compare){auto v=output.read(stream);auto s=scratch.read(stream);if(combine)for(int row=0;row<M;++row)std::copy_n(s.begin()+size_t(row)*N,768,v.begin()+size_t(row)*N);for(int row=0;row<M;++row)for(int col=768;col<N;++col)need(s[size_t(row)*N+col]==0x3555,"RoPE no V copy");raw(p,v);input.read(stream,true);weight.read(stream,true);co.read(stream,true);sn.read(stream,true);if(compare)need(v==reference,"complete-model packed output bits");return v;}
+  std::string meta(){std::ostringstream s;s<<"{\"tile\":[128,64,32],\"warp\":[64,32,32],\"stages\":3,\"grid\":[40,18,1],\"threads\":128,\"registers\":"<<attributes.numRegs<<",\"dynamic_shared_bytes\":"<<sizeof(Kernel::SharedStorage)<<",\"local_bytes\":"<<attributes.localSizeBytes<<",\"potential_active_blocks\":"<<occupancy<<"}";return s.str();}
+};
+std::string dll_path(){auto m=GetModuleHandleA("cublasLt64_13.dll");need(m!=nullptr,"loaded Lt");char p[4096]{};auto n=GetModuleFileNameA(m,p,4096);need(n>0&&n<4096,"loaded Lt path");return p;}
+int main(int argc,char** argv){try{
+  if(argc==3 && std::string(argv[1])=="mapping"){export_mapping(argv[2]);return 0;}
+  need(argc==5||argc==7,"mode fixture original-PTX new-output [arm admission-sha]");std::string mode=argv[1];bool timed=mode=="timing";need((mode=="numeric"&&argc==5)||(timed&&argc==7),"mode");std::string arm=timed?argv[5]:"";if(timed)need((arm=="baseline"||arm=="candidate")&&strlen(argv[6])==64,"registered arm");fs::path out=argv[4];need(!fs::exists(out),"fresh output directory");fs::create_directories(out);ck(cudaSetDevice(0),"GPU");ck(cudaFree(nullptr),"primary context");cudaDeviceProp gpu{};ck(cudaGetDeviceProperties(&gpu,0),"properties");need(gpu.major==12&&gpu.minor==0&&gpu.multiProcessorCount==70&&gpu.l2CacheSize==50331648&&std::string(gpu.name)=="NVIDIA GeForce RTX 5070 Ti"&&cublasLtGetVersion()==130600,"bound GPU/Lt");Lt lt;CUmodule module{};CUfunction rope{};dr(cuModuleLoad(&module,argv[3]),"exact RoPE PTX");dr(cuModuleGetFunction(&rope,module,"probe_rope_no_vcopy"),"exact RoPE symbol");std::vector<std::unique_ptr<Lane>> lanes;for(int i=0;i<2;++i)lanes.emplace_back(std::make_unique<Lane>(argv[2]));need(lanes[0]->stream.p!=lanes[1]->stream.p&&lanes[0]->workspace!=lanes[1]->workspace,"independent lanes");std::string results[2];
+  if(!timed){for(int i=0;i<2;++i){auto& l=*lanes[i];std::string prefix="lane"+std::to_string(i)+"-";l.gemm(false,lt);l.snapshot(out/(prefix+"lt-raw.f16le"),false,false);l.rope(rope);l.snapshot(out/(prefix+"baseline.f16le"),true,true);l.gemm(true,lt);l.snapshot(out/(prefix+"cutlass-raw.f16le"),false,false);l.rope(rope);l.snapshot(out/(prefix+"cutlass-separate.f16le"),true,false);for(int j=0;j<2;++j){l.run(true,lt,rope);l.snapshot(out/(prefix+(j?"fused-repeat":"fused")+".f16le"),false,false);}}}
+  else{Barrier ready,finished;std::exception_ptr errors[2];std::thread workers[2];for(int i=0;i<2;++i)workers[i]=std::thread([&,i]{try{ck(cudaSetDevice(0),"worker context");auto& l=*lanes[i];bool selected=arm=="candidate";l.run(selected,lt,rope);l.snapshot(out/("before-lane"+std::to_string(i)+".f16le"),!selected,true);for(int j=0;j<WARM;++j)l.run(selected,lt,rope);l.stream.sync();auto events=std::make_unique<Event[]>(ITER*2);ready.wait();auto start=std::chrono::steady_clock::now();for(int j=0;j<ITER;++j){ck(cudaEventRecord(events[j*2].p,l.stream.p),"begin");l.run(selected,lt,rope);ck(cudaEventRecord(events[j*2+1].p,l.stream.p),"end");}l.stream.sync();double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();finished.wait();l.snapshot(out/("after-lane"+std::to_string(i)+".f16le"),!selected,true);std::ostringstream s;s<<std::setprecision(17)<<"{\"lane\":"<<i<<",\"wall_seconds\":"<<wall<<",\"events_ms\":[";for(int j=0;j<ITER;++j){float ms=0;ck(cudaEventElapsedTime(&ms,events[j*2].p,events[j*2+1].p),"elapsed");need(std::isfinite(ms)&&ms>0,"finite event");if(j)s<<',';s<<ms;}s<<"]}";results[i]=s.str();}catch(...){errors[i]=std::current_exception();ready.abort();finished.abort();}});for(auto& t:workers)t.join();for(auto e:errors)if(e)std::rethrow_exception(e);}
+  std::ofstream f(out/"report.json");f<<"{\"status\":\"PASS_PROCESS_PENDING_CPU_REVIEW\",\"mode\":"<<quote(mode)<<",\"arm\":"<<quote(arm)<<",\"shape\":[5054,1152,384],\"gpu\":"<<quote(gpu.name)<<",\"cublaslt_version\":130600,\"cublaslt_dll\":"<<quote(dll_path())<<",\"algorithm_identity\":"<<quote(lt.identity)<<",\"shared_lt_handle\":"<<uintptr_t(lt.handle)<<",\"rope_grid\":[948,1,1],\"rope_threads\":1024,\"candidate\":"<<lanes[0]->meta()<<",\"guards_and_readonly\":true,\"lanes\":[";for(int i=0;i<2;++i){if(i)f<<',';auto& l=*lanes[i];f<<"{\"stream\":"<<uintptr_t(l.stream.p)<<",\"input\":"<<uintptr_t(l.input.p)<<",\"weight\":"<<uintptr_t(l.weight.p)<<",\"output\":"<<uintptr_t(l.output.p)<<",\"scratch\":"<<uintptr_t(l.scratch.p)<<",\"workspace\":"<<uintptr_t(l.workspace)<<",\"candidate\":"<<l.meta()<<"}";}f<<"],\"warmup\":"<<(timed?WARM:0)<<",\"iterations\":"<<(timed?ITER:0)<<",\"results\":[";if(timed)f<<results[0]<<','<<results[1];f<<"]}";need(bool(f),"report");dr(cuModuleUnload(module),"unload");std::cout<<"PASS_PROCESS_PENDING_CPU_REVIEW\n";return 0;
+}catch(const std::exception& e){std::cerr<<"PROBE_FAILED: "<<e.what()<<'\n';return 1;}}

@@ -1,0 +1,60 @@
+--- original/flash_fwd.py
++++ generated/strict_flash_fwd.py
+@@ -27,7 +27,8 @@
+ from flash_attn.cute.cute_dsl_utils import assume_tensor_aligned
+ from flash_attn.cute import utils
+ from flash_attn.cute.mask import AttentionMask
+-from flash_attn.cute.softmax import Softmax, apply_score_mod_inner
++from strict_softmax import StrictSoftmax as Softmax
++from flash_attn.cute.softmax import apply_score_mod_inner
+ from flash_attn.cute.seqlen_info import SeqlenInfoQK
+ from flash_attn.cute.block_info import BlockInfo
+ from flash_attn.cute.pack_gqa import PackGQA, pack_gqa_layout
+@@ -714,7 +715,10 @@
+         )
+         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
+         grid_dim = TileScheduler.get_grid_shape(tile_sched_params)
+-        softmax_scale_log2, softmax_scale = utils.compute_softmax_scale_log2(softmax_scale, self.score_mod)
++        # Strict candidate: retain the natural FP32 scale; score_mod is disabled.
++        if const_expr(mLSE is not None or self.score_mod is not None):
++            raise ValueError("Strict candidate requires mLSE=None and score_mod=None")
++        softmax_scale_natural, softmax_scale = softmax_scale, None
+         fastdiv_mods = utils.compute_fastdiv_mods(mQ, mK, self.qhead_per_kvhead, self.pack_gqa, aux_data.tensors)
+ 
+         self.kernel(
+@@ -727,7 +731,7 @@
+             mCuSeqlensK,
+             mSeqUsedQ,
+             mSeqUsedK,
+-            softmax_scale_log2,
++            softmax_scale_natural,
+             softmax_scale,
+             window_size_left,
+             window_size_right,
+@@ -766,7 +770,7 @@
+         mCuSeqlensK: Optional[cute.Tensor],
+         mSeqUsedQ: Optional[cute.Tensor],
+         mSeqUsedK: Optional[cute.Tensor],
+-        softmax_scale_log2: Float32,
++        softmax_scale_natural: Float32,
+         softmax_scale: Optional[Float32],
+         window_size_left: Optional[Int32],
+         window_size_right: Optional[Int32],
+@@ -917,7 +921,7 @@
+ 
+         # shape: (atom_v_m * rest_m)
+         softmax = Softmax.create(
+-            softmax_scale_log2,
++            softmax_scale_natural,
+             num_rows=acc_O.shape[0][0] * acc_O.shape[1],
+             softmax_scale=softmax_scale,
+         )
+@@ -1070,7 +1074,7 @@
+             smem_pipe_write = self.advance_pipeline(smem_pipe_write)
+         # TODO: local
+ 
+-        # normalize acc_O by row_sum and calculate the lse
++        # normalize acc_O by row_sum; this candidate has no LSE calculation
+         row_scale = softmax.finalize()
+         softmax.rescale_O(acc_O, row_scale)
+ 

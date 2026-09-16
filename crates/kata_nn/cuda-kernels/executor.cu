@@ -90,6 +90,28 @@ extern "C" __global__ void conv_bias_gate_silu_kernel(
     gated[i] = __float2half(a);
 }
 
+// Opt-in map3D: same FP32 arithmetic and half boundary; only integer mapping differs.
+// Host contract: S361/C768/G19, B1..16, grid(3,91,B), block(256,4,1).
+extern "C" __global__ void conv_bias_gate_silu_map3d_kernel(
+    const float* __restrict__ conv, const float* __restrict__ glob,
+    const float* __restrict__ gw, float* __restrict__ out,
+    __half* __restrict__ gated, const float* __restrict__ scale,
+    const float* __restrict__ bias, int B, int S, int C, int G) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    int s = blockIdx.y * blockDim.y + threadIdx.y;
+    int b = blockIdx.z;
+    if (c >= C || s >= S || b >= B) return;
+    int i = (b * S + s) * C + c;
+    float v = conv[i];
+    const float* g = glob + (size_t)b * G;
+    const float* w = gw + (size_t)c * G;
+    for (int k = 0; k < G; ++k) v += g[k] * w[k];
+    out[i] = v;
+    float a = v * scale[c] + bias[c];
+    a = a / (1.0f + expf(-a));
+    gated[i] = __float2half(a);
+}
+
 // ---------------------------------------------------------------------------
 // 通用逐元素 / 布局辅助
 // ---------------------------------------------------------------------------
@@ -590,4 +612,26 @@ extern "C" __global__ void rms_norm_splitk_kernel(
         xr[c] = acc[i];  // 写回 act384_new（供下一块残差）
         yr[c] = __float2half(acc[i] * rstd * scale[c]);
     }
+}
+
+// Isolated B14 C768 gate tactic; FP32 affine/SiLU and original RN half boundary.
+extern "C" __global__ void gate_silu_rowquad_c768_kernel(
+    const float* __restrict__ input, const float* __restrict__ scale,
+    const float* __restrict__ bias, __half* __restrict__ output) {
+    const int quad = threadIdx.x;
+    const int index = blockIdx.x * 192 + quad;
+    const float4 x = reinterpret_cast<const float4*>(input)[index];
+    const float4 s = reinterpret_cast<const float4*>(scale)[quad];
+    const float4 b = reinterpret_cast<const float4*>(bias)[quad];
+    float v0 = x.x * s.x + b.x;
+    float v1 = x.y * s.y + b.y;
+    float v2 = x.z * s.z + b.z;
+    float v3 = x.w * s.w + b.w;
+    v0 = v0 / (1.0f + expf(-v0));
+    v1 = v1 / (1.0f + expf(-v1));
+    v2 = v2 / (1.0f + expf(-v2));
+    v3 = v3 / (1.0f + expf(-v3));
+    const unsigned lo = unsigned(__half_as_ushort(__float2half(v0))) | (unsigned(__half_as_ushort(__float2half(v1))) << 16);
+    const unsigned hi = unsigned(__half_as_ushort(__float2half(v2))) | (unsigned(__half_as_ushort(__float2half(v3))) << 16);
+    reinterpret_cast<uint2*>(output)[index] = make_uint2(lo, hi);
 }

@@ -1,0 +1,65 @@
+
+/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/fa4_strict_b14_m128_n96_fp32.o:     file format elf64-x86-64
+
+
+Disassembly of section .ltext:
+
+00000000000003c0 <fa4_strict_b14_m128_n96_fp32_cutlass___call___strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__FakeTensorFloat161436112324158721152321_FakeTensorFloat161436112324158721152321_FakeTensorFloat16143611>:
+ 3c0:	48 81 ec 78 05 00 00 	sub    $0x578,%rsp
+ 3c7:	4c 8d 0d f9 ff ff ff 	lea    -0x7(%rip),%r9        # 3c7 <fa4_strict_b14_m128_n96_fp32_cutlass___call___strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__FakeTensorFloat161436112324158721152321_FakeTensorFloat161436112324158721152321_FakeTensorFloat16143611+0x7>
+ 3ce:	48 b8 00 00 00 00 00 00 00 00 	movabs $0x0,%rax	3d0: R_X86_64_GOTPC64	_GLOBAL_OFFSET_TABLE_+0x9
+ 3d8:	48 89 7c 24 38       	mov    %rdi,0x38(%rsp)
+ 3dd:	48 8d 7c 24 38       	lea    0x38(%rsp),%rdi
+ 3e2:	48 89 74 24 30       	mov    %rsi,0x30(%rsp)
+ 3e7:	48 89 54 24 28       	mov    %rdx,0x28(%rsp)
+ 3ec:	48 89 4c 24 20       	mov    %rcx,0x20(%rsp)
+ 3f1:	49 ba 00 00 00 00 00 00 00 00 	movabs $0x0,%r10	3f3: R_X86_64_GOTOFF64	.rodata.cst16+0x40
+ 3fb:	48 8d 74 24 30       	lea    0x30(%rsp),%rsi
+ 400:	48 8d 54 24 28       	lea    0x28(%rsp),%rdx
+ 405:	48 8d 4c 24 20       	lea    0x20(%rsp),%rcx
+ 40a:	c7 84 24 b0 00 00 00 06 00 00 00 	movl   $0x6,0xb0(%rsp)
+ 415:	c7 84 24 b8 00 00 00 00 00 00 00 	movl   $0x0,0xb8(%rsp)
+ 420:	c7 84 24 f8 00 00 00 02 00 00 00 	movl   $0x2,0xf8(%rsp)
+ 42b:	c7 84 24 00 01 00 00 00 00 00 00 	movl   $0x0,0x100(%rsp)
+ 436:	c5 fa 11 44 24 0c    	vmovss %xmm0,0xc(%rsp)
+ 43c:	48 89 7c 24 40       	mov    %rdi,0x40(%rsp)
+ 441:	48 89 74 24 48       	mov    %rsi,0x48(%rsp)
+ 446:	48 89 54 24 50       	mov    %rdx,0x50(%rsp)
+ 44b:	48 89 4c 24 58       	mov    %rcx,0x58(%rsp)
+ 450:	48 8d 4c 24 0c       	lea    0xc(%rsp),%rcx
+ 455:	48 8d 7c 24 70       	lea    0x70(%rsp),%rdi
+ 45a:	48 8d 54 24 40       	lea    0x40(%rsp),%rdx
+ 45f:	4c 01 c8             	add    %r9,%rax
+ 462:	48 89 4c 24 60       	mov    %rcx,0x60(%rsp)
+ 467:	48 8d 4c 24 10       	lea    0x10(%rsp),%rcx
+ 46c:	4c 8d 8c 24 b0 00 00 00 	lea    0xb0(%rsp),%r9
+ 474:	c4 a1 78 28 0c 10    	vmovaps (%rax,%r10,1),%xmm1
+ 47a:	48 89 4c 24 68       	mov    %rcx,0x68(%rsp)
+ 47f:	48 b9 00 00 00 00 00 00 00 00 	movabs $0x0,%rcx	481: R_X86_64_GOTOFF64	.lbss
+ 489:	4c 89 8c 24 98 00 00 00 	mov    %r9,0x98(%rsp)
+ 491:	49 b9 01 00 00 00 01 00 00 00 	movabs $0x100000001,%r9
+ 49b:	48 8b 34 08          	mov    (%rax,%rcx,1),%rsi
+ 49f:	48 b9 00 00 00 00 00 00 00 00 	movabs $0x0,%rcx	4a1: R_X86_64_GOT64	_cudaLaunchKernelEx
+ 4a9:	4c 89 8c 24 80 00 00 00 	mov    %r9,0x80(%rsp)
+ 4b1:	48 c7 84 24 88 00 00 00 00 50 00 00 	movq   $0x5000,0x88(%rsp)
+ 4bd:	4c 89 4c 24 10       	mov    %r9,0x10(%rsp)
+ 4c2:	66 c7 44 24 18 00 00 	movw   $0x0,0x18(%rsp)
+ 4c9:	c5 f8 29 4c 24 70    	vmovaps %xmm1,0x70(%rsp)
+ 4cf:	4c 89 84 24 90 00 00 00 	mov    %r8,0x90(%rsp)
+ 4d7:	c7 84 24 a0 00 00 00 02 00 00 00 	movl   $0x2,0xa0(%rsp)
+ 4e2:	ff 14 08             	call   *(%rax,%rcx,1)
+ 4e5:	48 81 c4 78 05 00 00 	add    $0x578,%rsp
+ 4ec:	c3                   	ret
+ 4ed:	0f 1f 00             	nopl   (%rax)
+
+/mnt/d/code/Rust_KataGo/target/fork-parity-20260908/fa4-strict-reference-r2/fa4_strict_b14_m128_n96_fp32.o:     file format elf64-x86-64
+
+Contents of section .rodata.cst16:
+ 0000 32313431 31353231 33323431 35383732  2141152132415872
+ 0010 32343135 3837325f 74656e73 6f727074  2415872_tensorpt
+ 0020 32313431 31353231 33323431 35383732  2141152132415872
+ 0030 32343135 3837325f 74656e73 6f727074  2415872_tensorpt
+ 0040 03000000 0c000000 0e000000 80000000  ................
+ 0050 03000000 0c000000 0e000000 80000000  ................
+ 0060 03000000 0c000000 0e000000 80000000  ................
+ 0070 03000000 0c000000 0e000000 80000000  ................

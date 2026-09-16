@@ -1,0 +1,51 @@
+{
+  "status": "STATIC_CODEGEN_SCAN_NOT_NUMERIC_TEST",
+  "strict": {
+    "path": "\\\\?\\D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\fa4-strict-reference-r2\\cutlass___call___strict_flash_fwd_sm120FlashAttentionForwardSm120_object_at__FakeTensorFloat161436112324158721152321_FakeTensorFloat161436112324158721152321_FakeTensorFloat16143611.sm_120.ptx",
+    "sha256": "0856940c9f8a2054468c83b04614825ad68c2ea65b98e2083cc9e294aeb84011",
+    "ex2_count": 196,
+    "full_corrective_dag_count": 196,
+    "canonical_dag_count": 1,
+    "canonical_dag_hashes": [
+      "8d081569c3100f3aba5df17dd17c8d15f2e7fad2e52d468dbfac3d36ac67b4fa"
+    ],
+    "errors": [],
+    "rcp_modes": {
+      "rcp.rn.f32": 4
+    },
+    "div_modes": {},
+    "mma_modes": {
+      "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32": 192
+    },
+    "first_last_ex2_lines": [
+      975,
+      4598
+    ]
+  },
+  "rust_q64serial": {
+    "path": "\\\\?\\D:\\code\\Rust_KataGo\\target\\cudarocmopt-wsl\\release\\build\\kata_nn-09ad76d4c77a4f6c\\out\\sm_120_attention_fa2_q64_serial.ptx",
+    "sha256": "dc462cc9cc832d69b72b3c009f690e7aa5c0cd2dbcc15bfcd9df3347b7b460dc",
+    "ex2_count": 34,
+    "full_corrective_dag_count": 34,
+    "canonical_dag_count": 1,
+    "canonical_dag_hashes": [
+      "8d081569c3100f3aba5df17dd17c8d15f2e7fad2e52d468dbfac3d36ac67b4fa"
+    ],
+    "errors": [],
+    "rcp_modes": {
+      "rcp.rn.f32": 2
+    },
+    "div_modes": {
+      "div.s32": 1
+    },
+    "mma_modes": {
+      "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32": 32
+    },
+    "first_last_ex2_lines": [
+      1119,
+      1510
+    ]
+  },
+  "all_exp_corrective_dags_identical": true,
+  "canonical_dag": "('mul.f32', ('ex2.approx.ftz.f32', ('fma.rn.f32', ('X', '0f32A57060', ('fma.rn.f32', ('X', '0f3FB8AA3B', ('neg.f32', (('add.f32', (('fma.rm.f32', (('cvt.sat.f32.f32', (('fma.rn.f32', ('X', '0f3BBB989D', '0f3F000000')),)), '0f437C0000', '0f4B400001')), '0fCB40007F')),))))))), ('shl.b32', (('fma.rm.f32', (('cvt.sat.f32.f32', (('fma.rn.f32', ('X', '0f3BBB989D', '0f3F000000')),)), '0f437C0000', '0f4B400001')), '23')))"
+}

@@ -1,8 +1,7 @@
 {
   "schema": 2,
   "kind": "cuda-tactic-plan",
-  "plan_id": "tf3-sm120-5070ti-dualffn-q64-serial-throughput-20260908-r1",
-  "generated_utc": "2026-09-08T11:01:43Z",
+  "plan_id": "tf3-sm120-5070ti-fp16-rne-r1-throughput-strict-b14-fixed-20260909-stem-kernel-migration-r1-gate-rowquad-r1-qkv-immutable-r1-ffn-half-compact-r1-classic-n128-r1-outproj-classic-n128-r1",
   "backend_build": {
     "capabilities": {
       "attention_q64": true,
@@ -13,51 +12,1223 @@
       "120",
       "89"
     ],
+    "cublaslt_version": 130600,
     "cuda_compiler": "13.3.73",
     "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e",
     "cutlass_version": "3.9.2",
-    "kernel_build_id": "sha256:f718a55c79787ef0d4c58854f73d20c6e18314c5817975fba8cb3887d4962c40"
+    "ffn_compact_artifact": "sha256:bd4521bdd9de1935b5dbb4aa50b4f5c677060f59ff0fb48bb6aa124687de6230",
+    "fp16_encoding_revision": 1,
+    "host_tactic_revision": 1,
+    "kernel_build_id": "sha256:440a60341702ab2dc4c06050ec3104315ce952b655fadbf3cff6f97b09796a87",
+    "outproj_n128_artifact": "sha256:0b8b386549308fbc97319ec3deec1139cb3409f8f0798aac014393cc483e6fa8",
+    "qkv_immutable_artifact": "sha256:b0f8c8f2ebcae729547243f8d6e069d18edd7b77eb4d1e20b46ab542abb659c7",
+    "strict_attention_artifact": "sha256:e142b91fe865445357aa754015d4ed9693ff8f9aa4a65eb631dbb9183c17fbc0"
   },
   "target": {
     "architecture": "sm_120",
-    "gpu_name": "NVIDIA GeForce RTX 5070 Ti",
     "compute_capability": "12.0",
-    "sm_count": 70,
+    "gpu_name": "NVIDIA GeForce RTX 5070 Ti",
     "l2_cache_bytes": 50331648,
-    "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6"
+    "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6",
+    "sm_count": 70,
+    "max_batch_size": 14
   },
   "apply": {
     "tactic_overrides": {
-      "KATAGO_CUDA_ATTN_TILE": "q64-serial",
       "KATAGO_CUDA_DUALFFN": "1",
-      "KATAGO_CUDA_NOGRAPH": "1"
+      "KATAGO_CUDA_CUBLASLT": "1",
+      "KATAGO_CUDA_RESIDUAL_ALGO": "tf3_5070ti_r1",
+      "KATAGO_CUDA_CUBLASLT_RANK": "heuristic",
+      "KATAGO_CUDA_GEMM_LAYOUT": "tn",
+      "KATAGO_CUDA_ATTN_TILE": "q64-serial",
+      "KATAGO_CUDA_NOGRAPH": "1",
+      "KATAGO_CUDA_PADBATCH": "0",
+      "KATAGO_CUDA_NOPIPELINE": "0",
+      "KATAGO_CUDA_SPLITK": "0",
+      "KATAGO_CUDA_T32": "0",
+      "KATAGO_CUDA_T64N32": "0",
+      "KATAGO_CUDA_FUSION": "none",
+      "KATAGO_CUDA_ATTN": "fa4-strict-b14-r1",
+      "KATAGO_CUDA_STEM_MAP3D": "1",
+      "KATAGO_CUDA_GATE_ROWQUAD_R1": "1",
+      "KATAGO_CUDA_QKV_IMMUTABLE_R1": "1",
+      "KATAGO_CUDA_FFN_COMPACT_R1": "1",
+      "KATAGO_CUDA_QKV_CLASSIC_N128_R1": "1",
+      "KATAGO_CUDA_OUTPROJ_CLASSIC_N128_R1": "1"
     }
   },
   "selection": {
-    "measured_requests_per_run": 8192,
-    "concurrency": 64,
-    "attention_bitwise_cases": 15,
-    "reference_policy_top1": "128/128",
-    "evidence": "docs/tf3-worker-performance-audit.md",
-    "method": "Native TF3 FP32 reference and ONNX ORT numerical gates before sequential Worker ABBA",
-    "physical_max_batch": 16,
-    "min_improvement": 0.01,
-    "nn_server_threads": 2,
-    "attention_validation": {
-      "concurrency": 32,
-      "improvement": 0.0353013907613422,
-      "candidate": "DualFFN + q64-serial",
-      "baseline": "DualFFN + q128",
-      "nn_server_threads": 1,
-      "evidence": "target/tf3-perf-audit/worker-attention-abba/report.json"
+    "status": "CERTIFIED_FOR_LISTED_NUMERICAL_AND_PERFORMANCE_SCOPE",
+    "binary": {
+      "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\build-target-windows\\release\\katago-rs.exe",
+      "sha256": "d218b98dfdf2eb75820465cbf625dfd3f690b91c3bb112f3be1a56d2cc644dcc"
     },
-    "throughput_validation": {
-      "concurrency": 64,
-      "improvement": 0.078,
-      "candidate": "Two NN threads without CUDA Graph",
-      "baseline": "Single NN thread with CUDA Graph",
-      "nn_server_threads": 2,
-      "evidence": "target/tf3-perf-audit/worker-two-servers-abba/report.json"
+    "source_hashes": [
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\kata_nn\\src\\backends\\cuda.rs",
+        "sha256": "691ff259cd18e8665fccf4560d15b03cbad4c6b7bb77dc8aa175d12dd03c3959"
+      },
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\kata_nn\\src\\backends\\cuda_exec.rs",
+        "sha256": "599d988730e7d1dc7d1f04818accab3c43718e57c91a8b4faf532e2a22c338db"
+      },
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\kata_nn\\src\\tactic_plan.rs",
+        "sha256": "ba6fdb9c9a7b2a51fb6974229b9e1ccd602fc64b0ce1e480fb41efe3ed24eb31"
+      },
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\kata_nn\\tests\\dump_native_tf3_cuda.rs",
+        "sha256": "07ec009d2cd9d474eda044e2b665e843df9f0c70e949c475ffebe9e5b16396de"
+      },
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\katago\\src\\cmd\\nnbench.rs",
+        "sha256": "f2afab6bbb8e3f06a4e93a2ace1f315b58dc4d72255be6a06e253e83ecb5bf76"
+      },
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\outproj-classic-n128-b14-r1\\abi.json",
+        "sha256": "3ce5f29dd256d61ad8254b80f6d6d5f284d6e16f03070132a8a212fc9fadc1b8"
+      },
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\outproj-classic-n128-b14-r1\\device.cu",
+        "sha256": "6359019f02a77f781b4eda11f6152dfee5c516e53118a45f3379bb634eaf4fea"
+      },
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\outproj-classic-n128-b14-r1\\kernel.cuh",
+        "sha256": "2b6be861a4736e7dfd440b7ed4af0921c2166f20afeb827cac9fc186befde668"
+      },
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\outproj-classic-n128-b14-r1\\kernel.sm120.cubin",
+        "sha256": "07ce7eb15cbc59e813d0cdea7acb3ad0b344b6036bab31443e34b89f55baf375"
+      },
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\outproj-classic-n128-b14-r1\\params-template.bin",
+        "sha256": "8f9ab3ff2ed3ee75f51c7c6e2f8e4b5565aba8c009b33ada7715bf215393169c"
+      },
+      {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\source\\crates\\kata_nn\\src\\backends\\outproj_n128.rs",
+        "sha256": "faa288c07e0f67d90b101c57f14ea54a2b81e11eefcf6627a63daeee39b25a66"
+      }
+    ],
+    "tested_plan": {
+      "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\migration-r1\\plans\\worker-tf3-sm120-throughput.json",
+      "sha256": "13c9c1f9f2870e2afcbd2db2ae1c20c45f1b3b5e67b95731ba74d8146faf7ff9"
+    },
+    "evidence": {
+      "native": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\native-review.json",
+        "sha256": "e61454921c901cd3ba8396a7d3c87256fb4370062ef789c5fbfd815f6c675f8a"
+      },
+      "worker_numeric": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\worker-golden-r1\\review.json",
+        "sha256": "6cbf3d4594b246234fb01be1c0e3a0acdea3d2ccd73b03592c1c197766c0412e"
+      },
+      "forward": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\forward-abba-r1\\review.json",
+        "sha256": "ed521c7476dc16ee137afbcca9158e5eb5af0cf31fb7e06313f021bd148489ad"
+      },
+      "worker_performance": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\worker-performance-r1\\review.json",
+        "sha256": "8d2b1d8327818c46168a8f5e706b954ec3d3775202388c1319fdc63a0b87425a"
+      },
+      "binding": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\binding-r1\\review.json",
+        "sha256": "a0c7e4c0f75e618ce128bdf9a8a1e0afb57761dfc4f06e2df8fd49b5c993d337"
+      },
+      "onnx_graph": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\migration-r1\\old-paths\\review.json",
+        "sha256": "8ee0132c38786a3f16a81d7d4ca037767e29986a28b193a4452dd5d5a42d33ec"
+      },
+      "legacy_worker": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\migration-r1\\legacy-worker\\review.json",
+        "sha256": "531245f92a4ecf8d0d439ef7f7a280d66388d87e5921930f87e180ac99d20336"
+      },
+      "loads": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\migration-r1\\staged-loads\\review.json",
+        "sha256": "76738de1d67378e083fa4d6cd08ad9f641d16c033fa3b6e5d309289dff3f6bb7"
+      },
+      "build": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\build-r1\\completion.json",
+        "sha256": "1619c5360c4c72523c33cb96a0d892b3962b5939b4d84aa6b55636830cf1e9f2"
+      },
+      "identity": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\outproj-classic-tn-n128-integration-r1\\identity-review.json",
+        "sha256": "92aead191f85e561f2b2da71ec851f3f9c5a1e1107a3be674e8efae582a0a806"
+      }
+    },
+    "historical_selection": {
+      "status": "CERTIFIED_FOR_LISTED_NUMERICAL_AND_PERFORMANCE_SCOPE",
+      "binary": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\build-target-windows\\release\\katago-rs.exe",
+        "sha256": "c45ba0fc90dd8d8d7392e6ca71643b6326c9987cd9002a883f83eab8fbf63341"
+      },
+      "source_hashes": [
+        {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\source\\crates\\kata_nn\\src\\backends\\cuda_exec.rs",
+          "sha256": "d4f8e491b100eab7ad3116e6191dec092bfed37d8b0c6ab5407b3865934b4310"
+        },
+        {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\source\\crates\\kata_nn\\src\\backends\\qkv_immutable.rs",
+          "sha256": "6be8bb3080042b66b80ab9c9f178730dcc4d710792e701382787f9a2bfb86bdf"
+        },
+        {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\source\\crates\\kata_nn\\src\\tactic_plan.rs",
+          "sha256": "e4eb52b7a15c723ff4645fccc334db9989aa10d72a0cc893fd8ac802e0bcf70f"
+        },
+        {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\source\\crates\\kata_nn\\tests\\dump_native_tf3_cuda.rs",
+          "sha256": "c584082d081faf5f850bdd03ca932efb9581ec973a58918ab44bb55c4b015655"
+        },
+        {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\qkv-classic-n128-b14-r1\\abi.json",
+          "sha256": "fe0b0e6847203428dcb5d0fdc3332eab60788017f24bdb71e2c90b7c69d12978"
+        },
+        {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\qkv-classic-n128-b14-r1\\iterator.cuh",
+          "sha256": "8386148f39424962b59c6e58ac70ee6c3322fdfbeb7a8f21885ac4b1dbcaefdb"
+        },
+        {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\qkv-classic-n128-b14-r1\\kernel.sm120.cubin",
+          "sha256": "f4138e27b303a8321082441a22312e8888f2847ba84ad11c920a5e9f03d4db89"
+        },
+        {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\qkv-classic-n128-b14-r1\\n128_iterator.cuh",
+          "sha256": "86ec310e4ef0087877888bb276372621c48cc8c2b0a1c47aca14f16895f6d111"
+        },
+        {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\qkv-classic-n128-b14-r1\\params-template.bin",
+          "sha256": "9672dc7c9d68e8ea3b2074042f563e7c4b5bd7b5723c69c0784bbd90fac0cf41"
+        },
+        {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\source\\crates\\kata_nn\\cuda-aot\\qkv-classic-n128-b14-r1\\probe.cu",
+          "sha256": "13e7136330bedd958378d120147b73f5173a2ff7bec6cd565c0856d8c9852527"
+        }
+      ],
+      "tested_plan": {
+        "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\migration-r1\\plans\\worker-tf3-sm120-throughput.json",
+        "sha256": "e09c31028739e8452b2be33b5eeb2e75db3a886e517726161389d0763edc1814"
+      },
+      "evidence": {
+        "native": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\native-review.json",
+          "sha256": "d7d01b47fe14eee332f7a4d7491440eaae9bec95a4fe892f594e9dcbee37008a"
+        },
+        "worker_numeric": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\worker-golden-r1\\review.json",
+          "sha256": "a78b5c10ac508cc067a60df84c8e66afff7cd15ca21c45c55b43090dfb4940f4"
+        },
+        "forward": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\forward-abba-r1\\review.json",
+          "sha256": "1522e0ba64c6e3e4e5ae3b1fc6eeb51762fa5c8897467315717ccdcfca4ba4ba"
+        },
+        "worker_performance": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\worker-performance-r1\\review.json",
+          "sha256": "9372c8598b9abf07dc5b5fbe62b2b87469604e106c5fcbae7567a08421c5f4ef"
+        },
+        "binding": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\binding-r1\\review.json",
+          "sha256": "083c923d040fa9fb11fbf5928f799575064c16906e9acccf7cdacfb13f65904b"
+        },
+        "onnx_graph": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\migration-r1\\old-paths\\review.json",
+          "sha256": "fa450c8ced91ccd0469d9ee5f59a278d1bf9db1e90650eaefa77335c8d95cee7"
+        },
+        "legacy_worker": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\migration-r1\\legacy-worker\\review.json",
+          "sha256": "6706c7ddfc3256d4da2da36dec689ce989692901e330fbe300122ab2cbc1a65c"
+        },
+        "loads": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\migration-r1\\staged-loads\\review.json",
+          "sha256": "9b8ec0b78e6256f31629cd26ab44c156393e3a853de34efd1e270a63d457af98"
+        },
+        "build": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\build-r1\\completion.json",
+          "sha256": "10bb4d99f6b25ba61e6a307608abdbffc28ca057732d36f3b50b6ba542b14923"
+        },
+        "identity": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-classic-n128-integration-r1\\identity-review.json",
+          "sha256": "3b8859ef61c8e7057fd3faccb53d2267d6d16a8c3967fa603b18ba9ee25a08ff"
+        }
+      },
+      "historical_selection": {
+        "status": "CERTIFIED_FOR_LISTED_NUMERICAL_AND_PERFORMANCE_SCOPE",
+        "binary": {
+          "path": "D:\\code\\Rust_KataGo\\target\\ffn-half-channel-integration-build\\release\\katago-rs.exe",
+          "sha256": "848e3f9ce4ae7ce5cc7571c0589b3f1479885163e857b9dc06ebe18386cfe62b"
+        },
+        "source_hashes": [
+          {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\source\\crates\\kata_nn\\src\\backends\\ffn_compact.rs",
+            "sha256": "55ae6201803995b2cf71377f545f2a3899380c764edce7df85f4d45877807c2b"
+          },
+          {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\source\\crates\\kata_nn\\src\\backends\\ffn_compact_manifest.json",
+            "sha256": "dcb4c1bccc8cd7f6b75b061d95838ee4e37652d56429abbcc62985b8798310b5"
+          },
+          {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\source\\crates\\kata_nn\\src\\tactic_plan.rs",
+            "sha256": "4de138436233a9628b9ccbdde71346dc2814a57b4fe2c64f6e3c00be30707970"
+          },
+          {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\source\\crates\\kata_nn\\src\\backends\\cuda.rs",
+            "sha256": "b534c094071221a0507e7a45b59985709dbaaa779b3e8837b00066efabf48ec3"
+          },
+          {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\source\\crates\\kata_nn\\src\\backends\\cuda_exec.rs",
+            "sha256": "6b2387e56ab18ea7f09cac5ad15654c436114d7fee58bf6205a102e0aa67aeba"
+          },
+          {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\source\\crates\\kata_nn\\cuda-host\\dual_ffn_cutlass.cu",
+            "sha256": "59b574d6e473c3bf617e37e7996ac3a45adec0636466c71ee49b2864b0559173"
+          }
+        ],
+        "scope": {
+          "platform": "Windows",
+          "gpu": "RTX 5070 Ti SM120",
+          "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6",
+          "graph": "direct",
+          "stem_map3d": "1",
+          "original_target_unchanged": true,
+          "limitation": "No WSL certification; original target and profile selection scope are retained.",
+          "model_format": "native TF3",
+          "configured_max_batch": 14,
+          "nn_server_threads": 2,
+          "worker_concurrency": 64,
+          "workload": "uncached",
+          "ownership_in_performance": false,
+          "nograph": "1",
+          "attention": "Strict AOT only at physical B14; q64-serial fallback at other batches.",
+          "residual": "Old Fixed preset at registered TN/f32 beta1 shapes; other shapes use heuristic.",
+          "numeric_protocol": "B1/B14/B16 two-lane all raw heads and all6 policy top1; Worker W1/W64 C++ FP32 128cases/11fields, same gates.",
+          "gate_rowquad_r1": "1",
+          "gate_dispatch": "192 threads/row and four FP32 channels per thread only at physical B14/S361/C768; original scalar kernel for other batches.",
+          "qkv_immutable_r1": "1",
+          "qkv_dispatch": "Immutable host-populated Params, exact FP32 QKV GEMM and RoPE at both original RN-half boundaries; packed Q/K/V into strict M128 Attention only at B14; existing QKV for other batches.",
+          "ffn_half_channel_compact_r1": 1,
+          "ffn_dispatch": "All33 exact bound FFN half matrices: ascending kept channels, totalH38016->21712; original DualGemm FP32/SiLU/RN-half boundaries, actual compact-K FP32 down. Validated physical batches1/14/16; throughput deployment cap14/S2/C64."
+        },
+        "evidence": {
+          "native": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\native-review.json",
+            "sha256": "564f42080e0d7c5112248959b10f0b7b948714647758691c459a1ec732243fdf"
+          },
+          "worker_numeric": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\worker-golden-r1\\review.json",
+            "sha256": "17cbeb80fbf0bb68fef639d763d081e5d77dd2e7041bebf5b52751e24ecf3e40"
+          },
+          "forward": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\forward-r1\\review.json",
+            "sha256": "83d11e5539d71b7ec0d6d1af33842ac536295e1f5ee27d1b55849e4b3a33c3de"
+          },
+          "worker_performance": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\worker-performance-r1\\review.json",
+            "sha256": "5751d118fc136dcd2b68d8827616232bee93d6f3c0382ebc4eb6d3f6c18f1d2a"
+          },
+          "binding": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\binding-r1\\review.json",
+            "sha256": "f4de4dd694c0cb514bba5b1fbfd11afbc214c94b54a116f3e43a570c58737e84"
+          },
+          "onnx_graph": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\migration-r1\\old-paths\\review.json",
+            "sha256": "1657d4c291535fb18046efccf9b64bbb57b05bd66f0d68206969bac9e11b1003"
+          },
+          "legacy_worker": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\migration-r1\\legacy-worker\\review.json",
+            "sha256": "639b26d0cd2b15391c152615c208d1f9b9bf76283712ea673d10be87932f2372"
+          },
+          "loads": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\migration-r1\\staged-loads\\review.json",
+            "sha256": "943f24cdf784f3da5175e7373d5e8dfaafc1504b1eec0cf49e01a16d8936fa20"
+          },
+          "build": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\build-review.json",
+            "sha256": "80b922544b92fbcd245c2bbdf1ea2924d64f2021ebfa42807040a22ee6d65bc8"
+          }
+        },
+        "tested_plan": {
+          "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\migration-r1\\plans\\worker-tf3-sm120-throughput.json",
+          "sha256": "7e83fc1d6b08ad642d4a828cdfae7291dbde180454bf98da8af46764e9b92384"
+        },
+        "historical_selection": {
+          "binary": {
+            "path": "D:\\code\\Rust_KataGo\\target\\qkv-immutable-params-integration-build\\release\\katago-rs.exe",
+            "sha256": "9e0c6d40d12bcb3a80bdb9a5501c6cc07114563f26c0acde68fa84428d2f5a69"
+          },
+          "source_hashes": [
+            {
+              "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\tactic_plan.rs",
+              "sha256": "29e121ca0921618efa47b58e62fc24207e5356e41a1191b307f72c3795f2a4d2"
+            },
+            {
+              "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\backends\\cuda.rs",
+              "sha256": "bb494dd519d175c6e362169234ff8c111005e65185d2eb7e65016f825b035486"
+            },
+            {
+              "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\backends\\cuda_exec.rs",
+              "sha256": "c3ea6db3b0fbc87cf26c548a749ded898942eb867010289b08eb238717f15d28"
+            },
+            {
+              "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\backends\\strict_attention.rs",
+              "sha256": "00c5c96d5191a678f60a56b67c3ccaa2b475ef0357924114a90fad32d252b8c6"
+            },
+            {
+              "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\tests\\dump_native_tf3_cuda.rs",
+              "sha256": "2d958f2beff3599c8c97aa2d783ef98fedd9a1d7d9f078e473493cd21772c224"
+            },
+            {
+              "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\backends\\qkv_immutable.rs",
+              "sha256": "f0872880d8f9131925ecab275d29679301ab8312a2eccdd80aca4946290d7c49"
+            },
+            {
+              "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\cuda-aot\\qkv-immutable-params-b14-r1\\abi.json",
+              "sha256": "66bd94815619849643cdb6f9a472fd3730f5bf1d77b34f522b626eaa4e3d1b11"
+            },
+            {
+              "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\cuda-aot\\qkv-immutable-params-b14-r1\\kernel.sm120.cubin",
+              "sha256": "faf6f3136db74a02b75c99c993ef344f44ec521c9f95eaca69e361830f76fbf2"
+            },
+            {
+              "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\cuda-aot\\qkv-immutable-params-b14-r1\\params-template.bin",
+              "sha256": "108fe87b8aaff0057016dfd37350cad9990b5ce17ffad013f504ae8550cb0cd1"
+            }
+          ],
+          "compatibility_evidence": {
+            "native": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\native-win-r1\\review.json",
+              "sha256": "0ec3436e846abc128ab83efe5f773a95ab91541fe46467d455dc587d86287271"
+            },
+            "throughput_golden": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\worker-golden-r1\\review.json",
+              "sha256": "a1dc5187b405a4ff35257ba7d0370636764c763b8ebce372b8002eae8a395a51"
+            },
+            "forward": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\forward-win-r1\\review.json",
+              "sha256": "65186a526d95aa3ee2a1c3ea57671714cd5d9de9b045a0d56d7ac6b5f953c817"
+            },
+            "worker_performance": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\worker-performance-r1\\review.json",
+              "sha256": "ab7c376f9b61de88af3e7799cd31e8da3bdba3e550c7add5d2b2694bcb996f7f"
+            },
+            "binding": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\binding-win-r1\\review.json",
+              "sha256": "4a448b3f1c49ae4afab326a7272f00da5306f4c24fa8a8fe72d30f1265f249b8"
+            },
+            "onnx_graph": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\migration-r1\\old-paths\\review.json",
+              "sha256": "2e1f415b0dfa8ab876bb88b58646bbfa88912076b0c9baf3405e99f67be777ad"
+            },
+            "legacy_worker": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\migration-r1\\legacy-worker\\review.json",
+              "sha256": "0e4c164adeca53a30b10f212d27b5afd06c32fc2066ef00ac03affdd675fec2a"
+            },
+            "loads": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\migration-r1\\staged-loads\\review.json",
+              "sha256": "f4bf807d7b839e16c30f3eeae55add798ac48e2726dc61e89ea09d72aad6a9fd"
+            },
+            "ptx": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\core-preservation.json",
+              "sha256": "a9c521f96951601bd4339b907334d7a3c3bca3739ac9763e51db5831770ac5c9"
+            }
+          },
+          "limitation": "Windows RTX 5070 Ti only. Original target/profile scope retained. No fresh legacy performance or WSL certification. Final-path checks are recorded separately in promotion-r1/acceptance.json.",
+          "status": "CERTIFIED_FOR_LISTED_NUMERICAL_AND_PERFORMANCE_SCOPE",
+          "method": "Same-CLI cuBLASLt plus RoPE versus immutable-parameter fused QKV/RoPE full-forward and Worker ABBA, original numerical gates.",
+          "tested_plan": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\migration-r1\\plans\\worker-tf3-sm120-throughput.json",
+            "sha256": "edb29059d947c78f320f08088c7302dc7e8931a5d4b6a64817b19f93c828cea1"
+          },
+          "scope": {
+            "platform": "Windows",
+            "gpu": "RTX 5070 Ti SM120",
+            "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6",
+            "graph": "direct",
+            "stem_map3d": "1",
+            "original_target_unchanged": true,
+            "limitation": "No WSL certification; original target and profile selection scope are retained.",
+            "model_format": "native TF3",
+            "configured_max_batch": 14,
+            "nn_server_threads": 2,
+            "worker_concurrency": 64,
+            "workload": "uncached",
+            "ownership_in_performance": false,
+            "nograph": "1",
+            "attention": "Strict AOT only at physical B14; q64-serial fallback at other batches.",
+            "residual": "Old Fixed preset at registered TN/f32 beta1 shapes; other shapes use heuristic.",
+            "numeric_protocol": "B1/B14/B16, two-lane complete native outputs bitwise; baseline/candidate Worker W1/W32 original C++ FP32 128-case/11-field/top1 gates.",
+            "gate_rowquad_r1": "1",
+            "gate_dispatch": "192 threads/row and four FP32 channels per thread only at physical B14/S361/C768; original scalar kernel for other batches.",
+            "qkv_immutable_r1": "1",
+            "qkv_dispatch": "Immutable host-populated Params, exact FP32 QKV GEMM and RoPE at both original RN-half boundaries; packed Q/K/V into strict M128 Attention only at B14; existing QKV for other batches."
+          },
+          "source_plan_archive": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\promotion-r1\\archive-original\\worker-tf3-sm120-throughput.json",
+            "sha256": "bdee5afb99288206fdff18e6e3fafa209f0bb01a96c5cfd5cf4e507b575cbad5"
+          },
+          "historical_selection": {
+            "binary": {
+              "path": "D:\\code\\Rust_KataGo\\target\\trunk-gate-rowquad-integration-build\\release\\katago-rs.exe",
+              "sha256": "43ff8eb87cfe20ef0b9db7ef3d784b727f9960d1795c34bf9915c1995df20bda"
+            },
+            "source_hashes": [
+              {
+                "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\cuda-kernels\\executor.cu",
+                "sha256": "4c2b79f897e3febae4503adaa0228773f889894914f6ec322eedcf5812058b98"
+              },
+              {
+                "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\backends\\cuda_exec.rs",
+                "sha256": "38c04a64b42b4f33ed4f10a7a8125584e1c1c8623ee1170cc9b300498e348e42"
+              },
+              {
+                "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\tactic_plan.rs",
+                "sha256": "ac578c00d6f2494ae77501031b68ac04a8f8b9ba19fbd38730e2a32be48c499b"
+              },
+              {
+                "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\tests\\dump_native_tf3_cuda.rs",
+                "sha256": "30b8f95b4b022183111400ed48177e4f18f183af0df5f33682f0e3e1f9140909"
+              }
+            ],
+            "compatibility_evidence": {
+              "native": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\native-win-r1\\review.json",
+                "sha256": "53376ff71abfa30f2bd877a3b19eef56f6388df411469dc3afa18a61f2dece43"
+              },
+              "throughput_golden": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\worker-golden-r1\\review.json",
+                "sha256": "1b3d5c94ff253de79114ab6b21b6590cd96cb413e574151b4707ad1e3b7aae9a"
+              },
+              "forward": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\forward-win-r1\\review.json",
+                "sha256": "c36a0b5dcdd75fb43da6b3d9cc6562ee3f6562d5723c2821bda675bb87040dce"
+              },
+              "worker_performance": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\worker-performance-r1\\review.json",
+                "sha256": "256337b26d89b94b2f20522d207d09b70746fdd4cf79a225c7bb7f81b1889143"
+              },
+              "binding": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\binding-win-r1\\review.json",
+                "sha256": "4b3b47f338dc52bcd255bcc65f073fb04bc46dd5ac639d020d21145dc83a8017"
+              },
+              "onnx_graph": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\migration-r1\\old-paths\\review.json",
+                "sha256": "aa2b6f06cf8ea82fab9b284a79ffb649068476dfaa9e2a62cebbc09e6c81b827"
+              },
+              "legacy_worker": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\migration-r1\\legacy-worker\\review.json",
+                "sha256": "5fa4189570b06cec5296ca6af06094df76968dbb6d676b8f506abbff2e570206"
+              },
+              "loads": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\migration-r1\\staged-loads\\review.json",
+                "sha256": "9f53db0901753167c2f5c3d08127cc0d4d17e5a63f471b0362f7b8d6498e77c5"
+              },
+              "ptx": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\migration-r1\\ptx-review.json",
+                "sha256": "95a656a43fd3b9b8ff9d83dfe0cbbfd714adc9b3d5cdb88228bfeb663d2a11ec"
+              }
+            },
+            "limitation": "Windows RTX 5070 Ti only. Original target/profile scope retained. No fresh legacy performance or WSL certification. Final-path checks are recorded separately in promotion-r1/acceptance.json.",
+            "status": "CERTIFIED_FOR_LISTED_NUMERICAL_AND_PERFORMANCE_SCOPE",
+            "method": "Same-CLI scalar versus rowquad full-forward and Worker ABBA, original numerical gates.",
+            "tested_plan": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\migration-r1\\plans\\worker-tf3-sm120-throughput.json",
+              "sha256": "639844b736c954c62faf7f393e1b23a8eaea01ab6c41e05f3a633dbe0f3fa670"
+            },
+            "scope": {
+              "platform": "Windows",
+              "gpu": "RTX 5070 Ti SM120",
+              "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6",
+              "graph": "direct",
+              "stem_map3d": "1",
+              "original_target_unchanged": true,
+              "limitation": "No WSL certification; original target and profile selection scope are retained.",
+              "model_format": "native TF3",
+              "configured_max_batch": 14,
+              "nn_server_threads": 2,
+              "worker_concurrency": 64,
+              "workload": "uncached",
+              "ownership_in_performance": false,
+              "nograph": "1",
+              "attention": "Strict AOT only at physical B14; q64-serial fallback at other batches.",
+              "residual": "Old Fixed preset at registered TN/f32 beta1 shapes; other shapes use heuristic.",
+              "numeric_protocol": "B1/B14/B16, two-lane complete native outputs bitwise; baseline/candidate Worker W1/W32 original C++ FP32 128-case/11-field/top1 gates.",
+              "gate_rowquad_r1": "1",
+              "gate_dispatch": "192 threads/row and four FP32 channels per thread only at physical B14/S361/C768; original scalar kernel for other batches."
+            },
+            "source_plan_archive": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\promotion-r1\\archive-original\\worker-tf3-sm120-throughput.json",
+              "sha256": "507043187cc9456ee9bfcfb41163ed008fe430af73f15af04d3ef21c77a9e165"
+            },
+            "historical_selection": {
+              "status": "CERTIFIED_FOR_LISTED_NUMERICAL_AND_PERFORMANCE_SCOPE",
+              "method": "Same-binary STEM0 versus STEM1 full-network raw/golden and stable Worker ABBA.",
+              "binary": {
+                "path": "D:\\code\\Rust_KataGo\\target\\stem-map-integration-build\\release\\katago-rs.exe",
+                "sha256": "eae7a5b5beb1e076842ed812060218884ac7ba0a45f6055518d3d40b6e14b5fb"
+              },
+              "tested_plan": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\migration-stage-r1\\plans\\worker-tf3-sm120-throughput.json",
+                "sha256": "b83d1824ded99092cc1bc4300454899b40febd475eddda11bbdd82ce2b345e87"
+              },
+              "scope": {
+                "platform": "Windows",
+                "gpu": "RTX 5070 Ti SM120",
+                "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6",
+                "graph": "direct",
+                "stem_map3d": "1",
+                "original_target_unchanged": true,
+                "limitation": "No WSL certification; original target and profile selection scope are retained.",
+                "model_format": "native TF3",
+                "configured_max_batch": 14,
+                "nn_server_threads": 2,
+                "worker_concurrency": 64,
+                "workload": "uncached",
+                "ownership_in_performance": false,
+                "nograph": "1",
+                "attention": "Strict AOT only at physical B14; q64-serial fallback at other batches.",
+                "residual": "Old Fixed preset at registered TN/f32 beta1 shapes; other shapes use heuristic.",
+                "numeric_protocol": "Physical B14/L2 all native heads bitwise plus 128-case C++ FP32 mixed Worker golden."
+              },
+              "numerical_evidence": {
+                "native_stem": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\integration\\numeric-win-r1\\report.json",
+                  "sha256": "3ab7e6605e96f3ab1f439f4e0f74d18e5fb2f0ea452f58dde72c52f1ed2b2b00"
+                },
+                "worker_numeric": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\integration-worker-r1\\numeric-win-r1\\report.json",
+                  "sha256": "858406027e98c4483dc8a24e60c74ea0f5e1c6707ec57fc1096f53f36adf5253"
+                }
+              },
+              "compatibility_evidence": {
+                "staged_loads": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\migration-loads-win-r2\\report.json",
+                  "sha256": "5dfc797802cca6b18c650881909ac5f2ad922c89bec64a8f195ea13013afb11d"
+                },
+                "binding": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\integration-worker-r1\\binding-win-r1\\report.json",
+                  "sha256": "3d53fcee9106d99e7ff1142c6e479ef91a9966988ddf301eec40b5dae03a47ef"
+                },
+                "ptx": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\migration-proposal-r1\\ptx-audit.json",
+                  "sha256": "137646b362f636edefd4c173ab1ef99513a293c77c3f778fe54dc57084d7bb5f"
+                }
+              },
+              "source_hashes": [
+                {
+                  "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\backends\\cuda.rs",
+                  "sha256": "eb99cc8a0514b05fe928109b8ba9690daa95c8239ee12a5002e63b9b2f4bf3fe"
+                },
+                {
+                  "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\backends\\cuda_exec.rs",
+                  "sha256": "c108812410617e10bdb8202c355402c540ca840c3829e3a7ad7578958f731f61"
+                },
+                {
+                  "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\backends\\strict_attention.rs",
+                  "sha256": "70d389e5334a63af64e2ff6836c215dbbc454a95ec6d086cb59c905de91f8686"
+                },
+                {
+                  "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\src\\tactic_plan.rs",
+                  "sha256": "ef595c05b4900590108174c2656593c44fcbd13384db695b356e5b8730ea465b"
+                },
+                {
+                  "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\cuda-kernels\\executor.cu",
+                  "sha256": "68b9f20b14a74034833e3fada2da047bbf2140538ae54ad1f942df71e12ff8af"
+                },
+                {
+                  "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\tests\\dump_nn_io_cuda.rs",
+                  "sha256": "a48cb7c3b3fba11cd481f6b041676a2b3ae203d15715cde6f19b1ea39955bb88"
+                },
+                {
+                  "path": "D:\\code\\Rust_KataGo\\crates\\kata_nn\\tests\\graph_launch_repro.rs",
+                  "sha256": "332465be3b552fe94bcc228db16c90ee9d49a27034ef81e467ae34302effe564"
+                }
+              ],
+              "fp16_encoding_revision": 1,
+              "historical_selection": {
+                "status": "CERTIFIED_FOR_LISTED_NUMERIC_AND_PERFORMANCE_SCOPE",
+                "method": "fixed physical raw, fresh whole-model C++ FP32 gates, whole-forward and Worker ABBA",
+                "fp16_encoding_revision": 1,
+                "binary": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\rust-strict-attention-win.exe",
+                  "sha256": "3232cc338bf81f13c793f48799d9e9f329df2243250bde75e5e69effb97789d8"
+                },
+                "tested_plan": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\best-worker-comparison\\stage\\candidate-b14-s2-strict-fixed.json",
+                  "sha256": "9edf0eaa5625aaa92520b4888303c1140ac58154be89594a75563cec00d4edb3"
+                },
+                "scope": {
+                  "platform": "Windows",
+                  "gpu": "RTX 5070 Ti SM120",
+                  "configured_max_batch": 14,
+                  "nn_server_threads": 2,
+                  "measured_worker_concurrency": 64,
+                  "workload": "uncached",
+                  "ownership_in_performance": false,
+                  "graph": "disabled; NOGRAPH=1",
+                  "attention": "strict AOT at physical B14; q64-serial fallback at B1..13",
+                  "residual": "old Fixed TN/FP32 beta1 at B14 FFN down; other shapes retain heuristic",
+                  "limits": "No WSL strict/Fixed certification; other Worker concurrency profiles remain separately selected"
+                },
+                "numerical_evidence": {
+                  "native_attention": {
+                    "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\numeric-win-r1\\report.json",
+                    "sha256": "099c7a6c6b4a89cff0e4c98a929ce37485d75121e011e0941a5d79d2fa42a0ea"
+                  },
+                  "worker_attention": {
+                    "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\worker-numeric\\numeric-win-r1\\report.json",
+                    "sha256": "1ecaa051f7973799a1fb1915e4adcd4c21247cee498ff6f053a7abf209aff16c"
+                  },
+                  "worker_combination": {
+                    "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\best-worker-comparison\\numeric-win-r1\\report.json",
+                    "sha256": "f2b43bdf5dca273506ecec7e0fe8a635982af0522e26fa404b6b47929caf3d92"
+                  },
+                  "physical_b14_combination": {
+                    "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\fixed-b14-strict-fixed-numeric\\run-win-r1\\report.json",
+                    "sha256": "9e31230c4e29b05bb68262e8dbf0fc5f1b3c62dede7892e18ec395fe7a64f8c8"
+                  }
+                },
+                "performance_evidence": {
+                  "whole_forward": {
+                    "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\forward-abba-win-r1\\report.json",
+                    "sha256": "af100df4c4ddc3d67a64f71b3d402c92cac42f41720cab5f34bea5aa01944669"
+                  },
+                  "worker_attention_abba": {
+                    "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\worker-abba-r1\\run-r1\\report.json",
+                    "sha256": "305d9dba1f409d07d37cb279f6930169f0a9cab906c63b93f6d8ec4c477257e7"
+                  },
+                  "best_profile_abba": {
+                    "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\best-worker-comparison\\abba-win-r1\\report.json",
+                    "sha256": "7434703961e6dfa34b11aaa3452af58a71e0ded35bbc14475785bfcb3a8df347"
+                  }
+                },
+                "best_configuration_comparison": {
+                  "baseline": "same new binary, previous B16/S2 fa2 + Fixed throughput plan",
+                  "candidate": "B14/S2 strict + Fixed",
+                  "rpc_geomean": {
+                    "baseline": 1169.5939357962875,
+                    "rust": 1194.0242016173117
+                  },
+                  "candidate_over_baseline": 1.0208878184755563,
+                  "gain_fraction": 0.02088781847555632,
+                  "maximum_relative_spread": 0.05,
+                  "minimum_gain": 0.01,
+                  "attribution": "overall configuration; isolated attention evidence is separate"
+                },
+                "historical_selection": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\throughput-install-r1\\archive-original\\historical-selection.json",
+                  "sha256": "e7468c02b15b6346a77729d6b68b2dd52334e1b626d41ba5ef669c9ab96d4880"
+                },
+                "old_plan_archive": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\throughput-install-r1\\archive-original\\worker-tf3-sm120-throughput.json",
+                  "sha256": "671375226b2579cf358989ad2e4ec10aaebf879e7e7a3d2f127e4aabafbe6003"
+                },
+                "final_runtime_receipt": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\g2-strict-attention-integration-r1\\throughput-install-r1\\installation-receipt.json",
+                "deployment_status": "consult installation receipt; this staged file alone is not an installed-state claim",
+                "path_marker_note": "production_certified=0 is a static kernel-path diagnostic; plan certification comes from these scoped evidence records"
+              },
+              "original_plan": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\promotion-r1\\archive-original\\worker-tf3-sm120-throughput.json",
+                "sha256": "951a1b81afe2d552fe41573804e6d38bdbcfaee98547b5a7c05d692e0dd94728"
+              },
+              "final_runtime_receipt": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\promotion-r1\\installation-receipt.json",
+              "deployment_status": "Consult receipt; proposed file is not an installed-state claim.",
+              "performance_evidence": {
+                "forward": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\integration\\forward-win-r1\\report.json",
+                  "sha256": "9ca32884c69e222d5ce16a049c55a0a9fc284686cbf8e3a49c34e0691415c867"
+                },
+                "worker_abba": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\integration-worker-r1\\abba-win-r1\\report.json",
+                  "sha256": "a1e367986db0788ea0bf3781e6321e5b75aa027355d7c9479e50cfea6b5777f8"
+                },
+                "worker_abba_cpu_review": {
+                  "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\stem-global-map-r1\\integration-worker-r1\\abba-independent-review.json",
+                  "sha256": "49903ccff8d8e35daef0ec56d5553b2ef1512881738e2e7ce7db63dd073ed4d9"
+                }
+              },
+              "comparison": {
+                "baseline": "Same new CLI, B14/S2 strict+Fixed, STEM0",
+                "candidate": "Same new CLI, B14/S2 strict+Fixed, STEM1",
+                "metric": "uncached Worker RPC requests/s at C64",
+                "baseline_rps": 1192.1479278756906,
+                "candidate_rps": 1205.9647354982137,
+                "gain_fraction": 0.011589843256401444,
+                "candidate_over_baseline": 1.0115898432564014,
+                "maximum_relative_spread": 0.05,
+                "minimum_gain": 0.01
+              },
+              "path_marker_note": "production_certified=0 is a static AOT diagnostic; this selection carries the scoped certification."
+            },
+            "performance": {
+              "primary": "Uncached C64 Worker RPC/s, B14 cap, S2, ownership false, 256 warmup / 8192 timed requests per phase; one ABBA.",
+              "worker_gain_fraction": 0.01511232880097002,
+              "worker": [
+                {
+                  "concurrency": 64,
+                  "maximum_relative_spread": 0.05,
+                  "workers": {
+                    "baseline": {
+                      "runs": 2,
+                      "rpc_geomean": 1216.6412516880955,
+                      "rpc_min": 1213.7647980738834,
+                      "rpc_max": 1219.524522096967,
+                      "rpc_relative_spread": 0.004745337838289343,
+                      "nn_rows_mean": 1216.6446600854251,
+                      "average_batch_mean": 13.931972789115646
+                    },
+                    "rust": {
+                      "runs": 2,
+                      "rpc_geomean": 1235.0275343164299,
+                      "rpc_min": 1234.458957374036,
+                      "rpc_max": 1235.596373138521,
+                      "rpc_relative_spread": 0.0009213880766878457,
+                      "nn_rows_mean": 1235.0276652562784,
+                      "average_batch_mean": 13.931972789115646
+                    }
+                  },
+                  "comparisons": {
+                    "baseline": {
+                      "performance_status": "STABLE"
+                    }
+                  },
+                  "rust_over_baseline_rpc_ratio": 1.01511232880097,
+                  "performance_status": "STABLE"
+                }
+              ],
+              "full_forward": {
+                "event_rate": {
+                  "arms": {
+                    "baseline": {
+                      "samples": [
+                        1211.3629204394992,
+                        1203.6513950099015
+                      ],
+                      "geomean": 1207.5010016767155,
+                      "relative_spread": 0.006406776464986663
+                    },
+                    "candidate": {
+                      "samples": [
+                        1234.3219269486365,
+                        1234.614151736244
+                      ],
+                      "geomean": 1234.4680306954644,
+                      "relative_spread": 0.0002367492476860189
+                    }
+                  },
+                  "gain": 0.0223329247605617,
+                  "stable": true
+                },
+                "wall_rate": {
+                  "arms": {
+                    "baseline": {
+                      "samples": [
+                        1210.3927607792284,
+                        1201.6679700758582
+                      ],
+                      "geomean": 1206.022475677833,
+                      "relative_spread": 0.007260566912522082
+                    },
+                    "candidate": {
+                      "samples": [
+                        1231.501744246292,
+                        1230.0252250058786
+                      ],
+                      "geomean": 1230.763263207705,
+                      "relative_spread": 0.0012003975287631086
+                    }
+                  },
+                  "gain": 0.02051436687858299,
+                  "stable": true
+                }
+              },
+              "forward_event_scope": "Empty input B14/S2, no graph/copies; sum of batch/lane-event-median, 80 warmup /1000 events per lane.",
+              "repeat_limit": 0.05,
+              "minimum_gain": 0.01,
+              "worker_evidence": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\worker-performance-r1\\review.json",
+                "sha256": "256337b26d89b94b2f20522d207d09b70746fdd4cf79a225c7bb7f81b1889143"
+              },
+              "forward_evidence": {
+                "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\trunk-gate-rowquad-integration-r1\\forward-win-r1\\review.json",
+                "sha256": "c36a0b5dcdd75fb43da6b3d9cc6562ee3f6562d5723c2821bda675bb87040dce"
+              },
+              "fork_ratio": "Not measured by these local Windows A/B runs; historical matched WSL/WSL reference remains separate."
+            }
+          },
+          "performance": {
+            "primary": "Uncached C64 Worker RPC/s, B14 cap, S2, ownership false, 256 warmup / 8192 timed requests per phase; one ABBA.",
+            "worker_gain_fraction": 0.033331332387886325,
+            "worker": [
+              {
+                "concurrency": 64,
+                "maximum_relative_spread": 0.05,
+                "workers": {
+                  "baseline": {
+                    "runs": 2,
+                    "rpc_geomean": 1233.8653009728885,
+                    "rpc_min": 1230.9650829361221,
+                    "rpc_max": 1236.772352074848,
+                    "rpc_relative_spread": 0.0047176554552419425,
+                    "nn_rows_mean": 1233.8687175054852,
+                    "average_batch_mean": 13.920145987087533
+                  },
+                  "rust": {
+                    "runs": 2,
+                    "rpc_geomean": 1274.9916754414953,
+                    "rpc_min": 1273.0763543550222,
+                    "rpc_max": 1276.90987809501,
+                    "rpc_relative_spread": 0.003011228452145742,
+                    "nn_rows_mean": 1274.9931162250161,
+                    "average_batch_mean": 13.920145987087533
+                  }
+                },
+                "comparisons": {
+                  "baseline": {
+                    "performance_status": "STABLE"
+                  }
+                },
+                "rust_over_baseline_rpc_ratio": 1.0333313323878863,
+                "performance_status": "STABLE"
+              }
+            ],
+            "full_forward": {
+              "event_rate": {
+                "arms": {
+                  "baseline": {
+                    "samples": [
+                      1245.0615821286647,
+                      1238.9189654519205
+                    ],
+                    "geomean": 1241.986476276927,
+                    "relative_spread": 0.004958045560714774
+                  },
+                  "candidate": {
+                    "samples": [
+                      1275.6550882476963,
+                      1282.5074316311734
+                    ],
+                    "geomean": 1279.0766712264715,
+                    "relative_spread": 0.005371627053900374
+                  }
+                },
+                "gain": 0.029863606132595644,
+                "stable": true
+              },
+              "wall_rate": {
+                "arms": {
+                  "baseline": {
+                    "samples": [
+                      1232.391388279612,
+                      1226.408848662484
+                    ],
+                    "geomean": 1229.3964794164488,
+                    "relative_spread": 0.004878095607066646
+                  },
+                  "candidate": {
+                    "samples": [
+                      1274.9388047587126,
+                      1272.8129561812775
+                    ],
+                    "geomean": 1273.8754370169647,
+                    "relative_spread": 0.0016701971543511274
+                  }
+                },
+                "gain": 0.036179506241655,
+                "stable": true
+              }
+            },
+            "forward_event_scope": "Empty input B14/S2, no graph/copies; sum of batch/lane-event-median, 80 warmup /1000 events per lane.",
+            "repeat_limit": 0.05,
+            "minimum_gain": 0.01,
+            "worker_evidence": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\worker-performance-r1\\review.json",
+              "sha256": "ab7c376f9b61de88af3e7799cd31e8da3bdba3e550c7add5d2b2694bcb996f7f"
+            },
+            "forward_evidence": {
+              "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\qkv-immutable-params-integration-r1\\forward-win-r1\\review.json",
+              "sha256": "65186a526d95aa3ee2a1c3ea57671714cd5d9de9b045a0d56d7ac6b5f953c817"
+            },
+            "fork_ratio": "Not measured by these local Windows A/B runs; historical matched WSL/WSL reference remains separate."
+          }
+        },
+        "limitation": "Windows RTX5070Ti only. Other profiles retain original tactics with FFN_COMPACT_R1=0. No new WSL or Fork comparison.",
+        "method": "Same-CLI complete forward and uncached Worker ABBA after native/Worker numeric gates",
+        "performance": {
+          "worker_gain_fraction": 0.21766825390256184,
+          "worker": [
+            {
+              "concurrency": 64,
+              "maximum_relative_spread": 0.05,
+              "workers": {
+                "baseline": {
+                  "runs": 2,
+                  "rpc_geomean": 1270.2208742440555,
+                  "rpc_min": 1269.484109365932,
+                  "rpc_max": 1270.958066715152,
+                  "rpc_relative_spread": 0.00116106797898885,
+                  "nn_rows_mean": 1270.2210880405419,
+                  "average_batch_mean": 13.908319185059423
+                },
+                "rust": {
+                  "runs": 2,
+                  "rpc_geomean": 1546.7076340113447,
+                  "rpc_min": 1541.5179115367807,
+                  "rpc_max": 1551.9148283681088,
+                  "rpc_relative_spread": 0.0067445968376476095,
+                  "nn_rows_mean": 1546.716369952445,
+                  "average_batch_mean": 13.908359275913755
+                }
+              },
+              "comparisons": {
+                "baseline": {
+                  "performance_status": "STABLE"
+                }
+              },
+              "rust_over_baseline_rpc_ratio": 1.2176682539025618,
+              "performance_status": "STABLE"
+            }
+          ],
+          "full_forward": {
+            "event_rate": {
+              "arms": {
+                "baseline": {
+                  "samples": [
+                    1273.946174139489,
+                    1264.2809569455667
+                  ],
+                  "geomean": 1269.1043645572327,
+                  "relative_spread": 0.007644833326662548
+                },
+                "candidate": {
+                  "samples": [
+                    1572.207704593463,
+                    1573.6647220950408
+                  ],
+                  "geomean": 1572.9360446390556,
+                  "relative_spread": 0.000926733469961416
+                }
+              },
+              "gain": 0.23940637867700043,
+              "stable": true
+            },
+            "wall_rate": {
+              "arms": {
+                "baseline": {
+                  "samples": [
+                    1266.6317513592824,
+                    1262.6427289086039
+                  ],
+                  "geomean": 1264.6356673202645,
+                  "relative_spread": 0.0031592645800340158
+                },
+                "candidate": {
+                  "samples": [
+                    1556.409851629672,
+                    1554.7989644661304
+                  ],
+                  "geomean": 1555.60419953107,
+                  "relative_spread": 0.0010360742451964722
+                }
+              },
+              "gain": 0.23008091557892052,
+              "stable": true
+            }
+          },
+          "minimum_gain": 0.01,
+          "maximum_arm_spread": 0.05,
+          "worker_evidence": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\worker-performance-r1\\review.json",
+            "sha256": "5751d118fc136dcd2b68d8827616232bee93d6f3c0382ebc4eb6d3f6c18f1d2a"
+          },
+          "forward_evidence": {
+            "path": "D:\\code\\Rust_KataGo\\target\\fork-parity-20260908\\ffn-half-channel-integration-r1\\forward-r1\\review.json",
+            "sha256": "83d11e5539d71b7ec0d6d1af33842ac536295e1f5ee27d1b55849e4b3a33c3de"
+          },
+          "operator": "Separate operator ABBA rejected for instability, retained without retry or performance admission"
+        }
+      },
+      "scope": {
+        "platform": "Windows RTX5070Ti SM120",
+        "qkv_classic_n128": 1,
+        "batch": 14,
+        "precision": "Original FP16 storage and half rounding, FP32 accumulation/activations/reductions and exact scalar RoPE; no fast_math.",
+        "numerical": "Full native B1/B14/B16 x2 arms bitwise; Worker W1/W32/W64 x2 arms C++FP32 11fields/top1; legacy profiles retain original ONNX/graph/Worker gates."
+      },
+      "limitation": "Only throughput B14/S2 enables N128. Other five Windows plans preserve all earlier tactics with N128=0. No fresh Fork or WSL ratio.",
+      "performance": {
+        "worker_gain_fraction": 0.012253911353132585,
+        "worker": [
+          {
+            "concurrency": 64,
+            "maximum_relative_spread": 0.05,
+            "workers": {
+              "baseline": {
+                "runs": 2,
+                "rpc_geomean": 1545.2656225178716,
+                "rpc_min": 1545.182915837497,
+                "rpc_max": 1545.3483336251613,
+                "rpc_relative_spread": 0.00010705385489906405,
+                "nn_rows_mean": 1545.2656247313291,
+                "average_batch_mean": 13.87307851144863
+              },
+              "rust": {
+                "runs": 2,
+                "rpc_geomean": 1564.2011704732488,
+                "rpc_min": 1560.4404571770528,
+                "rpc_max": 1567.9709472133163,
+                "rpc_relative_spread": 0.004825874644321049,
+                "nn_rows_mean": 1564.2057021951846,
+                "average_batch_mean": 13.896612452087433
+              }
+            },
+            "comparisons": {
+              "baseline": {
+                "performance_status": "STABLE"
+              }
+            },
+            "rust_over_baseline_rpc_ratio": 1.0122539113531326,
+            "performance_status": "STABLE"
+          }
+        ],
+        "full_forward": {
+          "common_host_rate": {
+            "arms": {
+              "baseline": {
+                "samples": [
+                  1535.426346467321,
+                  1547.0920680678075
+                ],
+                "geomean": 1541.2481700627989,
+                "spread": 0.007597708367663936
+              },
+              "candidate": {
+                "samples": [
+                  1563.0284117591584,
+                  1574.5089165733293
+                ],
+                "geomean": 1568.758162105378,
+                "spread": 0.007345039109845519
+              }
+            },
+            "stable": true,
+            "gain": 0.017849164447967025
+          },
+          "event_rate": {
+            "arms": {
+              "baseline": {
+                "samples": [
+                  1552.5179420046215,
+                  1550.5372812470155
+                ],
+                "geomean": 1551.5272955649393,
+                "spread": 0.0012774028600028853
+              },
+              "candidate": {
+                "samples": [
+                  1577.90453031913,
+                  1574.4978948447047
+                ],
+                "geomean": 1576.2002922387094,
+                "spread": 0.0021636329178840175
+              }
+            },
+            "stable": true,
+            "gain": 0.01590239291586948
+          }
+        },
+        "minimum_gain": 0.01,
+        "maximum_arm_spread": 0.05
+      }
+    },
+    "scope": {
+      "platform": "Windows RTX5070Ti SM120",
+      "outproj_classic_n128": 1,
+      "batch": 14,
+      "precision": "Original FP16 storage and half rounding, FP32 accumulation/activations/reductions and exact scalar RoPE; no fast_math.",
+      "numerical": "Full native B1/B14/B16 x2 arms bitwise; Worker W1/W32/W64 x2 arms C++FP32 11fields/top1; legacy profiles retain original ONNX/graph/Worker gates."
+    },
+    "limitation": "Only throughput B14/S2 enables output-projection N128. Other five Windows plans preserve all earlier tactics with output-projection N128=0. Existing QKV N128 is retained. No fresh Fork or WSL ratio.",
+    "performance": {
+      "worker_gain_fraction": 0.011432078214146824,
+      "worker": [
+        {
+          "concurrency": 64,
+          "maximum_relative_spread": 0.05,
+          "workers": {
+            "baseline": {
+              "runs": 2,
+              "rpc_geomean": 1557.0222966850256,
+              "rpc_min": 1550.4225440825235,
+              "rpc_max": 1563.650142747973,
+              "rpc_relative_spread": 0.008531608828789894,
+              "nn_rows_mean": 1557.0363434152482,
+              "average_batch_mean": 13.896532473885642
+            },
+            "rust": {
+              "runs": 2,
+              "rpc_geomean": 1574.8222973618995,
+              "rpc_min": 1573.6076492084323,
+              "rpc_max": 1576.037883087155,
+              "rpc_relative_spread": 0.0015443709109732584,
+              "nn_rows_mean": 1574.8227661477936,
+              "average_batch_mean": 13.920145987087533
+            }
+          },
+          "comparisons": {
+            "baseline": {
+              "performance_status": "STABLE"
+            }
+          },
+          "rust_over_baseline_rpc_ratio": 1.0114320782141468,
+          "performance_status": "STABLE"
+        }
+      ],
+      "full_forward": {
+        "common_host_rate": {
+          "arms": {
+            "baseline": {
+              "samples": [
+                1565.3522167436322,
+                1550.7095451516914
+              ],
+              "geomean": 1558.0136790249026,
+              "spread": 0.00944256236619001
+            },
+            "candidate": {
+              "samples": [
+                1580.9205206718823,
+                1580.48080020917
+              ],
+              "geomean": 1580.7006451503064,
+              "spread": 0.0002782194270591898
+            }
+          },
+          "stable": true,
+          "gain": 0.014561467868242861
+        },
+        "event_rate": {
+          "arms": {
+            "baseline": {
+              "samples": [
+                1581.4787701549822,
+                1569.9177076107612
+              ],
+              "geomean": 1575.6876357567812,
+              "spread": 0.0073641200988907585
+            },
+            "candidate": {
+              "samples": [
+                1599.6340657378548,
+                1597.7278839664464
+              ],
+              "geomean": 1598.6806907484643,
+              "spread": 0.0011930578357788324
+            }
+          },
+          "stable": true,
+          "gain": 0.014592394120449992
+        }
+      },
+      "minimum_gain": 0.01,
+      "maximum_arm_spread": 0.05
     }
-  }
+  },
+  "generated_utc": "2026-09-08T22:23:24.220966+00:00"
 }

@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "artifact": "rope_no_vcopy.sm120.ptx",
+  "source": "source/helpers.cu",
+  "source_sha256": "0d5ae17845ea4b49bdd81cd0c59352a058fd87d3658ee6af06ad0c570d84703b",
+  "ptx_sha256": "3a5448f8cb639fca97bf13ce17b66f12bdc83c4875b8f146447e7c861f33191a",
+  "compiler": "NVRTC through cudarc 0.19.9",
+  "compiler_options_in_order": [
+    "--ftz=false",
+    "--prec-sqrt=true",
+    "--prec-div=true",
+    "--fmad=true",
+    "--gpu-architecture=compute_120"
+  ],
+  "program_name": null,
+  "headers": [],
+  "fast_math": false,
+  "ptx_header": {
+    "compiler": "NVIDIA NVVM Compiler",
+    "build_id": "CL-37862127",
+    "cuda_compilation_tools": "13.3.33",
+    "nvvm": "23.0.0",
+    "ptx_isa": "9.3",
+    "target": "sm_120"
+  },
+  "current_windows_toolkit_file_observations": [
+    {
+      "path": "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.3\\bin\\x64\\nvrtc64_130_0.dll",
+      "bytes": 101385328,
+      "sha256": "c7af6b5dbd001852d1b4a18effc6fbcfc94787eddadffea629a8333cb25b05fe",
+      "observed_by_packager_after_run": true,
+      "used_by_measured_process_verified": false
+    },
+    {
+      "path": "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.3\\bin\\x64\\nvrtc-builtins64_133.dll",
+      "bytes": 6684784,
+      "sha256": "82c703802846329d3bab3d8df06f8c956516a0eeec568033092d6c0a69b2733a",
+      "observed_by_packager_after_run": true,
+      "used_by_measured_process_verified": false
+    }
+  ],
+  "measured_process_library_identity": null,
+  "regeneration_verified": false,
+  "note": "PTX is the original run-r1 export. Compiler DLL observations made later do not prove which DLL the measured process loaded; no replacement PTX has been generated."
+}

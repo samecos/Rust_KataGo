@@ -1,0 +1,12 @@
+{
+  "status": "SOURCE_AUDIT_PASS_NOT_COMPILED",
+  "aliases_only_ast_equivalence": {
+    "online_softmax": true,
+    "finalize": true
+  },
+  "old_source_sha256": "11af669716e84fc397c06a5b41d7d60767aa19dec7985ee44a158a326fc1fc66",
+  "new_source_sha256": "2189afa893faf57d6f5175de0ab19ea0cb024365f4ba71a1a8880fe5ea7ab087",
+  "generator_sha256": "444bf26328eb95492e8cd252d764fc6fa5492d9d9d444ea85ac1824c40bf80e7",
+  "build_completed": false,
+  "numeric_verified": false
+}

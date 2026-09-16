@@ -1,5 +1,7 @@
 # Fork SM120 CUDA Optimization — Technical Reference Notes
 
+Current delivery status (2026-09-16): this optimization goal is closed at the user's request. Keep the accepted Windows configuration; the experiments below are historical technical references, not pending work. See [closeout](RustGo性能优化结项记录.md) and [usage](RustGo使用指南.md).
+
 Source repo: `D:/code/KataGomo_fork` (KataGo fork with a dedicated SM120 backend).
 Purpose: extract the exact kernel/tactic/scheduling decisions for Rust_KataGo's M4
 CUDA optimization phase (decision groups G1-G10 in `docs/cuda-optimization-plan.md`).
@@ -120,6 +122,14 @@ File: `final-migration/plans/sm120/rtx5080-b16-s2/best-tactic-plan.json`
 - Dispatch gate: `useWideQKV && useQKVGemmAot`, exact-batch AOT table
   `wideQKVAotByBatch` (`sm120.cpp:861-865`); packed path additionally requires
   FA4 enabled (`packedAttentionReady`, `sm120.cpp:1451-1458`).
+
+2026-09-09 source audit: `python/sm120_generate_cute_qkv_aot.py:164` passes
+`cutlass.Float16` as the GEMM accumulator type. The new Rust experiment must
+explicitly use `Float32`; the retained Fork performance is not evidence for
+that change. Rust already has one packed QKV GEMM, with half weights physically
+stored as row-major `[1152,384]` (TN), unlike the Fork buffer above. The proposed
+probe preserves that Rust storage and its FP32-compute/half-output boundary.
+No AOT performance result or production adoption is established by this audit.
 
 ### Q/K RoPE — separate kernel, NOT fused into the GEMM epilogue
 
@@ -286,6 +296,12 @@ Rust port notes:
 
 ## 6. G6 — persisting-L2 windows
 
+The mechanism below describes the older plan audited here. The actual frozen
+RTX 5070 Ti B14/S2 comparison plan overrides **both L2 switches to false**.
+Do not treat the 5080 configuration as the selected 5070 Ti workload. The
+current host-only audit and deferred inner-window proposal are preserved in
+`target/fork-parity-20260908/l2-current-b14-s2-r1/proposal.md`.
+
 - Window math (`sm120.cpp:883-927`):
   `trunkWindow = maxBatchSize*361*768*sizeof(half)` = 8,871,936 B (≈8.5 MiB);
   `innerWindow = maxBatchSize*361*384*sizeof(half)` ≈ 4.2 MiB;
@@ -302,7 +318,18 @@ Rust port notes:
   after the trunk block loop (before the heads); the inner (C384 mid) window is
   applied by a second hook on the mid buffer.
 - B16/S2 on RTX 5080: 2×13.3 MiB = 26.6 MiB ≪ 48 MiB persisting budget → hitRatio
-  1.0. On RTX 5070 Ti (48 MB L2, 36 MB max persisting) the same windows still fit.
+  1.0. Query the device for the actual persisting limit. A read-only check on
+  2026-09-09 reports **30 MiB**, not the previously assumed 36 MiB, on this
+  RTX 5070 Ti (48 MiB total L2, driver API version 13030). The Fork half windows
+  above still fit, but Rust's FP32 residual windows have a different budget.
+
+Current Windows B14/S2 Rust buffer sizes: two `act384` windows total 15,525,888
+bytes; two `act768` windows total 31,051,776 bytes, just below the measured
+31,457,280-byte persisting maximum. Protecting both totals 46,577,664 bytes and
+does not fit at hitRatio 1. Device evidence:
+`target/fork-parity-20260908/l2-current-b14-s2-r1/capabilities-win-r1.json`.
+These are allocation/capability calculations, not measured cache residency or
+performance gains; no new L2 tactic has been enabled.
 
 Rust port notes:
 - Pure host-side API usage — port as-is; keep the `hitProp/missProp` pair and the

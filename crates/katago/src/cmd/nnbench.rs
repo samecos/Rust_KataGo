@@ -342,6 +342,7 @@ fn direct_sweep(
     let model_file = parsed.common.get_model_file().map_err(|e| e.to_string())?;
     let bytes = std::fs::read(&model_file).map_err(|e| format!("read model: {e}"))?;
     let model_sha256 = kata_core::hash::sha2::sha256_hex(&bytes);
+    kata_nn::tactic_plan::validate_outproj_model_sha(&model_sha256)?;
     let graph = direct_layer_graph(&model_file, &bytes)?;
     let rt = CudaRuntime::new().map_err(|e| format!("CUDA runtime: {e}"))?;
     rt.validate_residual_algo_request()

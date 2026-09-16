@@ -1,5 +1,9 @@
 # Rust_KataGo
 
+> 2026-09-16：本轮 Fork 对标性能优化已按用户要求结项，停止追加测试和实验。
+> 当前交付与使用入口：`docs/RustGo性能优化结项记录.md`、`docs/RustGo使用指南.md`。
+> 主规划和实验报告中的历史“active/下一步”不构成继续执行授权；后续优化需新的明确任务。下列开发与数值纪律继续适用于后续任务。
+
 KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,含与 C++ 对拍的 oracle 测试)
 + 针对本机 RTX 5070 Ti(Blackwell SM120)的 CUDA 推理后端。
 
