@@ -1,0 +1,77 @@
+{
+  "schema": 2,
+  "kind": "cuda-tactic-plan",
+  "plan_id": "tf3-sm120-5060ti-basic-b8-s2-20260917",
+  "backend_build": {
+    "capabilities": {
+      "attention_q64": true,
+      "attention_q64_serial": true,
+      "dual_ffn": true
+    },
+    "compiled_sm": [
+      "120",
+      "89"
+    ],
+    "cublaslt_version": 130600,
+    "cuda_compiler": "13.3.73",
+    "cutlass_commit": "ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e",
+    "cutlass_version": "3.9.2",
+    "ffn_compact_artifact": "sha256:bd4521bdd9de1935b5dbb4aa50b4f5c677060f59ff0fb48bb6aa124687de6230",
+    "fp16_encoding_revision": 1,
+    "host_tactic_revision": 1,
+    "kernel_build_id": "sha256:440a60341702ab2dc4c06050ec3104315ce952b655fadbf3cff6f97b09796a87",
+    "outproj_n128_artifact": "sha256:0b8b386549308fbc97319ec3deec1139cb3409f8f0798aac014393cc483e6fa8",
+    "qkv_immutable_artifact": "sha256:b0f8c8f2ebcae729547243f8d6e069d18edd7b77eb4d1e20b46ab542abb659c7",
+    "strict_attention_artifact": "sha256:e142b91fe865445357aa754015d4ed9693ff8f9aa4a65eb631dbb9183c17fbc0"
+  },
+  "target": {
+    "architecture": "sm_120",
+    "compute_capability": "12.0",
+    "gpu_name": "NVIDIA GeForce RTX 5060 Ti",
+    "l2_cache_bytes": 33554432,
+    "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6",
+    "sm_count": 36,
+    "max_batch_size": 8
+  },
+  "apply": {
+    "tactic_overrides": {
+      "KATAGO_CUDA_ATTN": "fa2",
+      "KATAGO_CUDA_ATTN_TILE": "q128",
+      "KATAGO_CUDA_CUBLASLT": "1",
+      "KATAGO_CUDA_CUBLASLT_RANK": "heuristic",
+      "KATAGO_CUDA_RESIDUAL_ALGO": "heuristic",
+      "KATAGO_CUDA_GEMM_LAYOUT": "tn",
+      "KATAGO_CUDA_DUALFFN": "0",
+      "KATAGO_CUDA_FUSION": "none",
+      "KATAGO_CUDA_NOGRAPH": "0",
+      "KATAGO_CUDA_NOPIPELINE": "0",
+      "KATAGO_CUDA_PADBATCH": "0",
+      "KATAGO_CUDA_SPLITK": "0",
+      "KATAGO_CUDA_T32": "0",
+      "KATAGO_CUDA_T64N32": "0",
+      "KATAGO_CUDA_STEM_MAP3D": "0",
+      "KATAGO_CUDA_GATE_ROWQUAD_R1": "0",
+      "KATAGO_CUDA_QKV_IMMUTABLE_R1": "0",
+      "KATAGO_CUDA_QKV_CLASSIC_N128_R1": "0",
+      "KATAGO_CUDA_OUTPROJ_CLASSIC_N128_R1": "0",
+      "KATAGO_CUDA_FFN_COMPACT_R1": "0",
+      "KATAGO_NN_BATCH_WINDOW_US": "8000"
+    }
+  },
+  "selection": {
+    "status": "BASIC_UNCERTIFIED",
+    "fingerprint_source": "User-provided RTX 5060 Ti cuda-fingerprint output; no 5070 Ti certification inherited.",
+    "basis": "Preserves the default tactic paths from user-provided successful nnbench logs.",
+    "preliminary_nnbench": {
+      "average_batch": 7.98,
+      "iterations": 100,
+      "nn_evals_per_second": 502.6,
+      "workers": 64,
+      "nn_server_threads": 2,
+      "batch": 8,
+      "warmup": 20
+    },
+    "limitation": "Single-run screening only. No numerical certification, Worker ABBA, or final plan load verification on RTX 5060 Ti. Not a claim of optimal performance.",
+    "unbound_default": "KATAGO_CUDA_RMS is omitted to retain default w4; do not set it in the environment."
+  }
+}

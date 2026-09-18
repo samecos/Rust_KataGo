@@ -37,7 +37,10 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   (不带 -t 时走 auto-tune;模型只加载一次但逐档搜索仍慢,
   务必用 -t 指定 1-2 个配置)
 - 离线 autotune:`python scripts/autotune.py --threads both`(8 决策组 ABBA,
-  产出 plans/best-tactic-plan.json);接入选认证 plan:`--override-config
+  产出 plans/best-tactic-plan.json + 可直接 `gtp --config` 使用的
+  configs/gtp_autotuned.cfg——按 nnEvals/s 线程扫描选 numSearchThreads 并做
+  GTP genmove 冒烟验证;`--model/--out-plan/--out-cfg/--threads-sweep` 可改目标,
+  `--out-cfg ""` 回到只产 plan 的旧行为);接入选认证 plan:`--override-config
   nnBackend=cudabackend,cudaTacticPlan=D:/code/Rust_KataGo/plans/best-tactic-plan.json`
   (fail-closed:指纹/模型不匹配即报错);设备指纹:`katago-rs cuda-fingerprint --model <f>`
 - per-layer 剖析:`KATAGO_CUDA_PROFILE=1` + GTP `kata-raw-nn all`(逐层/attention

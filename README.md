@@ -87,11 +87,16 @@ nnMaxBatchSize = 16
 cudaTacticPlan = /path/to/plans/best-tactic-plan.json
 ```
 
-plan 会校验 GPU 指纹、模型 SHA-256 和 tactic 组合；不匹配时故意启动失败。下面是旧 ONNX 搜索路径的调优入口，脚本仍固定 `b11fix.onnx` 和输出 plan，使用前需核对目标：
+plan 会校验 GPU 指纹、模型 SHA-256 和 tactic 组合；不匹配时故意启动失败。离线调优入口（8 决策组 ABBA 选出 tactic 组合写入 plan JSON，然后按 nnEvals/s 线程扫描选 `numSearchThreads`，生成可直接 `gtp --config` 使用的 CFG，并用该 CFG 做一次 GTP `genmove` 冒烟验证）：
 
 ```bash
-python scripts/autotune.py --threads both
+python scripts/autotune.py --threads both \
+  --model D:/code/b11fix.onnx \
+  --out-plan plans/best-tactic-plan.json \
+  --out-cfg configs/gtp_autotuned.cfg
 ```
+
+三个路径参数都有默认值（`--model` 默认 `D:/code/b11fix.onnx`，换模型必须显式指定，plan 的 SHA-256 绑定该文件）；只想要 plan、不要 CFG 时传 `--out-cfg ""`。`--threads-sweep 4,8,12,16,24` 控制 `numSearchThreads` 候选档，`--rules/--komi/--max-visits` 控制写入 CFG 的对局参数，`--skip-validate` 跳过冒烟验证。
 
 仓库中的 [`configs/gtp_cuda.cfg`](configs/gtp_cuda.cfg) 和 `plans/best-tactic-plan.json` 是当前 Windows RTX 5070 Ti/b11fix 的 schema-2 认证配置（q64 attention + DualFFN），前者包含该 checkout 的绝对 plan 路径。WSL 使用对应的 `plans/best-tactic-plan-sm120-q64-wsl.json`；Windows/WSL 的 CUDA build fingerprint 不同，不能交叉复用。无匹配 plan 时可先移除 `cudaTacticPlan` 使用基础路径并验证。TF3 Worker 使用独立 plan，不能直接套用上述脚本或只替换模型名；调优与验收流程见 [TF3 权重适配与 Worker 部署](docs/TF3权重适配与Worker部署.md)。
 
@@ -186,7 +191,7 @@ cargo build -p katago --features cuda --release
   -v 800 -n 1 -t 1,4,8
 ```
 
-不要省略 `-t`：省略时 benchmark 会自动调优，并可能为每个线程档位重新加载模型。
+不要省略 `-t`：省略时 benchmark 会自动调优，并可能为每个线程档位重新加载模型。其它选项：`-s/--tune` 自动搜索最优线程数（等价于省略 `-t`）、`-n/--numpositions` 每局采样局面数、`-i/--time` 每手秒数（用于 Elo 换算）、`--fixed-batch-size N` 固定 batch 上限、`--half-batch-size` 取线程数一半的 batch、`--sgf FILE` 与 `--boardsize SIZE` 自定义局面来源。
 
 CUDA NN 吞吐 benchmark：
 
@@ -196,6 +201,8 @@ CUDA NN 吞吐 benchmark：
   --override-config nnBackend=cudabackend \
   --mode eval --batch 1,2,4,8,12,16,24,32 --iterations 400
 ```
+
+`--mode` 三档：`eval`（NnEvaluator 生产栈，可用 `--workers` 调并发，默认 2×batch）、`direct`（`CudaModel::apply` 直连含拷贝）、`kernel`（纯前向）。direct/kernel 模式支持 `--input positions|empty`（empty 对齐上游 benchmarknn 空盘口径）、`--handles N`（并发 CUDA handle）、`--json`（机器可解析输出）、`--timing wall|cuda-event`；另有 `--warmup` 预热迭代数。
 
 查看 CUDA 设备和模型指纹：
 
