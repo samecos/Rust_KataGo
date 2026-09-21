@@ -1,5 +1,11 @@
 # Rust_KataGo
 
+**跨机器 FULL AUTOTUNE（原生 TF3）**：[完整使用方法](docs/RustGo-FULL-AUTOTUNE.md)。`./scripts/full_autotune.ps1 -Model <模型.bin.gz> -Mode worker -Capacity 32` 从基础 tactic 开始，经 FP32 数值门、实际路径检查和 ABBA，生成该机 `plan.json` + CFG。当前常用 TF3 内置可携带金标，无需生产 Server/C++ Worker；不支持 ONNX FULL 调优。
+
+**剪枝 TF3 模型**：[支持范围与运行命令](docs/RustGo剪枝模型支持.md)。`b15-ffn-pruned-a8.bin.gz` 使用独立新二进制 `target/pruned-support/release/katago-rs.exe` 和该模型自己的 FP32 参考；旧正式版与旧 PLAN 保留。
+
+**自动配置与运行模式（2026-09-20）**：[一键自动优化配置](docs/RustGo自动配置优化.md) · [分布式 Worker / 单机分析说明](docs/RustGo运行模式说明.md)。直接运行 `./scripts/tune_rustgo.ps1 -Mode local` 或 `-Mode worker -Capacity 32`，完成后输出配置、启动脚本和测量报告。
+
 **本机使用入口（2026-09-16）**：[RustGo 使用指南](docs/RustGo使用指南.md)包含可直接复制的 Worker/GTP 命令和配置选择。本轮 Fork 对标优化已按用户确认结项，详见[结项记录](docs/RustGo性能优化结项记录.md)。当前认证高吞吐 Worker 为 1574.82 uncached RPC/s；持续 C64 请显式选择 `worker_tf3_sm120_throughput.cfg` 和 capacity 64，启动脚本默认仍是日常配置。
 
 KataGo 围棋引擎的 Rust 移植，基于 KataGo-Lite/`katago-rs`，并包含面向 NVIDIA CUDA 的手写推理后端。项目当前的主要使用方式是运行 `katago-rs`，通过 GTP 接入 Sabaki、Lizzie、KaTrain 等 GUI，或通过 JSON-lines 分析协议供脚本和服务调用。
@@ -87,18 +93,15 @@ nnMaxBatchSize = 16
 cudaTacticPlan = /path/to/plans/best-tactic-plan.json
 ```
 
-plan 会校验 GPU 指纹、模型 SHA-256 和 tactic 组合；不匹配时故意启动失败。离线调优入口（8 决策组 ABBA 选出 tactic 组合写入 plan JSON，然后按 nnEvals/s 线程扫描选 `numSearchThreads`，生成可直接 `gtp --config` 使用的 CFG，并用该 CFG 做一次 GTP `genmove` 冒烟验证）：
+plan 会校验 GPU 指纹、模型 SHA-256 和 tactic 组合；不匹配时故意启动失败。日常自动配置入口自动匹配已有认证 plan，按运行模式做 ABBA 复核，再输出配置和启动脚本：
 
 ```bash
-python scripts/autotune.py --threads both \
-  --model D:/code/b11fix.onnx \
-  --out-plan plans/best-tactic-plan.json \
-  --out-cfg configs/gtp_autotuned.cfg
+python scripts/tune_runtime.py --mode local --model D:/code/b11fix.onnx
 ```
 
-三个路径参数都有默认值（`--model` 默认 `D:/code/b11fix.onnx`，换模型必须显式指定，plan 的 SHA-256 绑定该文件）；只想要 plan、不要 CFG 时传 `--out-cfg ""`。`--threads-sweep 4,8,12,16,24` 控制 `numSearchThreads` 候选档，`--rules/--komi/--max-visits` 控制写入 CFG 的对局参数，`--skip-validate` 跳过冒烟验证。
+Windows 推荐 `scripts/tune_rustgo.ps1`，会处理 Worker 测量所需的 Python 依赖。默认模型为本机原生 TF3，换模型显式指定。完整参数、适用范围、输出及失败处理见[自动配置说明](docs/RustGo自动配置优化.md)。旧 `scripts/autotune.py` 是历史内核实验入口，不作为当前 TF3 一键部署工具。
 
-仓库中的 [`configs/gtp_cuda.cfg`](configs/gtp_cuda.cfg) 和 `plans/best-tactic-plan.json` 是当前 Windows RTX 5070 Ti/b11fix 的 schema-2 认证配置（q64 attention + DualFFN），前者包含该 checkout 的绝对 plan 路径。WSL 使用对应的 `plans/best-tactic-plan-sm120-q64-wsl.json`；Windows/WSL 的 CUDA build fingerprint 不同，不能交叉复用。无匹配 plan 时可先移除 `cudaTacticPlan` 使用基础路径并验证。TF3 Worker 使用独立 plan，不能直接套用上述脚本或只替换模型名；调优与验收流程见 [TF3 权重适配与 Worker 部署](docs/TF3权重适配与Worker部署.md)。
+仓库中的 [`configs/gtp_cuda.cfg`](configs/gtp_cuda.cfg) 和 `plans/best-tactic-plan.json` 是当前 Windows RTX 5070 Ti/b11fix 的 schema-2 认证配置（q64 attention + DualFFN），前者包含该 checkout 的绝对 plan 路径。WSL 使用对应的 `plans/best-tactic-plan-sm120-q64-wsl.json`；Windows/WSL 的 CUDA build fingerprint 不同，不能交叉复用。无匹配 plan 时使用基础路径并验证。TF3 Worker 使用独立 plan；新一键脚本按身份匹配，不能手工把 ONNX 的 plan 改成 TF3 身份。历史验收见 [TF3 权重适配与 Worker 部署](docs/TF3权重适配与Worker部署.md)。
 
 不指定 `cudaTacticPlan` 时不会自动运行 autotune，而是使用代码内置的默认 tactic（当前 attention 默认仍为 q128）；生产 q64 必须使用与本机 build fingerprint 匹配的认证 plan。
 

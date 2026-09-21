@@ -99,6 +99,21 @@ extern "C" __global__ void swiglu_dual_kernel(const __half* __restrict__ x,
     out[i] = __float2half(__half2float(x[(size_t)row * 2 * hidden + hidden + j]) * g);
 }
 
+// Pruned FFN: pad each activated row to the down weight's K stride. Padding
+// must be rewritten on every invocation, as this workspace also holds QKV.
+extern "C" __global__ void swiglu_dual_padded_kernel(
+    const __half* __restrict__ x, __half* __restrict__ out,
+    int m, int hidden, int padded_hidden) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= m * padded_hidden) return;
+    int row = i / padded_hidden;
+    int j = i % padded_hidden;
+    if (j >= hidden) { out[i] = __float2half(0.0f); return; }
+    float g = __half2float(x[(size_t)row * 2 * hidden + j]);
+    g = g / (1.0f + expf(-g));
+    out[i] = __float2half(__half2float(x[(size_t)row * 2 * hidden + hidden + j]) * g);
+}
+
 // f16 -> f32（head 输出用）。
 extern "C" __global__ void half_to_f32_region_kernel(const __half* __restrict__ in,
                                                      float* __restrict__ out, int n) {

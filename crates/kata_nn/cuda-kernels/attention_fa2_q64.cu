@@ -1,3 +1,7 @@
+// Keep the C384 specialization; generic entry points supply the actual mid.
+#ifndef FA64_MID
+#define FA64_MID 384
+#endif
 // 64Q x 64K, 4-warp tensor-core attention candidate for S=361,H=12,D=32.
 //
 // This follows KataGo cudarocmopt's register-resident score/P organization,
@@ -112,8 +116,8 @@ FA64_KERNEL_NAME(const __half* __restrict__ qkv,
             const bool valid = key < s;
             uint4 rotated = make_uint4(0, 0, 0, 0);
             if (valid) {
-                const __half* gk = qkv + ((size_t)b * s + key) * 1152 +
-                                   384 + h * FA64_D + d0;
+                const __half* gk = qkv + ((size_t)b * s + key) * (3 * FA64_MID) +
+                                   FA64_MID + h * FA64_D + d0;
                 __half2 pairs[4];
 #pragma unroll
                 for (int p = 0; p < 4; ++p) {
@@ -131,8 +135,8 @@ FA64_KERNEL_NAME(const __half* __restrict__ qkv,
             *reinterpret_cast<uint4*>(&k_tiles[buf][row * FA64_ST + d0]) =
                 rotated;
             const __half* gv = qkv + ((size_t)b * s + (valid ? key : 0)) *
-                                         1152 +
-                               768 + h * FA64_D + d0;
+                                         (3 * FA64_MID) +
+                               (2 * FA64_MID) + h * FA64_D + d0;
             fa64_cp_async16(&v_tiles[buf][row * FA64_ST + d0], gv, valid);
         }
         fa64_cp_commit();
@@ -149,7 +153,7 @@ FA64_KERNEL_NAME(const __half* __restrict__ qkv,
         const int qpos = q_block + row;
         uint4 rotated = make_uint4(0, 0, 0, 0);
         if (qpos < s) {
-            const __half* gq = qkv + ((size_t)b * s + qpos) * 1152 +
+            const __half* gq = qkv + ((size_t)b * s + qpos) * (3 * FA64_MID) +
                                h * FA64_D + d0;
             __half2 pairs[4];
 #pragma unroll

@@ -500,6 +500,22 @@ extern "C" __global__ void rms_norm_f32_w4_kernel(
     }
 }
 
+// Same FP32 warp reduction/storage boundary as w4, for non-C384 models.
+extern "C" __global__ void rms_norm_f32_w4_generic_kernel(
+    const float* __restrict__ x, const float* __restrict__ scale,
+    __half* __restrict__ y, float eps, int ncols, int rows) {
+    int row = blockIdx.x * 4 + (threadIdx.x >> 5);
+    if (row >= rows) return;
+    int lane = threadIdx.x & 31;
+    x += (size_t)row * ncols;
+    y += (size_t)row * ncols;
+    float sum = 0.0f;
+    for (int c = lane; c < ncols; c += 32) sum += x[c] * x[c];
+    for (int off = 16; off > 0; off >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, off);
+    float rstd = rsqrtf(sum / (float)ncols + eps);
+    for (int c = lane; c < ncols; c += 32) y[c] = __float2half(x[c] * rstd * scale[c]);
+}
+
 // ValueHead 输出合并（G4）：in [B, 21] f32 + bias[21] → 拆分写 3 个输出
 // [B,3] / [B,10] / [B,8]（value/misc/moremisc）。数值 = 独立 bias_add。
 extern "C" __global__ void f32_bias_add_split_kernel(

@@ -36,7 +36,16 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   nnBackend=cudabackend --override-config numSearchThreads=1 -v 20 -n 1 -t 1,4`
   (不带 -t 时走 auto-tune;模型只加载一次但逐档搜索仍慢,
   务必用 -t 指定 1-2 个配置)
-- 离线 autotune:`python scripts/autotune.py --threads both`(8 决策组 ABBA,
+- 日常自动配置（2026-09-20）：`./scripts/tune_rustgo.ps1 -Mode local` 或
+  `-Mode worker -Capacity 32`；匹配已有完整认证 profile，ABBA + 1% 收益/
+  5% 波动门，产出独立 cfg、计划副本、启动脚本和报告，不改认证身份或 kernel。
+  Worker 用临时本机真实 gRPC，无需生产 Server；无匹配 plan 仅基础配置。
+  入口说明见 `docs/RustGo自动配置优化.md`、`docs/RustGo运行模式说明.md`。
+- 跨机 FULL AUTOTUNE（原生 TF3 v17）：`./scripts/full_autotune.ps1 -Model <模型.bin.gz>`；
+  新建本机 plan，先可携带 C++ FP32 金标/实际路径门再 ABBA，最终复验 + READY 发布。
+  `--groups` 缩小范围会标 `CUSTOM_GROUPS`；未通过金标不得测速，不能伪造/改写已有认证身份。
+  使用、参考包导出及打包见 `docs/RustGo-FULL-AUTOTUNE.md`；ONNX FULL 不支持。
+- 历史内核实验 autotune:`python scripts/autotune.py --threads both`(8 决策组 ABBA,
   产出 plans/best-tactic-plan.json + 可直接 `gtp --config` 使用的
   configs/gtp_autotuned.cfg——按 nnEvals/s 线程扫描选 numSearchThreads 并做
   GTP genmove 冒烟验证;`--model/--out-plan/--out-cfg/--threads-sweep` 可改目标,

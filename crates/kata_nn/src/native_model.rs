@@ -2,7 +2,8 @@
 //!
 //! Native matrices are in-first; the CUDA executor uses out-first matrices.
 //! No ONNX export, model hash replacement, or activation substitution occurs.
-//! Only the verified 19x19 b11c768/h12/d32 nested transformer topology is accepted.
+//! Native 19x19 nested TF3 transformers use model-provided trunk/head/FFN widths.
+//! D=32 attention, equal Q/K/V heads and the existing 96/192 heads remain required.
 
 use crate::activations::ACTIVATION_SILU;
 use crate::desc::*;
@@ -11,10 +12,6 @@ use crate::onnx_parser::{
     PolicyHeadLayer, RmsNormLayer, Tensor, TensorData, TrunkFinalLayer, ValueHeadLayer,
 };
 
-const TRUNK: usize = 768;
-const MID: usize = 384;
-const HIDDEN: usize = 1152;
-const HEADS: usize = 12;
 const DIM: usize = 32;
 const SIDE: usize = 19;
 const SEQ: usize = SIDE * SIDE;
@@ -34,15 +31,21 @@ pub fn lower_model(desc: &ModelDesc) -> Result<LayerGraph, String> {
         "native CUDA requires v17, 22 spatial/19 global inputs, no metadata, and value/score/ownership 3/6/1",
     )?;
     let trunk = &desc.trunk;
+    let trunk_channels = trunk.trunk_num_channels as usize;
+    let mid = trunk.mid_num_channels as usize;
+    let heads = mid / DIM;
     ensure(
         trunk.model_version == 17
-            && trunk.trunk_num_channels == TRUNK as i32
-            && trunk.mid_num_channels == MID as i32
-            && trunk.num_blocks == 11
-            && trunk.blocks.len() == 11
+            && (32..=4096).contains(&trunk.trunk_num_channels)
+            && trunk_channels % 16 == 0
+            && (32..=2048).contains(&trunk.mid_num_channels)
+            && mid % DIM == 0
+            && trunk_channels > mid
+            && (1..=64).contains(&trunk.num_blocks)
+            && trunk.blocks.len() == trunk.num_blocks as usize
             && trunk.meta_encoder_version == 0
             && trunk.trunk_norm_kind == TRUNK_NORM_KIND_STANDARD,
-        "native CUDA requires eleven nested blocks, trunk 768/mid 384 and standard trunk-tip BN",
+        "native CUDA requires 1..64 nested blocks, aligned trunk/mid channels, D32 attention and standard trunk-tip BN",
     )?;
     let blocks: Vec<&NestedBottleneckResidualBlockDesc> = trunk
         .blocks
@@ -55,24 +58,30 @@ pub fn lower_model(desc: &ModelDesc) -> Result<LayerGraph, String> {
     let mut layers = Vec::new();
     for block in &blocks {
         ensure(
-            block.num_blocks == 6 && block.blocks.len() == 6,
-            "each native nested block must contain three attention/FFN pairs",
+            block.num_blocks > 0
+                && block.num_blocks % 2 == 0
+                && block.blocks.len() == block.num_blocks as usize,
+            "each native nested block must contain complete attention/FFN pairs",
         )?;
         silu(&block.pre_activation)?;
         silu(&block.post_activation)?;
-        bn_affine(&block.pre_bn, TRUNK)?;
-        bn_affine(&block.post_bn, MID)?;
+        bn_affine(&block.pre_bn, trunk_channels)?;
+        bn_affine(&block.post_bn, mid)?;
     }
-    let (scale, bias) = bn_affine(&blocks[0].pre_bn, TRUNK)?;
+    let (scale, bias) = bn_affine(&blocks[0].pre_bn, trunk_channels)?;
     layers.push(Layer::InitialConv(InitialConvLayer {
-        weight: conv(&trunk.initial_conv, TRUNK, 22, 3)?,
-        global_weight: matmul(&trunk.initial_mat_mul, TRUNK, 19)?,
+        weight: conv(&trunk.initial_conv, trunk_channels, 22, 3)?,
+        global_weight: matmul(&trunk.initial_mat_mul, trunk_channels, 19)?,
         gate_scale: vector(scale),
         gate_bias: vector(bias),
-        out_channels: TRUNK,
+        out_channels: trunk_channels,
     }));
     for (index, block) in blocks.iter().enumerate() {
-        layers.push(Layer::Linear(linear_conv(&block.pre_conv, MID, TRUNK)?));
+        layers.push(Layer::Linear(linear_conv(
+            &block.pre_conv,
+            mid,
+            trunk_channels,
+        )?));
         for pair in block.blocks.chunks_exact(2) {
             let attention = match &pair[0] {
                 BlockDesc::TransformerAttention(layer) => layer,
@@ -82,51 +91,61 @@ pub fn lower_model(desc: &ModelDesc) -> Result<LayerGraph, String> {
                 BlockDesc::TransformerFfn(layer) => layer,
                 _ => return Err("native nested block must alternate attention then FFN".into()),
             };
-            layers.push(Layer::RmsNorm(rms(&attention.pre_ln)?));
-            layers.push(Layer::Attention(lower_attention(attention)?));
-            layers.push(Layer::RmsNorm(rms(&ffn.pre_ln)?));
+            layers.push(Layer::RmsNorm(rms(&attention.pre_ln, mid)?));
+            layers.push(Layer::Attention(lower_attention(attention, mid)?));
+            layers.push(Layer::RmsNorm(rms(&ffn.pre_ln, mid)?));
+            let hidden = ffn.ffn_channels as usize;
             ensure(
-                ffn.num_channels == MID as i32
-                    && ffn.ffn_channels == HIDDEN as i32
+                ffn.num_channels == mid as i32
+                    && ffn.ffn_channels > 0
+                    && hidden <= 3 * mid
+                    && hidden % 8 == 0
                     && ffn.use_swi_glu,
-                "native CUDA requires SwiGLU FFN 384 -> 1152 -> 384",
+                "native CUDA requires SwiGLU FFN with matching mid channels and 8-aligned positive hidden width <= 3*mid",
             )?;
             // C++ uses silu(linear1(x)) * linearGate(x), despite the names.
             layers.push(Layer::Ffn(FfnLayer {
-                gate_weight: matmul(&ffn.linear1, HIDDEN, MID)?,
-                up_weight: matmul(&ffn.linear_gate, HIDDEN, MID)?,
-                down_weight: matmul(&ffn.linear2, MID, HIDDEN)?,
-                hidden: HIDDEN,
+                gate_weight: matmul(&ffn.linear1, hidden, mid)?,
+                up_weight: matmul(&ffn.linear_gate, hidden, mid)?,
+                down_weight: matmul(&ffn.linear2, mid, hidden)?,
+                hidden,
                 residual_add: true,
             }));
         }
-        layers.push(Layer::GateSilu(gate(&block.post_bn, MID)?));
-        // Existing Linear-up execution adds to the separate 768-wide raw trunk.
-        layers.push(Layer::Linear(linear_conv(&block.post_conv, TRUNK, MID)?));
+        layers.push(Layer::GateSilu(gate(&block.post_bn, mid)?));
+        // Existing Linear-up execution adds to the separate raw trunk.
+        layers.push(Layer::Linear(linear_conv(
+            &block.post_conv,
+            trunk_channels,
+            mid,
+        )?));
         if let Some(next) = blocks.get(index + 1) {
-            layers.push(Layer::GateSilu(gate(&next.pre_bn, TRUNK)?));
+            layers.push(Layer::GateSilu(gate(&next.pre_bn, trunk_channels)?));
         }
     }
     silu(&trunk.trunk_tip_activation)?;
-    let (scale, bias) = bn_affine(&trunk.trunk_tip_bn, TRUNK)?;
+    let (scale, bias) = bn_affine(&trunk.trunk_tip_bn, trunk_channels)?;
     layers.push(Layer::TrunkFinal(TrunkFinalLayer {
-        mean: vector(vec![0.0; TRUNK]),
-        std: vector(vec![1.0; TRUNK]),
+        mean: vector(vec![0.0; trunk_channels]),
+        std: vector(vec![1.0; trunk_channels]),
         gamma: vector(scale),
         beta: vector(bias),
-        channels: TRUNK,
+        channels: trunk_channels,
     }));
-    layers.push(Layer::PolicyHead(lower_policy(desc)?));
-    layers.push(Layer::ValueHead(lower_value(&desc.value_head)?));
+    layers.push(Layer::PolicyHead(lower_policy(desc, trunk_channels)?));
+    layers.push(Layer::ValueHead(lower_value(
+        &desc.value_head,
+        trunk_channels,
+    )?));
     let mut graph = LayerGraph {
         layers,
         num_spatial_inputs: 22,
         num_global_inputs: 19,
         board_size: SIDE,
-        trunk_channels: TRUNK,
-        mid_channels: MID,
-        num_blocks: 11,
-        num_heads: HEADS,
+        trunk_channels,
+        mid_channels: mid,
+        num_blocks: trunk.blocks.len(),
+        num_heads: heads,
         head_dim: DIM,
         // This is the lowered graph's storage count, not the native parameter
         // count: RoPE tables and zero-padded compatibility outputs are expanded.
@@ -145,46 +164,52 @@ pub fn lower_model(desc: &ModelDesc) -> Result<LayerGraph, String> {
     Ok(graph)
 }
 
-fn lower_attention(desc: &TransformerAttentionDesc) -> Result<AttentionLayer, String> {
+fn lower_attention(desc: &TransformerAttentionDesc, mid: usize) -> Result<AttentionLayer, String> {
+    let heads = mid / DIM;
     ensure(
-        desc.num_heads == HEADS as i32
-            && desc.num_kv_heads == HEADS as i32
+        desc.num_heads == heads as i32
+            && desc.num_kv_heads == heads as i32
             && desc.q_head_dim == DIM as i32
             && desc.v_head_dim == DIM as i32
             && desc.use_rope
             && desc.learnable_rope,
-        "native CUDA requires twelve Q/K/V heads of width 32 and learned 2D RoPE",
+        "native CUDA requires matching Q/K/V head counts, width 32 and learned 2D RoPE",
     )?;
-    let mut packed = Vec::with_capacity(3 * MID * MID);
+    let mut packed = Vec::with_capacity(3 * mid * mid);
     for projection in [&desc.q_proj, &desc.k_proj, &desc.v_proj] {
-        packed.extend_from_slice(matmul(projection, MID, MID)?.f32_data());
+        packed.extend_from_slice(matmul(projection, mid, mid)?.f32_data());
     }
+    ensure(
+        desc.rope_num_kv_heads == heads as i32,
+        "RoPE head count must match attention",
+    )?;
     let (cos, sin) = rope_tables(desc)?;
     Ok(AttentionLayer {
-        num_heads: HEADS,
+        num_heads: heads,
         head_dim: DIM,
         seq_len: SEQ,
-        qkv_weight: tensor(&[3 * MID, MID], packed),
-        out_weight: matmul(&desc.out_proj, MID, MID)?,
-        rope_cos: tensor(&[SEQ, MID / 2], cos),
-        rope_sin: tensor(&[SEQ, MID / 2], sin),
+        qkv_weight: tensor(&[3 * mid, mid], packed),
+        out_weight: matmul(&desc.out_proj, mid, mid)?,
+        rope_cos: tensor(&[SEQ, mid / 2], cos),
+        rope_sin: tensor(&[SEQ, mid / 2], sin),
         qk_scale: 1.0 / (DIM as f32).sqrt().sqrt(),
         residual_add: true,
     })
 }
 
 fn rope_tables(desc: &TransformerAttentionDesc) -> Result<(Vec<f32>, Vec<f32>), String> {
+    let heads = desc.rope_num_kv_heads as usize;
     let pairs = DIM / 2;
     ensure(
-        desc.rope_num_kv_heads == HEADS as i32 && desc.rope_num_pairs == pairs as i32,
-        "native RoPE frequency shape must be [12,16,2]",
+        (1..=64).contains(&desc.rope_num_kv_heads) && desc.rope_num_pairs == pairs as i32,
+        "native RoPE frequency shape must be [heads,16,2]",
     )?;
-    finite_len(&desc.rope_freqs, HEADS * pairs * 2, "RoPE frequencies")?;
-    let mut cos = vec![0.0; SEQ * HEADS * pairs];
-    let mut sin = vec![0.0; SEQ * HEADS * pairs];
+    finite_len(&desc.rope_freqs, heads * pairs * 2, "RoPE frequencies")?;
+    let mut cos = vec![0.0; SEQ * heads * pairs];
+    let mut sin = vec![0.0; SEQ * heads * pairs];
     for y in 0..SIDE {
         for x in 0..SIDE {
-            for head in 0..HEADS {
+            for head in 0..heads {
                 for pair in 0..pairs {
                     let frequency = (head * pairs + pair) * 2;
                     // Match desc.cpp::computeRopeCosSin's f32 arithmetic and
@@ -192,7 +217,7 @@ fn rope_tables(desc: &TransformerAttentionDesc) -> Result<(Vec<f32>, Vec<f32>), 
                     // its [head,pair,position] table to executor [position,head,pair].
                     let angle = x as f32 * desc.rope_freqs[frequency]
                         + y as f32 * desc.rope_freqs[frequency + 1];
-                    let index = ((y * SIDE + x) * HEADS + head) * pairs + pair;
+                    let index = ((y * SIDE + x) * heads + head) * pairs + pair;
                     cos[index] = angle.cos();
                     sin[index] = angle.sin();
                 }
@@ -202,7 +227,7 @@ fn rope_tables(desc: &TransformerAttentionDesc) -> Result<(Vec<f32>, Vec<f32>), 
     Ok((cos, sin))
 }
 
-fn lower_policy(desc: &ModelDesc) -> Result<PolicyHeadLayer, String> {
+fn lower_policy(desc: &ModelDesc, trunk: usize) -> Result<PolicyHeadLayer, String> {
     let head = &desc.policy_head;
     let channels = head.policy_out_channels as usize;
     ensure(
@@ -227,8 +252,8 @@ fn lower_policy(desc: &ModelDesc) -> Result<PolicyHeadLayer, String> {
     let p2 = conv(&head.p2_conv, channels, 96, 1)?;
     let pass2 = matmul(&head.gpool_to_pass_mul2, channels, 96)?;
     Ok(PolicyHeadLayer {
-        conv1p_weight: scale_rows(conv(&head.p1_conv, 96, TRUNK, 1)?, &p_scale)?,
-        conv1g_weight: scale_rows(conv(&head.g1_conv, 96, TRUNK, 1)?, &g_scale)?,
+        conv1p_weight: scale_rows(conv(&head.p1_conv, 96, trunk, 1)?, &p_scale)?,
+        conv1g_weight: scale_rows(conv(&head.g1_conv, 96, trunk, 1)?, &g_scale)?,
         g_bias: vector(g_bias),
         g_matmul: scale_rows(matmul(&head.gpool_to_bias_mul, 96, 288)?, &p_scale)?,
         pass_matmul1: matmul(&head.gpool_to_pass_mul, 96, 288)?,
@@ -244,7 +269,7 @@ fn lower_policy(desc: &ModelDesc) -> Result<PolicyHeadLayer, String> {
     })
 }
 
-fn lower_value(head: &ValueHeadDesc) -> Result<ValueHeadLayer, String> {
+fn lower_value(head: &ValueHeadDesc, trunk: usize) -> Result<ValueHeadLayer, String> {
     ensure(head.model_version == 17, "native value head must be v17")?;
     silu(&head.v1_activation)?;
     silu(&head.v2_activation)?;
@@ -256,7 +281,7 @@ fn lower_value(head: &ValueHeadDesc) -> Result<ValueHeadLayer, String> {
     let score = matmul(&head.sv3_mul, 6, 192)?;
     let score_bias = bias(&head.sv3_bias, 6)?;
     Ok(ValueHeadLayer {
-        conv1_weight: scale_rows(conv(&head.v1_conv, 192, TRUNK, 1)?, &scale)?,
+        conv1_weight: scale_rows(conv(&head.v1_conv, 192, trunk, 1)?, &scale)?,
         bias1: vector(v_bias),
         linear2_weight: matmul(&head.v2_mul, 192, 576)?,
         linear2_bias: bias(&head.v2_bias, 192)?,
@@ -275,15 +300,15 @@ fn lower_value(head: &ValueHeadDesc) -> Result<ValueHeadLayer, String> {
     })
 }
 
-fn rms(desc: &TransformerRMSNormDesc) -> Result<RmsNormLayer, String> {
+fn rms(desc: &TransformerRMSNormDesc, mid: usize) -> Result<RmsNormLayer, String> {
     ensure(
-        desc.num_channels == MID as i32 && desc.epsilon.is_finite() && desc.epsilon > 0.0,
-        "native transformer RMSNorm requires 384 channels and positive finite epsilon",
+        desc.num_channels == mid as i32 && desc.epsilon.is_finite() && desc.epsilon > 0.0,
+        "native transformer RMSNorm requires matching channels and positive finite epsilon",
     )?;
-    finite_len(&desc.weight, MID, &desc.name)?;
+    finite_len(&desc.weight, mid, &desc.name)?;
     Ok(RmsNormLayer {
         scale: vector(desc.weight.clone()),
-        channels: MID,
+        channels: mid,
         eps: desc.epsilon,
     })
 }
@@ -455,6 +480,8 @@ fn vector(values: Vec<f32>) -> Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const HEADS: usize = 12;
+    const MID: usize = 384;
 
     #[test]
     fn native_matrix_transposes_and_head_channels_keep_identity() {

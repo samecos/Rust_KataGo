@@ -1,0 +1,7 @@
+{
+  "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6": {
+    "file": "tf3-b11c768-fp32.json.gz",
+    "sha256": "140391333a7110ef41584526d0fd2f97abf7d91cf466c0810b513e8021069cdf",
+    "source": "C++ CUDA FP32, target/worker-parity-tf3-cuda-fp32/cpp/outputs.json; validated full 128-case corpus, original binary/config identities retained"
+  }
+}

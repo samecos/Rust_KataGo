@@ -18,7 +18,7 @@
 //! - **GEMM A 缓冲的列 stride 必须等于该 GEMM 的 K**（`hgemm` 内核按单 stride
 //!   同时读 A/B）。因此各 GEMM 的 A 源要么是精确尺寸的专用缓冲（cols=208、
 //!   p96/p192、pooled/vec 的紧凑前缀），要么是 stride 恰好等于 K 的流缓冲
-//!   （768/384/1152）；不存在"零填充列"策略。
+//!   ；剪枝 FFN 的 SwiGLU 输出逐行补零至 down 权重的 K stride。
 //! - 首层 conv 为 3x3 same（pad=1，导出图如此）→ im2col `[B*S, 208]`（K=198
 //!   pad 16 对齐）+ `hgemm`；全局输入 `[B,19] @ W[768,19]^T` 逐 token 广播
 //!   加在 conv 输出上，再一起过门控 SiLU（严格按 IR 的 Add→gate 顺序）。
@@ -526,6 +526,19 @@ impl CudaModel {
         stream: &Arc<CudaStream>,
     ) -> Result<Self, String> {
         crate::tactic_plan::gate_rowquad_requested()?;
+        if graph.board_size != 19 || graph.head_dim != 32 || graph.mid_channels != graph.num_heads * 32 {
+            return Err("CUDA requires 19x19, D32 and mid=heads*32".into());
+        }
+        let standard_ffn = graph.trunk_channels == 768 && graph.mid_channels == 384 && graph.layers.iter().all(|layer| {
+            !matches!(layer, Layer::Ffn(f) if f.hidden != 1152)
+        });
+        if !standard_ffn {
+            let fusion = crate::tactic_plan::tactic_var("KATAGO_CUDA_FUSION").unwrap_or_else(|_| "none".into());
+            if crate::tactic_plan::tactic_enabled("KATAGO_CUDA_DUALFFN") || fusion != "none"
+                || crate::tactic_plan::tactic_enabled("KATAGO_CUDA_SPLITK") {
+                return Err("this model requires DUALFFN=0, FUSION=none and SPLITK=0; these specialized tactics require unpruned mid384/hidden1152".into());
+            }
+        }
         let strict_attention = rt.prepare_strict_attention(
             graph.board_size * graph.board_size,
             graph.num_heads,
@@ -642,11 +655,7 @@ impl CudaModel {
         let d = self.head_dim;
         let trunk = self.trunk;
         let mid = self.mid;
-        assert_eq!(
-            (mid, h, d, s),
-            (384, 12, 32, 361),
-            "执行器仅支持 b11 19 路架构"
-        );
+        assert_eq!((mid, d, s), (h * d, 32, 361), "CUDA attention shape mismatch");
         let stream = active_stream(rt);
 
         // --- 工作区（预分配复用；batch 由 ws 决定） ------------------------
@@ -1043,7 +1052,9 @@ impl CudaModel {
                     let hidden = *hidden;
                     if self.ffn_compact.is_some() {
                         if hidden >= 3 * mid || hidden % 16 != 0 { return Err("compact FFN hidden width mismatch".into()); }
-                    } else { assert_eq!(hidden, 3 * mid, "FFN 隐层维度不符"); }
+                    } else if hidden == 0 || hidden > 3 * mid || hidden % 8 != 0 {
+                        return Err("FFN hidden width must be positive, 8-aligned and <= 3*mid".into());
+                    }
                     // B2(KATAGO_CUDA_DUALFFN=1):CUTLASS DualGemm + SwiGLU
                     // epilogue 一步出 act1152,省 act2304 往返 + swiglu kernel。
                     // 数值与两 kernel 路径逐位一致(中间 half 舍入在 epilogue
@@ -1064,7 +1075,7 @@ impl CudaModel {
                             });
                             // dual FFN:gate|up 单 GEMM(N=2304,f16 直出)→ dual SwiGLU
                             hgemm_f16(rt, normed, dual, act2304, m)?;
-                            swiglu_dual(rt, act2304, act1152, m, hidden)?;
+                            swiglu_dual(rt, act2304, act1152, m, hidden, down.kp)?;
                         }
                         Ok::<bool, String>(dual_done)
                     });
@@ -1455,7 +1466,7 @@ fn upload_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
             channels: l.channels,
         },
         Layer::PolicyHead(l) => LayerBuf::PolicyHead {
-            conv1pg: upload_weight_concat2(stream, &l.conv1p_weight, &l.conv1g_weight, 96, 768)?,
+            conv1pg: upload_weight_concat2(stream, &l.conv1p_weight, &l.conv1g_weight, 96, l.conv1p_weight.numel() / 96)?,
             g_bias: upload_param(stream, &l.g_bias, 96)?,
             g_matmul: upload_weight(stream, &l.g_matmul, 96, 288)?,
             pass1: upload_weight(stream, &l.pass_matmul1, 96, 288)?,
@@ -1466,7 +1477,7 @@ fn upload_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
             mask_scale: l.mask_scale,
         },
         Layer::ValueHead(l) => LayerBuf::ValueHead {
-            conv1: upload_weight(stream, &l.conv1_weight, 192, 768)?,
+            conv1: upload_weight(stream, &l.conv1_weight, 192, l.conv1_weight.numel() / 192)?,
             bias1: upload_param(stream, &l.bias1, 192)?,
             l2: upload_weight(stream, &l.linear2_weight, 192, 576)?,
             l2_bias: upload_param(stream, &l.linear2_bias, 192)?,
@@ -2556,7 +2567,7 @@ fn rms_norm_f32(
         )
     } else {
         (
-            rt.get_func("rms_norm_f32_w4_kernel")?,
+            rt.get_func(if ncols == 384 { "rms_norm_f32_w4_kernel" } else { "rms_norm_f32_w4_generic_kernel" })?,
             LaunchConfig {
                 grid_dim: (rows.div_ceil(4) as u32, 1, 1),
                 block_dim: (128, 1, 1),
@@ -2626,7 +2637,18 @@ fn swiglu_dual(
     out: &mut CudaSlice<u16>,
     m: usize,
     hidden: usize,
+    padded_hidden: usize,
 ) -> Result<(), String> {
+    if hidden != padded_hidden {
+        let f = rt.get_func("swiglu_dual_padded_kernel")?;
+        let stream = active_stream(rt);
+        unsafe {
+            stream.launch_builder(&f).arg(x).arg(out).arg(&(m as i32))
+                .arg(&(hidden as i32)).arg(&(padded_hidden as i32))
+                .launch(LaunchConfig::for_num_elems((m * padded_hidden) as u32))
+        }.map_err(|e| format!("padded SwiGLU launch failed: {e}"))?;
+        return Ok(());
+    }
     let f = rt.get_func("swiglu_dual_kernel")?;
     let stream = active_stream(rt);
     let n = m * hidden;
@@ -2761,7 +2783,11 @@ fn attention_fa2(
 ) -> Result<(), String> {
     assert!(s <= 512, "attention_fa2 要求 S <= 512");
     assert_eq!(d, 32, "attention_fa2 要求 D=32");
-    let f = rt.get_func(if use_q64 && serial_sum {
+    let f = rt.get_func(if heads != 12 {
+        if use_q64 && serial_sum { "attention_fa2_q64_serial_generic_kernel" }
+        else if use_q64 { "attention_fa2_q64_generic_kernel" }
+        else { "attention_fa2_generic_kernel" }
+    } else if use_q64 && serial_sum {
         "attention_fa2_q64_serial_kernel"
     } else if use_q64 {
         "attention_fa2_q64_kernel"
@@ -3045,7 +3071,7 @@ impl CudaWorkspace {
             normed: zeros16(stream, m * mid)?,
             act1152: zeros16(stream, m * (3 * mid))?,
             act2304: zeros16(stream, m * (6 * mid))?,
-            gemm_out: zeros32(stream, m * (3 * mid))?,
+            gemm_out: zeros32(stream, m * (3 * mid).max(trunk).max(192))?,
             qbuf: zeros16(stream, qkv_elts)?,
             kbuf: zeros16(stream, qkv_elts)?,
             vbuf: zeros16(stream, qkv_elts)?,
@@ -3058,7 +3084,7 @@ impl CudaWorkspace {
             vec_b: zeros32(stream, batch * 96)?,
             vall: zeros32(stream, batch * 21)?,
             conv1pg: zeros32(stream, m * 192)?,
-            c_partial: zeros32(stream, 2 * m * 384)?,
+            c_partial: zeros32(stream, 2 * m * mid)?,
             pass_logits: zeros32(stream, batch * 6)?,
             out_policy: zeros32(stream, batch * 6 * (s + 1))?,
             out_value: zeros32(stream, batch * 3)?,

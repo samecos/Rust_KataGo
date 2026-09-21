@@ -67,8 +67,9 @@ pub struct BackendCapabilities {
 
 /// Host-side tactic contract, independent of the CUDA device-code build hash.
 /// Revision 1 installs the plan before preparing GEMM layout-specific weights.
+/// Revision 2 adds native variable-width/pruned TF3 execution and shape admission.
 /// Bump this when a host-side change invalidates certification of these tactics.
-pub const CUDA_HOST_TACTIC_REVISION: u32 = 1;
+pub const CUDA_HOST_TACTIC_REVISION: u32 = 2;
 
 /// Host FP32-to-FP16 encoding contract, independent of tactics and device code.
 /// Revision 1 correctly rounds half subnormals to nearest, ties to even.
@@ -1256,7 +1257,7 @@ mod tests {
                 validate_plan_backend(&plan, &actual).unwrap();
             }
         }
-        assert_eq!(actual.host_tactic_revision, Some(1));
+        assert_eq!(actual.host_tactic_revision, Some(CUDA_HOST_TACTIC_REVISION));
         // The FP16 contract is already present. Only omission preserves this
         // optional library contract; an explicit library field must match even
         // if this plan never enables the new preset.
@@ -1535,7 +1536,7 @@ mod tests {
                 }
             }
             let plan = backend_plan(schema, "{}", Some(&actual));
-            for revision in [None, Some(0), Some(2)] {
+            for revision in [None, Some(0), Some(CUDA_FP16_ENCODING_REVISION + 1)] {
                 let mut unavailable_or_other = actual.clone();
                 unavailable_or_other.fp16_encoding_revision = revision;
                 let err = validate_plan_backend(&plan, &unavailable_or_other).unwrap_err();
@@ -1636,11 +1637,11 @@ mod tests {
     #[test]
     fn matched_host_revision_accepts_layouts_in_both_schemas() {
         let actual = backend_build();
-        assert_eq!(actual.host_tactic_revision, Some(1));
+        assert_eq!(actual.host_tactic_revision, Some(CUDA_HOST_TACTIC_REVISION));
         let fingerprint_json = serde_json::to_value(&actual).unwrap();
         assert_eq!(
             fingerprint_json["host_tactic_revision"],
-            serde_json::json!(1)
+            serde_json::json!(CUDA_HOST_TACTIC_REVISION)
         );
         for schema in [1, 2] {
             for layout in ["tn", "nn_k384", "nn_k384_b8", "nn_k384_b16"] {
@@ -1662,7 +1663,7 @@ mod tests {
                 r#"{ "KATAGO_CUDA_GEMM_LAYOUT": "nn_k384_b16" }"#,
             ] {
                 let plan = backend_plan(schema, overrides, Some(&expected));
-                for revision in [None, Some(0), Some(2)] {
+                for revision in [None, Some(0), Some(CUDA_HOST_TACTIC_REVISION - 1), Some(CUDA_HOST_TACTIC_REVISION + 1)] {
                     let mut actual = expected.clone();
                     actual.host_tactic_revision = revision;
                     let err = validate_plan_backend(&plan, &actual).unwrap_err();
@@ -1697,7 +1698,7 @@ mod tests {
             (
                 "host-tactic-revision",
                 BackendBuildFingerprint {
-                    host_tactic_revision: Some(2),
+                    host_tactic_revision: Some(CUDA_HOST_TACTIC_REVISION + 1),
                     ..expected.clone()
                 },
                 "host_tactic_revision mismatch",

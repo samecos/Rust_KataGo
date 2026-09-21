@@ -3,6 +3,8 @@ gtp_logs/
 *.log
 __pycache__/
 .venv/
+.venv-runtime-tune/
+/autotune-output/
 venv/
 
 # 一次性探测/调试产物（如 onnx 图探查的临时 venv）

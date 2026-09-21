@@ -1,5 +1,9 @@
 # RustGo 使用指南
 
+2026-09-20 新入口：新 CUDA 电脑生成 PLAN 使用 [FULL AUTOTUNE](RustGo-FULL-AUTOTUNE.md)（`scripts/full_autotune.ps1`）；已有计划选配使用[一键自动配置优化](RustGo自动配置优化.md)（`scripts/tune_rustgo.ps1`）。另见[分布式 Worker / 单机运行说明](RustGo运行模式说明.md)，涵盖跨机器连接、GTP 实时分析及当前 JSON analysis 的 EOF 批量输出限制。下文保留现成认证配置的快速启动方法。
+
+剪枝 TF3 模型请先看[剪枝模型支持](RustGo剪枝模型支持.md)：需要支持可变 FFN 宽度的新二进制、模型自己的参考包与重新生成的 PLAN。
+
 适用日期：2026-09-16。本机 Windows、RTX 5070 Ti、当前已认证 CUDA release 版本。本轮性能优化已结项，可以直接使用现有引擎；首次启动无需再跑 benchmark、对拍或 autotune。
 
 ## 1. 先选使用方式

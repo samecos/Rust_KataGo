@@ -108,7 +108,7 @@ def validate_result(result, request, hello):
         raise AssertionError("missing evaluation stage timings")
 
 
-def collect_worker(label, binary, config, args, protocol, requests, fingerprints):
+def collect_worker(label, binary, config, args, protocol, requests, fingerprints, environment=None):
     directory = args.output / label
     directory.mkdir(exist_ok=True)
     harness = WorkerHarness(protocol)
@@ -124,7 +124,7 @@ def collect_worker(label, binary, config, args, protocol, requests, fingerprints
     started = time.monotonic()
     try:
         with (directory / "worker.log").open("wb") as log:
-            process = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+            process = subprocess.Popen(command, cwd=ROOT, env=environment, stdout=log, stderr=subprocess.STDOUT,
                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             peer = harness.accept(process, args.startup_timeout)
             hello = peer.hello
