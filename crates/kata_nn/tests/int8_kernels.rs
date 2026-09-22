@@ -8,6 +8,197 @@ use kata_nn::backends::{
 };
 
 #[test]
+fn fused_rms_quantization_matches_original_boundaries_and_graph() {
+    use cudarc::driver::{LaunchConfig, PushKernelArg};
+    let rt = CudaRuntime::new().unwrap();
+    let stream = rt.device.new_stream().unwrap();
+    for (rows, mid, hidden) in [
+        (1, 384, 1152),
+        (361, 512, 16),
+        (1025, 384, 472),
+        (2888, 512, 1160),
+    ] {
+        let values: Vec<f32> = (0..rows * mid)
+            .map(|i| {
+                let v = ((i * 127 + i / mid) % 997) as f32 / 191.0 - 2.5;
+                match (i / mid) % 7 {
+                    0 => 0.0,
+                    1 => v * 1e-18,
+                    2 => v * 1e12,
+                    _ => v,
+                }
+            })
+            .collect();
+        let mut input = stream.clone_htod(&values).unwrap();
+        let gamma = stream
+            .clone_htod(
+                &(0..mid)
+                    .map(|i| (i % 101) as f32 / 37.0 - 1.0)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let mut normed = stream.alloc_zeros::<u16>(rows * mid).unwrap();
+        let mut reference_q = stream.alloc_zeros::<i8>(rows * mid).unwrap();
+        let mut reference_s = stream.alloc_zeros::<f32>(rows).unwrap();
+        let mut fused_q = stream.alloc_zeros::<i8>(rows * mid).unwrap();
+        let mut fused_s = stream.alloc_zeros::<f32>(rows).unwrap();
+        let eps = 1e-5f32;
+        let rms = rt
+            .get_func(if mid == 384 {
+                "rms_norm_f32_w4_kernel"
+            } else {
+                "rms_norm_f32_w4_generic_kernel"
+            })
+            .unwrap();
+        let quant = rt.get_func("int8_quantize_rows_kernel").unwrap();
+        let fused = rt
+            .get_func(if mid == 384 {
+                "int8_rms_quantize384_kernel"
+            } else {
+                "int8_rms_quantize512_kernel"
+            })
+            .unwrap();
+        let cfg = LaunchConfig {
+            grid_dim: (rows.div_ceil(4) as u32, 1, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        // Also verify that nonfinite rows retain NaN scales and zero integers.
+        for nonfinite in [false, true] {
+            let mut x = values.clone();
+            if nonfinite {
+                x[0] = f32::INFINITY;
+                if rows > 1 {
+                    x[mid] = f32::NAN;
+                }
+            }
+            stream.memcpy_htod(&x, &mut input).unwrap();
+            unsafe {
+                stream
+                    .launch_builder(&rms)
+                    .arg(&input)
+                    .arg(&gamma)
+                    .arg(&mut normed)
+                    .arg(&eps)
+                    .arg(&(mid as i32))
+                    .arg(&(rows as i32))
+                    .launch(cfg)
+                    .unwrap();
+                stream
+                    .launch_builder(&quant)
+                    .arg(&normed)
+                    .arg(&mut reference_q)
+                    .arg(&mut reference_s)
+                    .arg(&(rows as i32))
+                    .arg(&(mid as i32))
+                    .arg(&(mid as i32))
+                    .arg(&(mid as i32))
+                    .launch(LaunchConfig {
+                        grid_dim: (rows as u32, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    })
+                    .unwrap();
+                stream
+                    .launch_builder(&fused)
+                    .arg(&input)
+                    .arg(&gamma)
+                    .arg(&mut fused_q)
+                    .arg(&mut fused_s)
+                    .arg(&eps)
+                    .arg(&(rows as i32))
+                    .launch(cfg)
+                    .unwrap();
+            }
+            assert_eq!(
+                stream.clone_dtoh(&reference_q).unwrap(),
+                stream.clone_dtoh(&fused_q).unwrap(),
+                "RMS integers {rows}/{mid}"
+            );
+            for (a, b) in stream
+                .clone_dtoh(&reference_s)
+                .unwrap()
+                .into_iter()
+                .zip(stream.clone_dtoh(&fused_s).unwrap())
+            {
+                assert!(
+                    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                    "RMS scale {a} != {b}"
+                );
+            }
+        }
+        let weights = |n| {
+            (0..n)
+                .map(|i| ((i * 7) % 61) as f32 / 123.0 - 0.25)
+                .collect::<Vec<_>>()
+        };
+        let dual =
+            Int8Weight::upload(&stream, &weights(2 * hidden * mid), 2 * hidden, mid).unwrap();
+        let down = Int8Weight::upload(&stream, &weights(mid * hidden), mid, hidden).unwrap();
+        let mut ws =
+            Int8Workspace::new(&rt, &stream, rows, hidden.max(mid), (2 * hidden).max(mid)).unwrap();
+        let mut residual = stream.clone_htod(&values).unwrap();
+        // Warm GEMM descriptors before graph capture, then replay changed input.
+        ws.ffn_rms(&rt, &stream, &gamma, eps, &dual, &down, &mut residual, rows)
+            .unwrap();
+        stream.synchronize().unwrap();
+        stream
+            .begin_capture(cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
+            .unwrap();
+        set_capturing(true);
+        let result = ws.ffn_rms(&rt, &stream, &gamma, eps, &dual, &down, &mut residual, rows);
+        set_capturing(false);
+        result.unwrap();
+        let graph = stream
+            .end_capture(kata_nn::backends::cuda::graph_instantiate_flags())
+            .unwrap()
+            .unwrap();
+        let changed: Vec<f32> = values.iter().map(|x| x * 0.75 + 0.0625).collect();
+        stream.memcpy_htod(&changed, &mut residual).unwrap();
+        graph.launch().unwrap();
+        let replay = stream.clone_dtoh(&residual).unwrap();
+        stream.memcpy_htod(&changed, &mut residual).unwrap();
+        unsafe {
+            stream
+                .launch_builder(&rms)
+                .arg(&residual)
+                .arg(&gamma)
+                .arg(&mut normed)
+                .arg(&eps)
+                .arg(&(mid as i32))
+                .arg(&(rows as i32))
+                .launch(cfg)
+                .unwrap();
+        }
+        ws.ffn(&rt, &stream, &normed, &dual, &down, &mut residual, rows)
+            .unwrap();
+        assert_eq!(
+            replay,
+            stream.clone_dtoh(&residual).unwrap(),
+            "RMS FFN graph {rows}/{mid}/{hidden}"
+        );
+        let other_stream = rt.device.new_stream().unwrap();
+        assert!(
+            ws.ffn_rms(
+                &rt,
+                &other_stream,
+                &gamma,
+                eps,
+                &dual,
+                &down,
+                &mut residual,
+                rows
+            )
+            .is_err()
+        );
+        assert!(
+            ws.ffn_rms(&rt, &stream, &gamma, eps, &dual, &down, &mut residual, 0)
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn weight_axes_zero_channels_and_rounding() {
     let mut w = vec![0.0; 4 * 8];
     w[8..16].copy_from_slice(&[127.0, 0.5, 1.5, 2.5, -0.5, -1.5, -2.5, -127.0]);

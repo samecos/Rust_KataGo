@@ -53,6 +53,9 @@ pub fn parse_min_ffn_width(value: &str) -> Result<usize, String> {
 
 #[derive(Clone)]
 pub struct Int8Kernels {
+    rms384: CudaFunction,
+    rms512: CudaFunction,
+    rms_fusion: Option<bool>,
     quantize: CudaFunction,
     quantize_warp: CudaFunction,
     half: CudaFunction,
@@ -66,7 +69,24 @@ impl Int8Kernels {
         if rt.cublaslt_handle().is_none() {
             return Err("INT8 requires cuBLASLt".into());
         }
+        // Independent INT8 tactic: never imported from an FP16 plan.
+        let rms_fusion = match crate::tactic_plan::tactic_var("KATAGO_CUDA_INT8_RMS_FUSION")
+            .ok()
+            .as_deref()
+        {
+            None => None,
+            Some("1") => Some(true),
+            Some("0") => Some(false),
+            Some(v) => {
+                return Err(format!(
+                    "invalid KATAGO_CUDA_INT8_RMS_FUSION={v}; expected 0 or 1"
+                ));
+            }
+        };
         Ok(Self {
+            rms384: rt.get_func("int8_rms_quantize384_kernel")?,
+            rms512: rt.get_func("int8_rms_quantize512_kernel")?,
+            rms_fusion,
             quantize: rt.get_func("int8_quantize_rows_kernel")?,
             quantize_warp: rt.get_func("int8_quantize_rows_warp_kernel")?,
             half: rt.get_func("int8_dequantize_half_kernel")?,
@@ -588,19 +608,100 @@ impl Int8Workspace {
         output: &mut CudaSlice<f32>,
         rows: usize,
     ) -> Result<(), String> {
+        self.validate_ffn(stream, dual, down, output, rows)?;
+        self.multiply(rt, stream, input, dual.k, dual, rows)?;
+        self.finish_ffn(rt, stream, dual, down, output, rows)
+    }
+
+    pub fn rms_fusion_enabled(&self, width: usize, min_ffn_width: usize) -> bool {
+        // ABBA passed for all-FFN profiles. The selective B15 trial did not
+        // reach 1% and slightly regressed at C32, so keep its original path.
+        self.kernels.rms_fusion.unwrap_or(min_ffn_width == 0) && matches!(width, 384 | 512)
+    }
+
+    /// RMSNorm and input quantization preserve the FP16 boundary in registers.
+    pub fn ffn_rms(
+        &mut self,
+        rt: &CudaRuntime,
+        stream: &Arc<CudaStream>,
+        gamma: &CudaSlice<f32>,
+        eps: f32,
+        dual: &Int8Weight,
+        down: &Int8Weight,
+        residual: &mut CudaSlice<f32>,
+        rows: usize,
+    ) -> Result<(), String> {
+        self.validate_ffn(stream, dual, down, residual, rows)?;
+        if !matches!(dual.k, 384 | 512) || gamma.len() < dual.k || !eps.is_finite() || eps <= 0.0 {
+            return Err("INT8 RMS shape/epsilon mismatch".into());
+        }
+        if !super::cuda_exec::capturing() {
+            static REPORTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            REPORTED.get_or_init(|| eprintln!("[cuda-tactic] name=int8_rms_quantize launch=warp4 width={} rows={rows} half_boundary=preserved", dual.k));
+        }
+        unsafe {
+            stream
+                .launch_builder(if dual.k == 384 {
+                    &self.kernels.rms384
+                } else {
+                    &self.kernels.rms512
+                })
+                .arg(&*residual)
+                .arg(gamma)
+                .arg(&mut self.quantized)
+                .arg(&mut self.scales)
+                .arg(&eps)
+                .arg(&(rows as i32))
+                .launch(LaunchConfig {
+                    grid_dim: (rows.div_ceil(4) as u32, 1, 1),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                })
+                .map_err(|e| e.to_string())?;
+        }
+        self.integer_gemm(rt, stream, dual, rows)?;
+        self.finish_ffn(rt, stream, dual, down, residual, rows)
+    }
+
+    fn validate_ffn(
+        &self,
+        stream: &Arc<CudaStream>,
+        dual: &Int8Weight,
+        down: &Int8Weight,
+        output: &CudaSlice<f32>,
+        rows: usize,
+    ) -> Result<(), String> {
         let count = rows
             .checked_mul(down.n)
             .filter(|&n| n <= u32::MAX as usize)
             .ok_or("INT8 FFN size overflow")?;
-        if dual.n != 2 * down.k
+        if stream.cu_stream() as usize != self.stream_id
+            || rows == 0
+            || rows > i32::MAX as usize
+            || dual.n != 2 * down.k
             || dual.k != down.n
             || output.len() < count
             || self.quantized.len() < rows.checked_mul(down.kp).ok_or("INT8 FFN size overflow")?
+            || self.quantized.len() < rows.checked_mul(dual.kp).ok_or("INT8 FFN size overflow")?
+            || self.scales.len() < rows
+            || self.dots.len() < rows.checked_mul(dual.n).ok_or("INT8 FFN size overflow")?
             || self.dots.len() < count
         {
             return Err("INT8 FFN shape/buffer mismatch".into());
         }
-        self.multiply(rt, stream, input, dual.k, dual, rows)?;
+        Ok(())
+    }
+
+    fn finish_ffn(
+        &mut self,
+        rt: &CudaRuntime,
+        stream: &Arc<CudaStream>,
+        dual: &Int8Weight,
+        down: &Int8Weight,
+        output: &mut CudaSlice<f32>,
+        rows: usize,
+    ) -> Result<(), String> {
+        let count = rows * down.n; // checked before submission
         // Wide FFNs regress with one warp per row (register/latency pressure).
         let warp = down.k <= WARP_MAX_HIDDEN && rows >= WARP_MIN_ROWS;
         report_row_kernel(warp, true, rows, down.k);

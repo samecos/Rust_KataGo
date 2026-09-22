@@ -4,6 +4,58 @@
 #include <stdint.h>
 #include <math.h>
 
+// Match the warp4 RMS sum order and FP16 boundary, then quantize in registers.
+template<int Width> __device__ __forceinline__ void rms_quantize(
+    const float* x, const float* gamma, int8_t* q, float* scales,
+    float eps, int rows) {
+    const int lane = threadIdx.x & 31;
+    const int row = blockIdx.x * 4 + (threadIdx.x >> 5);
+    if (row >= rows) return;
+    x += (size_t)row * Width;
+    float values[Width / 32];
+    float sum = 0.0f;
+    #pragma unroll
+    for (int j = 0; j < Width / 32; ++j) {
+        const float v = x[lane + j * 32];
+        values[j] = v;
+        sum += v * v;
+    }
+    #pragma unroll
+    for (int step = 16; step; step >>= 1)
+        sum += __shfl_xor_sync(0xffffffff, sum, step);
+    const float rstd = rsqrtf(sum / (float)Width + eps);
+    float amax = 0.0f;
+    int bad = 0;
+    #pragma unroll
+    for (int j = 0; j < Width / 32; ++j) {
+        const float v = __half2float(__float2half_rn(values[j] * rstd * gamma[lane + j * 32]));
+        values[j] = v;
+        amax = fmaxf(amax, fabsf(v));
+        bad |= !isfinite(v);
+    }
+    for (int step = 16; step; step >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, step));
+        bad |= __shfl_xor_sync(0xffffffff, bad, step);
+    }
+    const float scale = bad ? NAN : (amax == 0.0f ? 1.0f : amax / 127.0f);
+    if (lane == 0) scales[row] = scale;
+    #pragma unroll
+    for (int j = 0; j < Width / 32; ++j) {
+        const int v = bad ? 0 : max(-127, min(127, __float2int_rn(values[j] / scale)));
+        q[(size_t)row * Width + lane + j * 32] = (int8_t)v;
+    }
+}
+
+extern "C" __global__ void int8_rms_quantize384_kernel(
+    const float* x, const float* gamma, int8_t* q, float* scales, float eps, int rows) {
+    rms_quantize<384>(x, gamma, q, scales, eps, rows);
+}
+
+extern "C" __global__ void int8_rms_quantize512_kernel(
+    const float* x, const float* gamma, int8_t* q, float* scales, float eps, int rows) {
+    rms_quantize<512>(x, gamma, q, scales, eps, rows);
+}
+
 // Four independent token rows per CTA. The maximum reduction has no summation
 // error and needs no shared memory or block-wide barriers. Padding and RNE are
 // identical to the original block-per-row kernel retained below as an oracle.

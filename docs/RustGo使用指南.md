@@ -5,7 +5,8 @@
 剪枝 TF3 模型请先看[剪枝模型支持](RustGo剪枝模型支持.md)：需要支持可变 FFN 宽度的新二进制、模型自己的参考包与重新生成的 PLAN。
 
 2026-09-22 新增 [B11 / B15 INT8 后端](RustGoINT8后端.md)，支持 FFN 结构化剪枝。这是独立、有损的可选后端，使用自己的配置和验证结果，不沿用下文的 FP16 认证计划。
-剪枝 B15 的最新候选、按层精度选择和 `0831.sgf` 校准结果见 [B15 INT8 诊断](RustGoB15剪枝INT8诊断.md)。速度收益不代表已经恢复原精度或证明棋力收益。
+上一轮剪枝 B15 的按层精度选择和 `0831.sgf` 校准结果见 [B15 INT8 诊断](RustGoB15剪枝INT8诊断.md)。速度收益不代表已经恢复原精度或证明棋力收益。
+后续 [INT8 专项优化](RustGoINT8专项优化.md) 交付 RMSNorm/量化融合；全 FFN 的 B11/B15 对上一版 INT8 再提升约 1.58%–4.06%，宽层混合配置保留原路径。当前独立构建为 `target/int8-specialized/build/release/katago-rs.exe`，使用方式见该报告。
 
 适用日期：2026-09-16。本机 Windows、RTX 5070 Ti、当前已认证 CUDA release 版本。本轮性能优化已结项，可以直接使用现有引擎；首次启动无需再跑 benchmark、对拍或 autotune。
 

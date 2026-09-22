@@ -19,6 +19,10 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   `docs/RustGoINT8后端.md`。未更换原正式二进制，也未放宽原 FP32 数值门。
   后续剪枝诊断新增 `cudaInt8MinFfnWidth`（默认 0，B15 性能候选 384）、
   大 batch 窄层 warp 量化；结果与 SGF 校准边界见 `docs/RustGoB15剪枝INT8诊断.md`。
+  后续 INT8 专项优化：全 FFN 默认融合 RMSNorm/量化，非零宽度阈值保留原路径；
+  `KATAGO_CUDA_INT8_RMS_FUSION=0|1` 可诊断覆盖。当前独立构建为
+  `target/int8-specialized/build/release/katago-rs.exe`；ABBA、原始输出逐位对拍及
+  使用入口见 `docs/RustGoINT8专项优化.md`，不代表精度恢复或棋力认证。
   用户允许本次 INT8 实验改变中间求和精度，仍须独立验证最终输出；
   已采用的 kernel 改写与原量化输出一致，简单输出校准未通过，不得标为精度恢复。
 - CUTLASS(B2 dual-FFN 主机侧 CUTLASS DualGemm):build.rs 按

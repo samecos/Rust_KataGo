@@ -59,6 +59,12 @@ def main():
         run("bad-width", "gtp", "cudaInt8MinFfnWidth=9", "quit\n", "must be 8-aligned")
         run("all-float", "gtp", "cudaInt8Scope=ffn,cudaInt8MinFfnWidth=8192", "quit\n", "excludes every FFN")
         run("fp16-tactic", "gtp", "cudaInt8Scope=ffn", "quit\n", "INT8 requires KATAGO_CUDA_DUALFFN=0", {"KATAGO_CUDA_DUALFFN": "1"})
+        text = run("rms-unfused", "gtp", "cudaInt8Scope=ffn", "1 protocol_version\n2 boardsize 19\n3 genmove b\n4 quit\n",
+                   env_extra={"KATAGO_CUDA_INT8_RMS_FUSION": "0"})
+        validate_gtp_smoke(text)
+        assert "name=int8_rms_quantize" not in (args.output / "rms-unfused.stderr.log").read_text(encoding="utf-8")
+        run("bad-rms-tactic", "gtp", "cudaInt8Scope=ffn", "quit\n", "invalid KATAGO_CUDA_INT8_RMS_FUSION",
+            {"KATAGO_CUDA_INT8_RMS_FUSION": "misspelled"})
         report["status"] = "PASS"
     except Exception as error:
         report.update(status="FAIL", error=str(error))

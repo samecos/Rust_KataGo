@@ -970,10 +970,19 @@ impl CudaModel {
                             m,
                             2,
                         )?;
+                        false
+                    } else if let Some(LayerBuf::Int8Ffn { dual, down, .. }) = self.layers.get(li + 1)
+                        && int8.as_ref().is_some_and(|q| q.rms_fusion_enabled(*channels, self.int8_min_ffn_width))
+                        && crate::tactic_plan::tactic_var("KATAGO_CUDA_RMS").as_deref() != Ok("v1")
+                        && std::env::var_os("KATAGO_CUDA_DEBUG_LAYER").is_none()
+                    {
+                        let quant = int8.as_mut().ok_or("missing INT8 workspace")?;
+                        timed!("int8_rms_ffn_fused", quant.ffn_rms(rt, &stream, &scale.data, *eps, dual, down, act384, m));
+                        true
                     } else {
                         rms_norm_f32(rt, act384, normed, &scale.data, *eps, *channels, m)?;
+                        false
                     }
-                    false
                 }
                 LayerBuf::Attention {
                     qkv,
