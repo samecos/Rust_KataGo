@@ -40,6 +40,7 @@
 //! 逐层耗时、`KATAGO_CUDA_DUMP_INPUT=<dir>` 输入 dump（见 cuda.rs）。
 
 use crate::backends::cuda::{CublasLtWeightLayout, CudaRuntime, f16_to_f32_bits, f32_to_f16_bits};
+use crate::backends::int8::{Int8Kernels, Int8Scope, Int8Weight, Int8Workspace};
 use crate::onnx_parser::{Layer, LayerGraph, Tensor, TensorData};
 use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use std::cell::RefCell;
@@ -207,6 +208,17 @@ pub struct ParamBuf {
 
 /// 每层上传到设备的权重/参数。
 enum LayerBuf {
+    Int8Ffn {
+        dual: Int8Weight,
+        down: Int8Weight,
+    },
+    Int8Attention {
+        qkv: Int8Weight,
+        out: Int8Weight,
+        cos: CudaSlice<f32>,
+        sin: CudaSlice<f32>,
+        qk_scale: f32,
+    },
     InitialConv {
         w: WeightBuf,
         gw: CudaSlice<f32>,
@@ -286,6 +298,9 @@ enum LayerBuf {
 /// 已加载的 CUDA 模型：全部层权重驻留设备，`apply` 前向执行。
 pub struct CudaModel {
     layers: Vec<LayerBuf>,
+    int8_scope: Option<Int8Scope>,
+    int8_min_ffn_width: usize,
+    int8_kernels: Option<Int8Kernels>,
     seq_len: usize,
     trunk: usize,
     mid: usize,
@@ -525,6 +540,60 @@ impl CudaModel {
         rt: &CudaRuntime,
         stream: &Arc<CudaStream>,
     ) -> Result<Self, String> {
+        Self::load_precision(graph, rt, stream, None)
+    }
+
+    pub fn load_int8(graph: &LayerGraph, rt: &CudaRuntime, stream: &Arc<CudaStream>, scope: Int8Scope) -> Result<Self, String> {
+        Self::load_precision(graph, rt, stream, Some(scope))
+    }
+
+    pub fn load_int8_selective(graph: &LayerGraph, rt: &CudaRuntime, stream: &Arc<CudaStream>, scope: Int8Scope, min_ffn_width: usize) -> Result<Self, String> {
+        Self::load_precision_selective(graph, rt, stream, Some(scope), min_ffn_width)
+    }
+
+    pub fn int8_scope(&self) -> Option<Int8Scope> { self.int8_scope }
+    pub fn int8_min_ffn_width(&self) -> usize { self.int8_min_ffn_width }
+    pub fn int8_ffn_count(&self) -> usize {
+        self.layers.iter().filter(|l| matches!(l, LayerBuf::Int8Ffn { .. })).count()
+    }
+
+    fn load_precision(graph: &LayerGraph, rt: &CudaRuntime, stream: &Arc<CudaStream>, int8_scope: Option<Int8Scope>) -> Result<Self, String> {
+        Self::load_precision_selective(graph, rt, stream, int8_scope, 0)
+    }
+
+    fn load_precision_selective(graph: &LayerGraph, rt: &CudaRuntime, stream: &Arc<CudaStream>, int8_scope: Option<Int8Scope>, min_ffn_width: usize) -> Result<Self, String> {
+        super::int8::parse_min_ffn_width(&min_ffn_width.to_string())?;
+        if int8_scope.is_none() && min_ffn_width != 0 {
+            return Err("INT8 layer selection requires an INT8 backend".into());
+        }
+        if int8_scope == Some(Int8Scope::Ffn) && !graph.layers.iter().any(|l| matches!(l, Layer::Ffn(f) if f.hidden >= min_ffn_width)) {
+            return Err("cudaInt8MinFfnWidth excludes every FFN; use cudabackend for an all-float model".into());
+        }
+        if int8_scope.is_some() {
+            // Existing certification identities describe FP16 semantics.
+            // Never silently apply them to a lossy quantized execution graph.
+            if crate::tactic_plan::installed_plan_id().is_some() {
+                return Err("INT8 cannot use an installed FP16 tactic plan; run in a separate process without cudaTacticPlan".into());
+            }
+            for (key, default) in [
+                ("KATAGO_CUDA_DUALFFN", "0"), ("KATAGO_CUDA_SPLITK", "0"),
+                ("KATAGO_CUDA_FUSION", "none"), ("KATAGO_CUDA_GEMM_LAYOUT", "tn"),
+                ("KATAGO_CUDA_RESIDUAL_ALGO", "heuristic"),
+                ("KATAGO_CUDA_ATTN", "fa2"),
+                ("KATAGO_CUDA_QKV_IMMUTABLE_R1", "0"),
+                ("KATAGO_CUDA_QKV_CLASSIC_N128_R1", "0"),
+                ("KATAGO_CUDA_OUTPROJ_CLASSIC_N128_R1", "0"),
+            ] {
+                match crate::tactic_plan::tactic_var(key) {
+                    Ok(value) if value != default => return Err(format!("INT8 requires {key}={default}; specialized FP16 tactic is incompatible")),
+                    Err(std::env::VarError::NotUnicode(_)) => return Err(format!("invalid {key}")),
+                    _ => {},
+                }
+            }
+            if crate::tactic_plan::ffn_compact_requested()? {
+                return Err("INT8 accepts model-declared pruned widths, not the model-specific FP16 compact artifact".into());
+            }
+        }
         crate::tactic_plan::gate_rowquad_requested()?;
         if graph.board_size != 19 || graph.head_dim != 32 || graph.mid_channels != graph.num_heads * 32 {
             return Err("CUDA requires 19x19, D32 and mid=heads*32".into());
@@ -556,7 +625,10 @@ impl CudaModel {
         let mut layers = Vec::with_capacity(graph.layers.len());
         let mut ffn_index = 0;
         for layer in &graph.layers {
-            if ffn_compact.is_some() && let Layer::Ffn(ffn) = layer {
+            if let Some(scope) = int8_scope
+                && (matches!(layer, Layer::Ffn(f) if f.hidden >= min_ffn_width) || (scope == Int8Scope::Transformer && matches!(layer, Layer::Attention(_)))) {
+                layers.push(upload_int8_layer(&stream, layer)?);
+            } else if ffn_compact.is_some() && let Layer::Ffn(ffn) = layer {
                 let packed = crate::backends::cuda::ffn_compact::pack(ffn_index, ffn, f32_to_f16_bits)?;
                 layers.push(LayerBuf::Ffn {
                     dual: upload_compact_half_weight(&stream, &packed.dual, 2 * packed.hidden, 384)?,
@@ -570,6 +642,9 @@ impl CudaModel {
         }
         Ok(Self {
             layers,
+            int8_scope,
+            int8_min_ffn_width: min_ffn_width,
+            int8_kernels: int8_scope.map(|_| Int8Kernels::load(rt)).transpose()?,
             seq_len: graph.board_size * graph.board_size,
             trunk: graph.trunk_channels,
             mid: graph.mid_channels,
@@ -686,6 +761,7 @@ impl CudaModel {
         let out_misc = &mut ws.out_misc;
         let out_moremisc = &mut ws.out_moremisc;
         let out_ownership = &mut ws.out_ownership;
+        let int8 = &mut ws.int8;
 
         // --- 逐层执行 ----------------------------------------------------
         // per-layer 剖析（KATAGO_CUDA_PROFILE=1）：层与子段使用独立事件对，
@@ -731,6 +807,8 @@ impl CudaModel {
         while li < self.layers.len() {
             let lb = &self.layers[li];
             let layer_tag: &'static str = match lb {
+                LayerBuf::Int8Ffn { .. } => "Int8Ffn",
+                LayerBuf::Int8Attention { .. } => "Int8Attention",
                 LayerBuf::InitialConv { .. } => "InitialConv",
                 LayerBuf::Linear { .. } => "Linear",
                 LayerBuf::RmsNorm { .. } => "RmsNorm",
@@ -1048,6 +1126,26 @@ impl CudaModel {
                     }
                     false
                 }
+                LayerBuf::Int8Ffn { dual, down, .. } => {
+                    let quant = int8.as_mut().ok_or("missing INT8 workspace")?;
+                    timed!("int8_ffn_fused", quant.ffn(rt, &stream, normed, dual, down, act384, m));
+                    false
+                }
+                LayerBuf::Int8Attention { qkv, out, cos, sin, qk_scale } => {
+                    let quant = int8.as_mut().ok_or("missing INT8 workspace")?;
+                    let tile = crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN_TILE").unwrap_or_else(|_| "q128".into());
+                    let serial = tile == "q64-serial";
+                    let q64 = serial || tile == "q64";
+                    if !matches!(tile.as_str(), "q128" | "q64" | "q64-serial")
+                        || (serial && !crate::backends::cuda::attention_q64_serial_available())
+                        || (q64 && !serial && !crate::backends::cuda::attention_q64_available()) {
+                        return Err(format!("unsupported INT8 attention tile {tile}"));
+                    }
+                    timed!("int8_qkv", quant.project_half(rt, &stream, normed, mid, qkv, act1152, m));
+                    timed!("attn", attention_fa2(rt, act1152, cos, sin, normed, s, d, batch * h, qk_scale * qk_scale, h, q64, serial));
+                    timed!("int8_out", quant.project_residual(rt, &stream, normed, mid, out, act384, m));
+                    false
+                }
                 LayerBuf::Ffn { dual, down, hidden } => {
                     let hidden = *hidden;
                     if self.ffn_compact.is_some() {
@@ -1248,6 +1346,8 @@ impl CudaModel {
                 if let Ok(spec) = std::env::var("KATAGO_CUDA_DEBUG_LAYER") {
                     if spec == li.to_string() {
                         let tag = match lb {
+                            LayerBuf::Int8Ffn { .. } => "Int8Ffn",
+                            LayerBuf::Int8Attention { .. } => "Int8Attention",
                             LayerBuf::InitialConv { .. } => "InitialConv",
                             LayerBuf::Linear { .. } => "Linear",
                             LayerBuf::RmsNorm { .. } => "RmsNorm",
@@ -1369,6 +1469,31 @@ impl CudaModel {
 
         ACTIVE_STREAM.with(|s| *s.borrow_mut() = None);
         Ok(())
+    }
+}
+
+fn upload_int8_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
+    match layer {
+        Layer::Ffn(f) => {
+            let mid = f.up_weight.numel() / f.hidden;
+            let mut dual = f.gate_weight.f32_data().to_vec();
+            dual.extend_from_slice(f.up_weight.f32_data());
+            Ok(LayerBuf::Int8Ffn {
+                dual: Int8Weight::upload(stream, &dual, 2 * f.hidden, mid)?,
+                down: Int8Weight::upload(stream, f.down_weight.f32_data(), mid, f.hidden)?,
+            })
+        }
+        Layer::Attention(a) => {
+            let mid = a.num_heads * a.head_dim;
+            Ok(LayerBuf::Int8Attention {
+                qkv: Int8Weight::upload(stream, a.qkv_weight.f32_data(), 3 * mid, mid)?,
+                out: Int8Weight::upload(stream, a.out_weight.f32_data(), mid, mid)?,
+                cos: upload_f32(stream, a.rope_cos.f32_data(), a.seq_len, mid / 2)?,
+                sin: upload_f32(stream, a.rope_sin.f32_data(), a.seq_len, mid / 2)?,
+                qk_scale: a.qk_scale,
+            })
+        }
+        _ => Err("INT8 scope only covers transformer weighted projections".into()),
     }
 }
 
@@ -3010,6 +3135,7 @@ fn policy_concat(
 /// 消除每次 apply 的 20+ 次设备内存分配（WDDM 下 malloc 虽为
 /// stream-ordered，但配合 CUDA Graph capture 需预分配固定地址）。
 pub struct CudaWorkspace {
+    int8: Option<Int8Workspace>,
     pub cols: CudaSlice<u16>,   // im2col [M,208]
     pub act768: CudaSlice<f32>, // raw 768 流（f32 残差累积）
     pub gated768: CudaSlice<u16>,
@@ -3063,6 +3189,7 @@ impl CudaWorkspace {
         let d = model.head_dim;
         let qkv_elts = batch * h * s * d;
         Ok(Self {
+            int8: model.int8_kernels.as_ref().map(|kernels| Int8Workspace::from_kernels(kernels, stream, m, 3 * mid, 6 * mid)).transpose()?,
             cols: zeros16(stream, m * 208)?,
             act768: zeros32(stream, m * trunk)?,
             gated768: zeros16(stream, m * trunk)?,

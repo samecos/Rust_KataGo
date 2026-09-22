@@ -174,8 +174,9 @@ fn eval_sweep(parsed: &NnBenchArgs, batches: &[usize]) -> Result<(), String> {
             .get_config("gtp_example.cfg")
             .map_err(|e| e.to_string())?
     };
-    if cfg.get_string("nnBackend").unwrap_or_default() != "cudabackend" {
-        return Err("eval 模式需要 nnBackend=cudabackend(用 --override-config 指定)".into());
+    let backend_key = if cfg.contains("nnBackend0") { "nnBackend0" } else { "nnBackend" };
+    if !matches!(cfg.get_string(backend_key).unwrap_or_default().as_str(), "cuda" | "cudabackend" | "cudaint8" | "cudaint8backend") {
+        return Err("eval mode requires cudabackend or cudaint8backend".into());
     }
 
     let logger: &'static Logger = Box::leak(Box::new(Logger::new(
@@ -340,6 +341,26 @@ fn direct_sweep(
     use serde::Serialize;
 
     let model_file = parsed.common.get_model_file().map_err(|e| e.to_string())?;
+    let cfg = if parsed.common.config.is_empty() {
+        let mut cfg = kata_core::config::ConfigParser::from_str("nnBackend=cudabackend\n", false, false).map_err(|e| e.to_string())?;
+        parsed.common.maybe_apply_override_config_arg(&mut cfg).map_err(|e| e.to_string())?;
+        cfg
+    } else { parsed.common.get_config("gtp_example.cfg").map_err(|e| e.to_string())? };
+    if cfg.contains("cudaTacticPlan") {
+        return Err("direct/kernel modes do not install cudaTacticPlan; use eval for plan benchmarks".into());
+    }
+    let backend_key = if cfg.contains("nnBackend0") { "nnBackend0" } else { "nnBackend" };
+    let backend = if cfg.contains(backend_key) {
+        cfg.get_string(backend_key).map_err(|e| e.to_string())?
+    } else { "cudabackend".into() };
+    let int8_scope = match backend.as_str() {
+        "cudaint8" | "cudaint8backend" => Some(kata_nn::backends::int8::Int8Scope::parse(&if cfg.contains("cudaInt8Scope") { cfg.get_string("cudaInt8Scope").map_err(|e| e.to_string())? } else { "ffn".into() })?),
+        "cuda" | "cudabackend" if !cfg.contains("cudaInt8Scope") && !cfg.contains("cudaInt8MinFfnWidth") => None,
+        _ => return Err("direct/kernel mode requires a CUDA backend; cudaInt8Scope requires cudaint8backend".into()),
+    };
+    let int8_min_ffn_width = if cfg.contains("cudaInt8MinFfnWidth") {
+        kata_nn::backends::int8::parse_min_ffn_width(&cfg.get_string("cudaInt8MinFfnWidth").map_err(|e| e.to_string())?)?
+    } else { 0 };
     let bytes = std::fs::read(&model_file).map_err(|e| format!("read model: {e}"))?;
     let model_sha256 = kata_core::hash::sha2::sha256_hex(&bytes);
     kata_nn::tactic_plan::validate_outproj_model_sha(&model_sha256)?;
@@ -349,7 +370,10 @@ fn direct_sweep(
         .map_err(|e| format!("CUDA residual tactic: {e}"))?;
     let stream = rt.device.default_stream();
     let model = Arc::new(
-        CudaModel::load(&graph, &rt, &stream).map_err(|e| format!("load CudaModel: {e}"))?,
+        match int8_scope {
+            Some(scope) => CudaModel::load_int8_selective(&graph, &rt, &stream, scope, int8_min_ffn_width),
+            None => CudaModel::load(&graph, &rt, &stream),
+        }.map_err(|e| format!("load CudaModel: {e}"))?,
     );
     rt.device.synchronize().map_err(|e| format!("sync: {e}"))?;
     let rt_shared = Arc::new(rt);
@@ -378,6 +402,11 @@ fn direct_sweep(
     #[derive(Debug, Serialize)]
     struct JsonReport {
         schema: u32,
+        precision: &'static str,
+        int8_scope: Option<&'static str>,
+        int8_min_ffn_width: usize,
+        int8_ffn_layers: usize,
+        quantization_version: Option<&'static str>,
         command: &'static str,
         mode: String,
         kernel_only: bool,
@@ -688,6 +717,11 @@ fn direct_sweep(
         }
         let report = JsonReport {
             schema: 1,
+            precision: if int8_scope.is_some() { "W8A8-mixed" } else { "FP16-mixed" },
+            int8_scope: int8_scope.map(|s| s.name()),
+            int8_min_ffn_width,
+            int8_ffn_layers: model.int8_ffn_count(),
+            quantization_version: int8_scope.map(|_| kata_nn::backends::int8::QUANTIZATION_VERSION),
             command: "nnbench",
             mode: parsed.mode.clone(),
             kernel_only,

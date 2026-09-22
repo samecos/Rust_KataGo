@@ -13,5 +13,8 @@ pub mod cuda;
 #[cfg(feature = "cuda")]
 pub mod cuda_exec;
 
+#[cfg(feature = "cuda")]
+pub mod int8;
+
 #[cfg(feature = "trt")]
 pub mod trt_ffi;

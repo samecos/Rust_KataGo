@@ -1761,7 +1761,14 @@ mod backend_impl {
     use std::sync::{Arc, Mutex};
 
     /// CUDA 后端（手写 kernel，sm-targets.json 选择编译目标）。
-    pub struct CudaBackend;
+    pub struct CudaBackend { int8: bool }
+
+    // Preserve the existing unit-value API used by callers while selecting
+    // precision explicitly through a separate backend value.
+    #[allow(non_upper_case_globals)]
+    pub const CudaBackend: CudaBackend = CudaBackend { int8: false };
+    #[allow(non_upper_case_globals)]
+    pub const CudaInt8Backend: CudaBackend = CudaBackend { int8: true };
 
     fn policy_channel(policy: &[f32], row: usize, channel: usize, area: usize) -> &[f32] {
         let stride = area + 1;
@@ -1837,6 +1844,7 @@ mod backend_impl {
     /// Parsed model and CUDA runtime. Context creation completes the deferred
     /// upload, before any compute handle, warmup, graph capture or serve thread.
     pub struct CudaLoadedModel {
+        int8: bool,
         model_desc: ModelDesc,
         model: Mutex<CudaModelLoadState>,
         rt: Arc<CudaRuntime>,
@@ -2401,7 +2409,7 @@ mod backend_impl {
         fn global_cleanup(&self) {}
 
         fn print_devices(&self) {
-            println!("Hand-written CUDA backend (cuda_exec + embedded PTX, SM120-first)");
+            println!("CUDA backend precision={} (SM120-first)", if self.int8 { "W8A8 mixed" } else { "FP16 mixed" });
         }
 
         fn load_model_file(
@@ -2457,6 +2465,7 @@ mod backend_impl {
             // defeating both plan NN/env TN and plan TN/env NN precedence.
             // Retain the parsed graph and defer all weight uploads instead.
             Ok(Box::new(CudaLoadedModel {
+                int8: self.int8,
                 model_desc,
                 model: Mutex::new(CudaModelLoadState::Parsed(graph)),
                 rt,
@@ -2479,6 +2488,26 @@ mod backend_impl {
                 .as_any()
                 .downcast_ref::<CudaLoadedModel>()
                 .ok_or_else(|| NeuralNetError("Wrong loaded model type".to_string()))?;
+            if model.int8 != self.int8 {
+                return Err(NeuralNetError("CUDA loaded model/backend precision mismatch".into()));
+            }
+            let int8_scope = if self.int8 {
+                if cfg.contains("cudaTacticPlan") {
+                    return Err(NeuralNetError("cudaint8backend cannot reuse a FP16 cudaTacticPlan; omit it and validate the quantized model separately".into()));
+                }
+                let name = if cfg.contains("cudaInt8Scope") {
+                    cfg.get_string("cudaInt8Scope").map_err(|e| NeuralNetError(e.to_string()))?
+                } else { "ffn".to_string() };
+                Some(crate::backends::int8::Int8Scope::parse(&name).map_err(NeuralNetError)?)
+            } else {
+                if cfg.contains("cudaInt8Scope") || cfg.contains("cudaInt8MinFfnWidth") {
+                    return Err(NeuralNetError("cudaInt8Scope/cudaInt8MinFfnWidth requires nnBackend=cudaint8backend".into()));
+                }
+                None
+            };
+            let int8_min_ffn_width = if cfg.contains("cudaInt8MinFfnWidth") {
+                crate::backends::int8::parse_min_ffn_width(&cfg.get_string("cudaInt8MinFfnWidth").map_err(|e| NeuralNetError(e.to_string()))?).map_err(NeuralNetError)?
+            } else { 0 };
             // cudaTacticPlan：离线 autotune 认证 plan，fail-closed 安装
             // tactic 覆盖（先于 serve 线程 spawn 与一切 tactic 读取）。
             if cfg.contains("cudaTacticPlan") {
@@ -2526,6 +2555,9 @@ mod backend_impl {
                         model,
                         gemm_layout: uploaded_layout,
                     } => {
+                        if model.int8_scope() != int8_scope || model.int8_min_ffn_width() != int8_min_ffn_width {
+                            return Err(NeuralNetError("CUDA quantization scope/layer selection changed after upload; reload the model".into()));
+                        }
                         if *uploaded_layout != gemm_layout {
                             return Err(NeuralNetError(format!(
                                 "CUDA model weights were prepared for GEMM layout '{uploaded_layout}', but this context requests '{gemm_layout}'; reload the model before changing its load-time layout"
@@ -2540,7 +2572,10 @@ mod backend_impl {
                             NeuralNetError(format!("CUDA stream create failed: {e}"))
                         })?;
                         let uploaded =
-                            Arc::new(CudaModel::load(graph, &model.rt, &load_stream).map_err(
+                            Arc::new(match int8_scope {
+                                Some(scope) => CudaModel::load_int8_selective(graph, &model.rt, &load_stream, scope, int8_min_ffn_width),
+                                None => CudaModel::load(graph, &model.rt, &load_stream),
+                            }.map_err(
                                 |e| NeuralNetError(format!("CUDA model upload failed: {e}")),
                             )?);
                         model
@@ -2560,6 +2595,9 @@ mod backend_impl {
                 return Err(NeuralNetError("CUDA model FFN compaction changed after upload; reload the model".into()));
             }
             ensure_requested_cuda_capabilities(&uploaded_model).map_err(NeuralNetError)?;
+            if let Some(scope) = int8_scope {
+                logger.write(&format!("[cuda-int8] precision=W8A8 accumulation=INT32 scope={} min_ffn_width={} int8_ffn_layers={} quantization={} model_sha256={} heads=FP16/FP32 activation_scaling=dynamic-per-row calibration=none\n", scope.name(), int8_min_ffn_width, uploaded_model.int8_ffn_count(), crate::backends::int8::QUANTIZATION_VERSION, model.model_desc.sha256));
+            }
             Ok(Box::new(CudaComputeContext {
                 model: uploaded_model,
                 rt: model.rt.clone(),
@@ -2713,4 +2751,4 @@ mod backend_impl {
 }
 
 #[cfg(feature = "cuda")]
-pub use backend_impl::CudaBackend;
+pub use backend_impl::{CudaBackend, CudaInt8Backend};

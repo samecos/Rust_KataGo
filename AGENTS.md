@@ -13,6 +13,14 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
 - TRT 后端:`cargo build -p katago --features trt`(需本机 CUDA + TensorRT 头文件)
 - CUDA 后端(手写 kernel,nvcc 编译):`cargo build -p katago --features cuda`;
   冒烟 `cargo test -p kata_nn --test test_cuda --features cuda`
+- 可选 INT8 后端（2026-09-22）：同一 `cuda` feature，`nnBackend=cudaint8backend`、
+  `cudaInt8Scope=ffn`（默认）或 `transformer`；原生 B11/B15 及模型声明的 FFN
+  结构化剪枝。独立有损精度身份，不能复用 FP16 plan；构建、误差和性能边界见
+  `docs/RustGoINT8后端.md`。未更换原正式二进制，也未放宽原 FP32 数值门。
+  后续剪枝诊断新增 `cudaInt8MinFfnWidth`（默认 0，B15 性能候选 384）、
+  大 batch 窄层 warp 量化；结果与 SGF 校准边界见 `docs/RustGoB15剪枝INT8诊断.md`。
+  用户允许本次 INT8 实验改变中间求和精度，仍须独立验证最终输出；
+  已采用的 kernel 改写与原量化输出一致，简单输出校准未通过，不得标为精度恢复。
 - CUTLASS(B2 dual-FFN 主机侧 CUTLASS DualGemm):build.rs 按
   `KATAGO_CUTLASS_ROOT` → `third_party/cutlass` → `D:/code/cutlass` 查找
   (本机已克隆 v3.9.2 到 D:/code/cutlass);找不到则跳过该 tactic

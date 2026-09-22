@@ -227,6 +227,8 @@
 
 ### 混合精度实测终局(2026-08-15,三段实验闭环)
 
+> **2026-09-22 勘误**：下方“SM120 无厂商 INT8 路径”和“INT8 精度可用于生产”不再作为结论使用。旧探针包含 INT32 输出搭配 FP32 alpha/beta 等无效组合，旧模拟也不足以认证真实量化后端。新后端使用普通 TN 布局、INT32 输出与 INT32 alpha/beta，已实际运行 cuBLASLt IMMA；量化误差及使用边界见 [INT8 后端](RustGoINT8后端.md)。以下保留历史实验原文，不作为生产认证。
+
 **① kernel 级微基准**(tests/bench_lowprec.rs,cuBLASLt,us/iter):
 
 | 形状(N×K) | M=2888 fp16 | fp8 | int8 |

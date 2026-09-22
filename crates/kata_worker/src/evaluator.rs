@@ -159,7 +159,7 @@ impl Engine {
         let revision =
             option_env!("KATAGO_WORKER_ENGINE_REVISION").unwrap_or("revision-unavailable");
         let engine_commit = format!("Rust_KataGo/{revision}");
-        let backend_info = format!(
+        let mut backend_info = format!(
             "Rust_KataGo {} {}; backend={backend}; model={}; model-version={}; history-modes=false,false{}",
             env!("CARGO_PKG_VERSION"),
             revision,
@@ -174,6 +174,11 @@ impl Engine {
                 ""
             },
         );
+        if backend == "cudaint8backend" {
+            let scope = if cfg.contains("cudaInt8Scope") { cfg.get_string("cudaInt8Scope")? } else { "ffn".into() };
+            let min_width = if cfg.contains("cudaInt8MinFfnWidth") { cfg.get_string("cudaInt8MinFfnWidth")? } else { "0".into() };
+            backend_info.push_str(&format!("; precision=W8A8-mixed; int8-scope={scope}; int8-min-ffn-width={min_width}; quantization=w8a8-row-out-rne-v1"));
+        }
         let metadata = Metadata {
             model_sha256,
             model_version: evaluator.model_version().max(0) as u32,
@@ -295,6 +300,7 @@ fn selected_backend(cfg: &ConfigParser) -> Result<&'static str> {
     match value.as_str() {
         "dummy" | "dummybackend" => Ok("dummybackend"),
         "cuda" | "cudabackend" => Ok("cudabackend"),
+        "cudaint8" | "cudaint8backend" => Ok("cudaint8backend"),
         "trt" | "tensorrt" | "trtbackend" => Ok("trtbackend"),
         "eigen" | "cpu" | "eigenbackend" => Ok("eigenbackend"),
         _ => bail!("unknown nnBackend: {value}"),
