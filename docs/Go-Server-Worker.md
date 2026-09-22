@@ -9,6 +9,18 @@ RustGo 提供原生 `katago-rs nnworker` 命令，实现 Go Server 的
 RustGo 重放局面、调用 `NnEvaluator` 并返回后处理后的 policy/value/ownership。
 Worker 不运行自己的搜索，不经 GTP 子进程转发，也不调用 `analysis` 搜索命令。
 
+### 前端 PDA 与宽根搜索（2026-09-22）
+
+Go Server 已新增会话级 `configure_search`：前端「AI 分析 → 搜索参数」可调整固定 PDA（−3～3）、参照方（当前行棋方／黑／白）和宽根强度（0～5），默认均为 0。更新 `D:/Go/Server` 的 release 二进制和 `D:/Go/FrontEnd` 前端后可使用。
+
+PDA 经既有 `EvalParameters.playout_doubling_advantage` 下发，Rust Worker 已在 `prepare_context` 中原样映射到 `MiscNNInputParams`，无需修改协议或重编 CUDA 内核。Server 根据每个叶子的行棋方处理正负，Worker 不再自行变号；NN 缓存使用包含 PDA 的语义输入。宽根探索在 Server 搜索根执行，与 Worker 推理配置无关。
+
+修改参数会取消旧任务并保留棋谱与持续分析意图。实际 PDA 输入条件改变才清图；仅宽根变化、或从随行模式切换为与当前颜色相同的固定参照方，保留已有搜索。前端首次开启 PDA 默认固定当前黑／白一方；显式随行棋方模式会在每次换方时重算，固定黑／白方可继承已搜索分支。这里只提供固定 PDA，未加入动态让子 PDA；功能测试不代表棋力认证或 INT8 精度恢复。接口及生命周期细节见 `D:/Go/Server/docs/json_api_v1.md` 的“会话搜索参数”。
+
+首轮验证：Server `cargo test --workspace --locked`（97项常规测试通过，9项显式外部依赖／基准测试按原配置忽略）、Clippy `-D warnings`、前端57项测试及生产构建通过；Rust Worker 的 `all_misc_parameters_map_without_search_defaults` 通过。浏览器在独立本机测试服务验证参数保存、刷新恢复、范围校验、默认恢复和390px手机布局；现有认证 B11 TF3 CUDA Worker 在 PDA=0.5、root参照、宽根=0.04 下完成145 visits并返回真实候选与评估，随后停止。此为功能冒烟，不作为吞吐基准。
+
+同日后续修正：PDA 默认随行导致逐手清图的问题已改为前端首次开启默认固定当前颜色；显式随行模式仍因 NN 条件变化重算并显示原因。仅宽根或等效固定参照变化不清树。含内存预算修复的最新独立程序为 `D:/Go/Server/target/release/go-server-search-fix.exe`；原启动参数保留。累计 Server 104 测试、前端61测试、Clippy 与生产构建通过。连续落子核心测试继承79/158/237 visits；WebSocket/gRPC测试验证固定方落子立即保留14 visits、旧回包不能恢复旧代；浏览器配合明确标注的合成 Worker 验证落子继承20 visits/20节点、随后开启宽根保留79 visits/64节点。该轮无 NN 内核或数值更改。
+
 ## 构建和启动
 
 在 Rust_KataGo 目录执行：
