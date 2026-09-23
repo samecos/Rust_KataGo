@@ -2091,6 +2091,13 @@ mod backend_impl {
                         //   cuGraphLaunch 恒 CUDA_ERROR_INVALID_VALUE,重
                         //   upload 无效;生产表现为 warmup/首批 eval 丢弃)。
                         if slot_idx == 0 {
+                            // Warmup may inspect data while selecting an INT8
+                            // algorithm. Supply the actual request instead of
+                            // reading the freshly allocated device buffers.
+                            stream.memcpy_htod(&spatial_host, &mut in_spatial)
+                                .map_err(|e| NeuralNetError(format!("warm spatial upload: {e}")))?;
+                            stream.memcpy_htod(&global_host, &mut in_global)
+                                .map_err(|e| NeuralNetError(format!("warm global upload: {e}")))?;
                             h.model
                                 .apply(&h.rt, stream, &mut ws, &in_spatial, &in_global)
                                 .map_err(|e| NeuralNetError(format!("pre-capture warm: {e}")))?;
@@ -2651,6 +2658,13 @@ mod backend_impl {
         }
 
         fn warmup_batches(&self, max_batch_size: i32) -> Vec<i32> {
+            if self.int8 && crate::tactic_plan::tactic_var("KATAGO_CUDA_INT8_GEMM_TUNE").is_ok() {
+                // Pay opt-in algorithm selection cost before accepting work,
+                // including intermediate batches used by local search. An
+                // explicit 0 warms the same shapes for fair A/B measurement;
+                // an absent key retains the normal lightweight startup.
+                return (1..=max_batch_size.max(1)).collect();
+            }
             if max_batch_size <= 1 {
                 vec![1]
             } else {

@@ -25,6 +25,12 @@ KataGo 围棋引擎的 Rust 移植(基座:KataGo-Lite/katago-rs,约 10 万行,�
   使用入口见 `docs/RustGoINT8专项优化.md`，不代表精度恢复或棋力认证。
   用户允许本次 INT8 实验改变中间求和精度，仍须独立验证最终输出；
   已采用的 kernel 改写与原量化输出一致，简单输出校准未通过，不得标为精度恢复。
+  2026-09-23 新一轮研究与实测：用户允许本轮混合精度采用相对同模型 FP16
+  的胜率输出最大偏差 ≤6 个百分点，另报 policy/目差；这是独立实验门，
+  不改原 FP32 认证门。q64 注意力与可选逐形状 INT8 GEMM 调优见
+  `docs/RustGoINT8注意力与算法调优.md`，网络方案见
+  `docs/RustGo低精度优化新方案调研.md`。GEMM 调优默认关闭，
+  `KATAGO_CUDA_INT8_GEMM_TUNE=0|1`；启动与性能证据必须分开。
 - CUTLASS(B2 dual-FFN 主机侧 CUTLASS DualGemm):build.rs 按
   `KATAGO_CUTLASS_ROOT` → `third_party/cutlass` → `D:/code/cutlass` 查找
   (本机已克隆 v3.9.2 到 D:/code/cutlass);找不到则跳过该 tactic

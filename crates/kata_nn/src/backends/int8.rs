@@ -8,11 +8,23 @@ use cudarc::cublaslt::sys;
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, LaunchConfig, PushKernelArg,
 };
-use std::{collections::HashMap, sync::Arc};
+use cudarc::driver::{result as driver_result, sys as driver_sys};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 pub const QUANTIZATION_VERSION: &str = "w8a8-row-out-rne-v1";
 const WARP_MIN_ROWS: usize = 1024;
 const WARP_MAX_HIDDEN: usize = 512;
+const GEMM_TUNE_CANDIDATES: usize = 16;
+const GEMM_TUNE_REPEATS: usize = 128;
+
+fn gemm_tune_requested() -> Result<bool, String> {
+    match crate::tactic_plan::tactic_var("KATAGO_CUDA_INT8_GEMM_TUNE") {
+        Ok(v) if v == "1" => Ok(true),
+        Ok(v) if v == "0" => Ok(false),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        _ => Err("invalid KATAGO_CUDA_INT8_GEMM_TUNE; expected 0 or 1".into()),
+    }
+}
 
 fn report_row_kernel(warp: bool, swiglu: bool, rows: usize, width: usize) {
     if super::cuda_exec::capturing() {
@@ -56,6 +68,7 @@ pub struct Int8Kernels {
     rms384: CudaFunction,
     rms512: CudaFunction,
     rms_fusion: Option<bool>,
+    gemm_tune: bool,
     quantize: CudaFunction,
     quantize_warp: CudaFunction,
     half: CudaFunction,
@@ -83,10 +96,16 @@ impl Int8Kernels {
                 ));
             }
         };
+        let gemm_tune = gemm_tune_requested()?;
+        eprintln!(
+            "[cuda-tactic] name=int8_gemm_tune enabled={} candidate_pool={GEMM_TUNE_CANDIDATES} default=0",
+            u8::from(gemm_tune)
+        );
         Ok(Self {
             rms384: rt.get_func("int8_rms_quantize384_kernel")?,
             rms512: rt.get_func("int8_rms_quantize512_kernel")?,
             rms_fusion,
+            gemm_tune,
             quantize: rt.get_func("int8_quantize_rows_kernel")?,
             quantize_warp: rt.get_func("int8_quantize_rows_warp_kernel")?,
             half: rt.get_func("int8_dequantize_half_kernel")?,
@@ -206,6 +225,114 @@ struct LtPlan {
     algo: sys::cublasLtMatmulAlgo_t,
 }
 
+struct LtPreference(sys::cublasLtMatmulPreference_t);
+
+impl Drop for LtPreference {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { sys::cublasLtMatmulPreferenceDestroy(self.0) };
+        }
+    }
+}
+
+/// End capture even when a candidate launch fails. Use the raw graph API so
+/// that an instantiation error also releases the uninstantiated CUDA graph.
+struct TuneCapture<'a> {
+    stream: &'a Arc<CudaStream>,
+    active: bool,
+}
+
+impl Drop for TuneCapture<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            unsafe {
+                if let Ok(graph) = driver_result::stream::end_capture(self.stream.cu_stream()) {
+                    if !graph.is_null() {
+                        let _ = driver_result::graph::destroy(graph);
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct TuneGraph {
+    graph: driver_sys::CUgraph,
+    exec: driver_sys::CUgraphExec,
+    stream: Arc<CudaStream>,
+}
+
+impl Drop for TuneGraph {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.exec.is_null() {
+                let _ = driver_result::graph::exec_destroy(self.exec);
+            }
+            if !self.graph.is_null() {
+                let _ = driver_result::graph::destroy(self.graph);
+            }
+        }
+    }
+}
+
+impl TuneGraph {
+    fn capture(
+        stream: &Arc<CudaStream>,
+        mut run: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        // cuBLAS must initialize each algorithm before capture, including
+        // candidates that share the same descriptors as a previous graph.
+        for _ in 0..4 {
+            run()?;
+        }
+        stream.synchronize().map_err(|e| e.to_string())?;
+        stream
+            .begin_capture(driver_sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
+            .map_err(|e| e.to_string())?;
+        let mut capture = TuneCapture {
+            stream,
+            active: true,
+        };
+        for _ in 0..GEMM_TUNE_REPEATS {
+            run()?;
+        }
+        let graph = unsafe { driver_result::stream::end_capture(stream.cu_stream()) };
+        capture.active = false;
+        let mut graph = Self {
+            graph: graph.map_err(|e| e.to_string())?,
+            exec: std::ptr::null_mut(),
+            stream: stream.clone(),
+        };
+        if graph.graph.is_null() {
+            return Err("INT8 tuning captured an empty graph".into());
+        }
+        graph.exec = unsafe {
+            driver_result::graph::instantiate(graph.graph, super::cuda::graph_instantiate_flags())
+        }
+        .map_err(|e| e.to_string())?;
+        graph.launch()?;
+        stream.synchronize().map_err(|e| e.to_string())?;
+        Ok(graph)
+    }
+
+    fn launch(&self) -> Result<(), String> {
+        unsafe { driver_result::graph::launch(self.exec, self.stream.cu_stream()) }
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn timing_summary(samples: &[f32]) -> Option<(f32, f32)> {
+    if samples.is_empty() || samples.iter().any(|t| !t.is_finite() || *t <= 0.0) {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let mid = sorted.len() / 2;
+    let median = (sorted[mid] + sorted[(sorted.len() - 1) / 2]) * 0.5;
+    let spread = (sorted[sorted.len() - 1] - sorted[0]) / median;
+    Some((median, spread))
+}
+
 // These opaque descriptors are immutable after construction. The containing
 // workspace is moved with its handle and used on one stream at a time.
 unsafe impl Send for LtPlan {}
@@ -235,7 +362,6 @@ fn check(status: sys::cublasStatus_t, operation: &str) -> Result<(), String> {
 
 impl LtPlan {
     fn new(rt: &CudaRuntime, m: usize, n: usize, k: usize) -> Result<Self, String> {
-        let handle = rt.cublaslt_handle().ok_or("INT8 requires cuBLASLt")?;
         let mut p = Self {
             desc: std::ptr::null_mut(),
             a: std::ptr::null_mut(),
@@ -306,44 +432,18 @@ impl LtPlan {
                 ),
                 "output layout",
             )?;
-            let mut pref = std::ptr::null_mut();
-            check(
-                sys::cublasLtMatmulPreferenceCreate(&mut pref),
-                "create preference",
-            )?;
-            let ws = rt.cublaslt_workspace_len();
-            let status = sys::cublasLtMatmulPreferenceSetAttribute(
-                pref,
-                sys::cublasLtMatmulPreferenceAttributes_t::CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                &ws as *const _ as *const _,
-                std::mem::size_of_val(&ws),
-            );
-            if let Err(e) = check(status, "set workspace") {
-                sys::cublasLtMatmulPreferenceDestroy(pref);
-                return Err(e);
-            }
-            let mut heuristic: sys::cublasLtMatmulHeuristicResult_t = std::mem::zeroed();
-            let mut count = 0;
-            let status = sys::cublasLtMatmulAlgoGetHeuristic(
-                handle,
-                p.desc,
-                p.a,
-                p.b,
-                p.c,
-                p.c,
-                pref,
-                1,
-                &mut heuristic,
-                &mut count,
-            );
-            sys::cublasLtMatmulPreferenceDestroy(pref);
-            check(status, "select integer GEMM")?;
-            if count != 1 || heuristic.state != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+            // A count=1 request is the original production algorithm. A
+            // count=16 request can return a different first algorithm.
+            let production = p.heuristics(rt, 1)?;
+            if production.len() != 1
+                || production[0].state != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS
+                || production[0].workspaceSize > rt.cublaslt_workspace_len()
+            {
                 return Err(format!(
                     "no INT8 GEMM for M={m} N={n} K={k}; no FP16 fallback"
                 ));
             }
-            p.algo = heuristic.algo;
+            p.algo = production[0].algo;
             let mut flags = 0u64;
             let mut written = 0usize;
             check(
@@ -361,6 +461,302 @@ impl LtPlan {
             REPORTED.get_or_init(|| eprintln!("[cuda-int8] launch=cublaslt-int8 accumulator=int32 imma={} numerical_flags={flags:#x} M={m} N={n} K={k}", flags & 4 != 0));
         }
         Ok(p)
+    }
+
+    fn heuristics(
+        &self,
+        rt: &CudaRuntime,
+        limit: usize,
+    ) -> Result<Vec<sys::cublasLtMatmulHeuristicResult_t>, String> {
+        let handle = rt.cublaslt_handle().ok_or("INT8 requires cuBLASLt")?;
+        let mut pref = LtPreference(std::ptr::null_mut());
+        let mut results = vec![unsafe { std::mem::zeroed() }; limit];
+        let mut count = 0;
+        let workspace_len = rt.cublaslt_workspace_len();
+        unsafe {
+            check(
+                sys::cublasLtMatmulPreferenceCreate(&mut pref.0),
+                "create preference",
+            )?;
+            check(
+                sys::cublasLtMatmulPreferenceSetAttribute(
+                    pref.0,
+                    sys::cublasLtMatmulPreferenceAttributes_t::CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                    &workspace_len as *const _ as *const _,
+                    std::mem::size_of_val(&workspace_len),
+                ),
+                "set workspace",
+            )?;
+            check(
+                sys::cublasLtMatmulAlgoGetHeuristic(
+                    handle,
+                    self.desc,
+                    self.a,
+                    self.b,
+                    self.c,
+                    self.c,
+                    pref.0,
+                    limit as i32,
+                    results.as_mut_ptr(),
+                    &mut count,
+                ),
+                "select integer GEMM",
+            )?;
+        }
+        if count < 0 || count as usize > limit {
+            return Err("INT8 heuristic returned an invalid candidate count".into());
+        }
+        results.truncate(count as usize);
+        Ok(results)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &self,
+        rt: &CudaRuntime,
+        stream: &Arc<CudaStream>,
+        weight: &CudaSlice<i8>,
+        input: &CudaSlice<i8>,
+        output: &mut CudaSlice<i32>,
+        algo: &sys::cublasLtMatmulAlgo_t,
+        workspace: u64,
+        workspace_len: usize,
+    ) -> Result<(), String> {
+        if workspace == 0 {
+            return Err("INT8 cuBLASLt workspace allocation failed".into());
+        }
+        unsafe {
+            let (a, _a) = weight.device_ptr(stream);
+            let (b, _b) = input.device_ptr(stream);
+            let (c, _c) = output.device_ptr_mut(stream);
+            let alpha = 1i32;
+            let beta = 0i32;
+            check(
+                sys::cublasLtMatmul(
+                    rt.cublaslt_handle().ok_or("INT8 requires cuBLASLt")?,
+                    self.desc,
+                    &alpha as *const _ as *const _,
+                    a as *const _,
+                    self.a,
+                    b as *const _,
+                    self.b,
+                    &beta as *const _ as *const _,
+                    c as *const _,
+                    self.c,
+                    c as *mut _,
+                    self.c,
+                    algo,
+                    workspace as *mut _,
+                    workspace_len,
+                    stream.cu_stream() as *mut _,
+                ),
+                "integer GEMM",
+            )
+        }
+    }
+
+    fn tune(
+        &mut self,
+        rt: &CudaRuntime,
+        source_stream: &Arc<CudaStream>,
+        weight: &Int8Weight,
+        input: &CudaSlice<i8>,
+        rows: usize,
+    ) -> Result<(), String> {
+        let started = Instant::now();
+        let (m, n, k) = (rows, weight.n, weight.kp);
+        // cudarc event tracking is disabled by CudaRuntime. Finish the actual
+        // quantizer before copying its input into a private tuning stream.
+        // No inference output, scale, input or cached inference graph is used
+        // as tuning scratch; all temporary device buffers are stream-local.
+        source_stream.synchronize().map_err(|e| e.to_string())?;
+        let stream = rt.device.new_stream().map_err(|e| e.to_string())?;
+        let weights = stream.clone_dtod(&weight.data).map_err(|e| e.to_string())?;
+        let inputs = stream
+            .clone_dtod(&input.slice(0..m * k))
+            .map_err(|e| e.to_string())?;
+        let mut output = stream
+            .alloc_zeros::<i32>(m * n)
+            .map_err(|e| e.to_string())?;
+        let workspace_len = rt.cublaslt_workspace_len();
+        let workspace = stream
+            .alloc_zeros::<u8>(workspace_len)
+            .map_err(|e| e.to_string())?;
+        let (workspace_ptr, _workspace_guard) = workspace.device_ptr(&stream);
+        let production = self.algo;
+        self.run(
+            rt,
+            &stream,
+            &weights,
+            &inputs,
+            &mut output,
+            &production,
+            workspace_ptr,
+            workspace_len,
+        )?;
+        let reference = stream.clone_dtoh(&output).map_err(|e| e.to_string())?;
+        // A partial write must not accidentally pass because the preceding
+        // candidate left the same answer in the output buffer.
+        let poison: Vec<i32> = reference.iter().map(|v| !v).collect();
+        let baseline_graph = TuneGraph::capture(&stream, || {
+            self.run(
+                rt,
+                &stream,
+                &weights,
+                &inputs,
+                &mut output,
+                &production,
+                workspace_ptr,
+                workspace_len,
+            )
+        })?;
+        stream
+            .memcpy_htod(&poison, &mut output)
+            .map_err(|e| e.to_string())?;
+        baseline_graph.launch()?;
+        if stream.clone_dtoh(&output).map_err(|e| e.to_string())? != reference {
+            return Err(format!(
+                "INT8 production graph validation failed M={m} N={n} K={k}"
+            ));
+        }
+        let flags = Some(driver_sys::CUevent_flags::CU_EVENT_DEFAULT);
+        let start = rt.device.new_event(flags).map_err(|e| e.to_string())?;
+        let end = rt.device.new_event(flags).map_err(|e| e.to_string())?;
+        let measure = |graph: &TuneGraph| -> Result<f32, String> {
+            start.record(&stream).map_err(|e| e.to_string())?;
+            graph.launch()?;
+            end.record(&stream).map_err(|e| e.to_string())?;
+            end.synchronize().map_err(|e| e.to_string())?;
+            Ok(start.elapsed_ms(&end).map_err(|e| e.to_string())? * 1000.0
+                / GEMM_TUNE_REPEATS as f32)
+        };
+        let mut initial_samples = Vec::new();
+        for _ in 0..3 {
+            initial_samples.push(measure(&baseline_graph)?);
+        }
+        let (mut baseline_us, _) = timing_summary(&initial_samples)
+            .ok_or("INT8 tuning received invalid CUDA event timings")?;
+        let mut chosen_us = baseline_us;
+        let mut best_ratio = 1.0f32;
+        let mut chosen_rank = None;
+        let mut verified = 0;
+        let candidates = self.heuristics(rt, GEMM_TUNE_CANDIDATES)?;
+        for (rank, candidate) in candidates.iter().enumerate() {
+            if candidate.state != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS
+                || candidate.workspaceSize > workspace_len
+            {
+                eprintln!(
+                    "[cuda-int8-gemm-candidate] M={m} N={n} K={k} rank={rank} valid=0 reason=heuristic_state_or_workspace"
+                );
+                continue;
+            }
+            stream
+                .memcpy_htod(&poison, &mut output)
+                .map_err(|e| e.to_string())?;
+            if let Err(error) = self.run(
+                rt,
+                &stream,
+                &weights,
+                &inputs,
+                &mut output,
+                &candidate.algo,
+                workspace_ptr,
+                workspace_len,
+            ) {
+                stream.synchronize().map_err(|e| e.to_string())?;
+                eprintln!(
+                    "[cuda-int8-gemm-candidate] M={m} N={n} K={k} rank={rank} valid=0 reason=launch error={error:?}"
+                );
+                continue;
+            }
+            if stream.clone_dtoh(&output).map_err(|e| e.to_string())? != reference {
+                eprintln!(
+                    "[cuda-int8-gemm-candidate] M={m} N={n} K={k} rank={rank} valid=0 reason=int32_mismatch"
+                );
+                continue;
+            }
+            let graph = match TuneGraph::capture(&stream, || {
+                self.run(
+                    rt,
+                    &stream,
+                    &weights,
+                    &inputs,
+                    &mut output,
+                    &candidate.algo,
+                    workspace_ptr,
+                    workspace_len,
+                )
+            }) {
+                Ok(graph) => graph,
+                Err(error) => {
+                    stream.synchronize().map_err(|e| e.to_string())?;
+                    eprintln!(
+                        "[cuda-int8-gemm-candidate] M={m} N={n} K={k} rank={rank} valid=0 reason=graph error={error:?}"
+                    );
+                    continue;
+                }
+            };
+            stream
+                .memcpy_htod(&poison, &mut output)
+                .map_err(|e| e.to_string())?;
+            graph.launch()?;
+            if stream.clone_dtoh(&output).map_err(|e| e.to_string())? != reference {
+                eprintln!(
+                    "[cuda-int8-gemm-candidate] M={m} N={n} K={k} rank={rank} valid=0 reason=graph_int32_mismatch"
+                );
+                continue;
+            }
+            verified += 1;
+            let mut base_samples = Vec::new();
+            let mut candidate_samples = Vec::new();
+            let mut every_round_faster = true;
+            // Pair each candidate with the separately queried production
+            // algorithm, reducing clock drift/temperature ordering bias.
+            for _ in 0..3 {
+                let a1 = measure(&baseline_graph)?;
+                let b1 = measure(&graph)?;
+                let b2 = measure(&graph)?;
+                let a2 = measure(&baseline_graph)?;
+                base_samples.extend([a1, a2]);
+                candidate_samples.extend([b1, b2]);
+                every_round_faster &= b1 + b2 < a1 + a2;
+            }
+            let summaries = timing_summary(&base_samples).zip(timing_summary(&candidate_samples));
+            let Some(((base, base_spread), (candidate_us, candidate_spread))) = summaries else {
+                eprintln!(
+                    "[cuda-int8-gemm-candidate] M={m} N={n} K={k} rank={rank} valid=1 accepted=0 reason=invalid_timing"
+                );
+                continue;
+            };
+            let ratio = candidate_us / base;
+            let accepted = every_round_faster
+                && base_spread <= 0.05
+                && candidate_spread <= 0.05
+                && ratio <= 0.97;
+            eprintln!(
+                "[cuda-int8-gemm-candidate] M={m} N={n} K={k} rank={rank} valid=1 int32=bitwise graph=bitwise accepted={} baseline_us={base:.4} candidate_us={candidate_us:.4} baseline_spread={base_spread:.5} candidate_spread={candidate_spread:.5} every_round_faster={every_round_faster} baseline_samples_us={base_samples:?} candidate_samples_us={candidate_samples:?}",
+                u8::from(accepted)
+            );
+            if accepted && ratio < best_ratio {
+                best_ratio = ratio;
+                chosen_rank = Some(rank);
+                baseline_us = base;
+                chosen_us = candidate_us;
+            }
+        }
+        // Commit only after every candidate has completed. integer_gemm will
+        // submit the selected algorithm once to the real output afterwards.
+        if let Some(rank) = chosen_rank {
+            self.algo = candidates[rank].algo;
+        }
+        let chosen =
+            chosen_rank.map_or_else(|| "production".to_string(), |rank| format!("pool:{rank}"));
+        eprintln!(
+            "[cuda-int8-gemm-tune] M={m} N={n} K={k} chosen={chosen} baseline_us={baseline_us:.4} chosen_us={chosen_us:.4} verified={verified} returned={} elapsed_ms={:.3} repeats={GEMM_TUNE_REPEATS} rounds=3 int32=bitwise cache=workspace_shape",
+            candidates.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        Ok(())
     }
 }
 
@@ -478,46 +874,30 @@ impl Int8Workspace {
     ) -> Result<(), String> {
         let key = (rows, weight.n, weight.kp);
         if !self.plans.contains_key(&key) {
-            if super::cuda_exec::capturing() {
+            if super::cuda_exec::capturing()
+                || stream.capture_status().map_err(|e| e.to_string())?
+                    != driver_sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
+            {
                 return Err("INT8 GEMM must be warmed before graph capture".into());
             }
-            self.plans
-                .insert(key, LtPlan::new(rt, rows, weight.n, weight.kp)?);
+            let mut plan = LtPlan::new(rt, rows, weight.n, weight.kp)?;
+            if self.kernels.gemm_tune {
+                plan.tune(rt, stream, weight, &self.quantized, rows)?;
+            }
+            self.plans.insert(key, plan);
         }
         let plan = &self.plans[&key];
-        unsafe {
-            let (a, _a) = weight.data.device_ptr(stream);
-            let (b, _b) = self.quantized.device_ptr(stream);
-            let (c, _c) = self.dots.device_ptr_mut(stream);
-            let (workspace, _) = rt.cublaslt_workspace_ptr(stream);
-            if workspace == 0 {
-                return Err("INT8 cuBLASLt workspace allocation failed".into());
-            }
-            let alpha = 1i32;
-            let beta = 0i32;
-            check(
-                sys::cublasLtMatmul(
-                    rt.cublaslt_handle().ok_or("INT8 requires cuBLASLt")?,
-                    plan.desc,
-                    &alpha as *const _ as *const _,
-                    a as *const _,
-                    plan.a,
-                    b as *const _,
-                    plan.b,
-                    &beta as *const _ as *const _,
-                    c as *const _,
-                    plan.c,
-                    c as *mut _,
-                    plan.c,
-                    &plan.algo,
-                    workspace as *mut _,
-                    rt.cublaslt_workspace_len(),
-                    stream.cu_stream() as *mut _,
-                ),
-                "integer GEMM",
-            )?;
-        }
-        Ok(())
+        let (workspace, _) = rt.cublaslt_workspace_ptr(stream);
+        plan.run(
+            rt,
+            stream,
+            &weight.data,
+            &self.quantized,
+            &mut self.dots,
+            &plan.algo,
+            workspace,
+            rt.cublaslt_workspace_len(),
+        )
     }
 
     pub fn project_half(

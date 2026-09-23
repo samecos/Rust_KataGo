@@ -1,0 +1,945 @@
+{
+  "schema": "int8-gemm-study-evidence-v1",
+  "date": "2026-09-23",
+  "binary": "target/int8-gemm-study/build/release/katago-rs.exe",
+  "binary_sha256": "977fb4571471a989745c73bc31f8f8fe54666dc0d15231e02bf8f4c2cf1f42e4",
+  "candidate_environment": {
+    "KATAGO_CUDA_INT8_GEMM_TUNE": "0",
+    "KATAGO_CUDA_ATTN_TILE": "q64"
+  },
+  "baseline_environment": {
+    "KATAGO_CUDA_INT8_GEMM_TUNE": "0",
+    "KATAGO_CUDA_ATTN_TILE": "q128"
+  },
+  "hardware": "RTX 5070 Ti / Windows WDDM / driver 610.88 / CUDA 13.3.73 / cuBLASLt 130600",
+  "production_certified": false,
+  "playing_strength": "NOT_MEASURED",
+  "calibration": "none; identity",
+  "user_gate": "Maximum tested win probability absolute deviation from same-model FP16 <= 0.06",
+  "precision": "Existing W8A8 FFN, FP32 activation/reduction and half boundaries; q64 attention uses its existing reduction order",
+  "baseline": "Same binary, FFN INT8, min width 0, q128 attention, first cuBLASLt heuristic; not historical best FP16 plan",
+  "batch": 8,
+  "lanes": 1,
+  "graph": true,
+  "raw_gemm_equivalence": {
+    "status": "PASS",
+    "cases": 6,
+    "fp32_values_bitwise_identical": 68958,
+    "off_on_and_previous_release_identical": true,
+    "scope": "3 FFN profiles x B1/B8, all five raw output heads; not a FP32 precision certification"
+  },
+  "launcher_smoke": [
+    {
+      "model": "b11",
+      "input_mode": "direct-stdin",
+      "result": "PASS",
+      "gtp": "= 1 2\n\n= 2 \n\n= 3 D3\n\n= 4 \n\n",
+      "caller_environment_restored": null
+    },
+    {
+      "model": "b15",
+      "input_mode": "powershell-pipeline",
+      "result": "PASS",
+      "gtp": "= 1 2\n\n= 2 \n\n= 3 Q16\n\n= 4 \n\n",
+      "caller_environment_restored": true
+    }
+  ],
+  "profiles": {
+    "b11": {
+      "model": "models/b11c768h12nbt3tflrs-fson-silu.bin.gz",
+      "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6",
+      "validation_samples_per_window": 128,
+      "validation_semantic_positions": 16,
+      "validation_symmetries": 8,
+      "accuracy": [
+        {
+          "profile": "on-w1",
+          "compared_to": "same-window FP16",
+          "user_gate": {
+            "result": "PASS",
+            "max_abs": 0.01849573850631714,
+            "max_percentage_points": 1.8495738506317139,
+            "limit_abs": 0.06,
+            "limit_percentage_points": 6,
+            "reference": "fp16-w1",
+            "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+          },
+          "metrics": {
+            "cases": 128,
+            "policy_kl_mean": 0.000263681804385839,
+            "policy_kl_max": 0.0009914928999520587,
+            "win_probability_max_abs": 0.01849573850631714,
+            "win_probability_mean_abs": 0.0029929357301625714,
+            "score_mean_max_abs": 0.12581634521484375,
+            "score_mean_mean_abs": 0.035183349857106805,
+            "top1_matches": 118
+          },
+          "original_fp32_gate": "FAIL"
+        },
+        {
+          "profile": "on-w32",
+          "compared_to": "same-window FP16",
+          "user_gate": {
+            "result": "PASS",
+            "max_abs": 0.018035292625427246,
+            "max_percentage_points": 1.8035292625427246,
+            "limit_abs": 0.06,
+            "limit_percentage_points": 6,
+            "reference": "fp16-w32",
+            "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+          },
+          "metrics": {
+            "cases": 128,
+            "policy_kl_mean": 0.0003375665332750834,
+            "policy_kl_max": 0.00141764921825918,
+            "win_probability_max_abs": 0.018035292625427246,
+            "win_probability_mean_abs": 0.002831884069564694,
+            "score_mean_max_abs": 0.15322494506835938,
+            "score_mean_mean_abs": 0.03632286936044693,
+            "top1_matches": 118
+          },
+          "original_fp32_gate": "FAIL"
+        }
+      ],
+      "performance": {
+        "worker_c1": {
+          "capacity": 1,
+          "metric": "uncached RPC/s",
+          "samples": [
+            376.4552255404283,
+            382.4730706883162,
+            380.30781721047003,
+            374.4948730682725
+          ],
+          "accepted": true,
+          "stable": true,
+          "baseline_geomean": 375.4737699289401,
+          "candidate_geomean": 381.3889073573842,
+          "improvement": 0.015753796675500364,
+          "baseline_spread": 0.005234657703306889,
+          "candidate_spread": 0.005693423537092013,
+          "variant": "light",
+          "environment": {
+            "KATAGO_CUDA_INT8_GEMM_TUNE": "0",
+            "KATAGO_CUDA_ATTN_TILE": "q64"
+          }
+        },
+        "worker_c32": {
+          "capacity": 32,
+          "metric": "uncached RPC/s",
+          "samples": [
+            994.3176542434655,
+            1033.482381711621,
+            1037.3854361519402,
+            990.362390910833
+          ],
+          "accepted": true,
+          "stable": true,
+          "baseline_geomean": 992.3380519668732,
+          "candidate_geomean": 1035.4320698661295,
+          "improvement": 0.043426751411821174,
+          "baseline_spread": 0.0039937535683225445,
+          "candidate_spread": 0.003776604719526233,
+          "variant": "light",
+          "environment": {
+            "KATAGO_CUDA_INT8_GEMM_TUNE": "0",
+            "KATAGO_CUDA_ATTN_TILE": "q64"
+          }
+        },
+        "local": {
+          "threads": 8,
+          "metric": "actual NN rows/s",
+          "samples": [
+            816.23,
+            839.28,
+            839.33,
+            814.54
+          ],
+          "accepted": true,
+          "stable": true,
+          "baseline_geomean": 815.3845621545696,
+          "candidate_geomean": 839.3049996276682,
+          "improvement": 0.029336387495357164,
+          "baseline_spread": 0.002074790679401861,
+          "candidate_spread": 5.957487370134018e-05,
+          "visits_per_second": {
+            "samples": [
+              989.07,
+              1003.65,
+              1008.74,
+              975.89
+            ],
+            "accepted": true,
+            "stable": true,
+            "baseline_geomean": 982.4578984872585,
+            "candidate_geomean": 1006.1917814214147,
+            "improvement": 0.024157659041370128,
+            "baseline_spread": 0.01350562051050841,
+            "candidate_spread": 0.0050714890649130595
+          },
+          "nn_rows_gate_accepted": true,
+          "variant": "light",
+          "environment": {
+            "KATAGO_CUDA_INT8_GEMM_TUNE": "0",
+            "KATAGO_CUDA_ATTN_TILE": "q64"
+          }
+        }
+      },
+      "startup_seconds": {
+        "accuracy_w1_warmup": 0.3437,
+        "accuracy_w32_warmup": 0.31810000000000005
+      },
+      "local_workload": {
+        "threads": [
+          8
+        ],
+        "positions": 8,
+        "visits": 1024
+      },
+      "worker_workload": {
+        "requests": 4096,
+        "warmup_requests": 256,
+        "ownership": false
+      },
+      "variants": {
+        "full": {
+          "model": "models/b11c768h12nbt3tflrs-fson-silu.bin.gz",
+          "model_sha256": "1881600caab9e9d85a3dd6a019e9b8e7d2c237b5f984e13ed49a8645be3077c6",
+          "validation_samples_per_window": 128,
+          "validation_semantic_positions": 16,
+          "validation_symmetries": 8,
+          "accuracy": [
+            {
+              "profile": "on-w1",
+              "compared_to": "same-window FP16",
+              "user_gate": {
+                "result": "PASS",
+                "max_abs": 0.01849573850631714,
+                "max_percentage_points": 1.8495738506317139,
+                "limit_abs": 0.06,
+                "limit_percentage_points": 6,
+                "reference": "fp16-w1",
+                "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+              },
+              "metrics": {
+                "cases": 128,
+                "policy_kl_mean": 0.000263681804385839,
+                "policy_kl_max": 0.0009914928999520587,
+                "win_probability_max_abs": 0.01849573850631714,
+                "win_probability_mean_abs": 0.0029929357301625714,
+                "score_mean_max_abs": 0.12581634521484375,
+                "score_mean_mean_abs": 0.035183349857106805,
+                "top1_matches": 118
+              },
+              "original_fp32_gate": "FAIL"
+            },
+            {
+              "profile": "on-w32",
+              "compared_to": "same-window FP16",
+              "user_gate": {
+                "result": "PASS",
+                "max_abs": 0.018035292625427246,
+                "max_percentage_points": 1.8035292625427246,
+                "limit_abs": 0.06,
+                "limit_percentage_points": 6,
+                "reference": "fp16-w32",
+                "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+              },
+              "metrics": {
+                "cases": 128,
+                "policy_kl_mean": 0.0003375665332750834,
+                "policy_kl_max": 0.00141764921825918,
+                "win_probability_max_abs": 0.018035292625427246,
+                "win_probability_mean_abs": 0.002831884069564694,
+                "score_mean_max_abs": 0.15322494506835938,
+                "score_mean_mean_abs": 0.03632286936044693,
+                "top1_matches": 118
+              },
+              "original_fp32_gate": "FAIL"
+            }
+          ],
+          "performance": {
+            "worker_c1": {
+              "capacity": 1,
+              "metric": "uncached RPC/s",
+              "samples": [
+                379.26470241008093,
+                387.54592409738984,
+                388.88616877445156,
+                379.97454374644786
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 379.6194571638854,
+              "candidate_geomean": 388.2154680668823,
+              "improvement": 0.022643757428076006,
+              "baseline_spread": 0.0018716250994521566,
+              "candidate_spread": 0.003458286086179818
+            },
+            "worker_c32": {
+              "capacity": 32,
+              "metric": "uncached RPC/s",
+              "samples": [
+                991.1816533243921,
+                1027.8806348518037,
+                1027.2340409310632,
+                991.4285243329502
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 991.3050811436894,
+              "candidate_geomean": 1027.5572870325068,
+              "improvement": 0.036570180642060635,
+              "baseline_spread": 0.0002490673709809599,
+              "candidate_spread": 0.0006294514151365949
+            },
+            "local": {
+              "threads": 8,
+              "metric": "actual NN rows/s",
+              "samples": [
+                821.59,
+                848.92,
+                843.72,
+                820.12
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 820.8546709375539,
+              "candidate_geomean": 846.3160062293515,
+              "improvement": 0.031018079318128722,
+              "baseline_spread": 0.0017924206213724148,
+              "candidate_spread": 0.006163182098326336,
+              "visits_per_second": {
+                "samples": [
+                  989.44,
+                  1033.96,
+                  1014.23,
+                  984.85
+                ],
+                "accepted": true,
+                "stable": true,
+                "baseline_geomean": 987.142332189234,
+                "candidate_geomean": 1024.0474846412155,
+                "improvement": 0.037385847256833804,
+                "baseline_spread": 0.004660608214448914,
+                "candidate_spread": 0.01945318123108164
+              },
+              "nn_rows_gate_accepted": true
+            }
+          },
+          "startup_seconds": {
+            "accuracy_w1_warmup": 4.9394,
+            "accuracy_w32_warmup": 4.9745
+          },
+          "local_workload": {
+            "threads": [
+              8
+            ],
+            "positions": 8,
+            "visits": 1024
+          },
+          "worker_workload": {
+            "requests": 4096,
+            "warmup_requests": 256,
+            "ownership": false
+          }
+        },
+        "light": {
+          "accuracy": [
+            {
+              "profile": "on-w1",
+              "compared_to": "same-window FP16",
+              "user_gate": {
+                "result": "PASS",
+                "max_abs": 0.01849573850631714,
+                "max_percentage_points": 1.8495738506317139,
+                "limit_abs": 0.06,
+                "limit_percentage_points": 6,
+                "reference": "fp16-w1",
+                "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+              },
+              "metrics": {
+                "cases": 128,
+                "policy_kl_mean": 0.000263681804385839,
+                "policy_kl_max": 0.0009914928999520587,
+                "win_probability_max_abs": 0.01849573850631714,
+                "win_probability_mean_abs": 0.0029929357301625714,
+                "score_mean_max_abs": 0.12581634521484375,
+                "score_mean_mean_abs": 0.035183349857106805,
+                "top1_matches": 118
+              },
+              "original_fp32_gate": "FAIL"
+            },
+            {
+              "profile": "on-w32",
+              "compared_to": "same-window FP16",
+              "user_gate": {
+                "result": "PASS",
+                "max_abs": 0.018035292625427246,
+                "max_percentage_points": 1.8035292625427246,
+                "limit_abs": 0.06,
+                "limit_percentage_points": 6,
+                "reference": "fp16-w32",
+                "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+              },
+              "metrics": {
+                "cases": 128,
+                "policy_kl_mean": 0.0003375665332750834,
+                "policy_kl_max": 0.00141764921825918,
+                "win_probability_max_abs": 0.018035292625427246,
+                "win_probability_mean_abs": 0.002831884069564694,
+                "score_mean_max_abs": 0.15322494506835938,
+                "score_mean_mean_abs": 0.03632286936044693,
+                "top1_matches": 118
+              },
+              "original_fp32_gate": "FAIL"
+            }
+          ],
+          "performance": {
+            "worker_c1": {
+              "capacity": 1,
+              "metric": "uncached RPC/s",
+              "samples": [
+                376.4552255404283,
+                382.4730706883162,
+                380.30781721047003,
+                374.4948730682725
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 375.4737699289401,
+              "candidate_geomean": 381.3889073573842,
+              "improvement": 0.015753796675500364,
+              "baseline_spread": 0.005234657703306889,
+              "candidate_spread": 0.005693423537092013
+            },
+            "worker_c32": {
+              "capacity": 32,
+              "metric": "uncached RPC/s",
+              "samples": [
+                994.3176542434655,
+                1033.482381711621,
+                1037.3854361519402,
+                990.362390910833
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 992.3380519668732,
+              "candidate_geomean": 1035.4320698661295,
+              "improvement": 0.043426751411821174,
+              "baseline_spread": 0.0039937535683225445,
+              "candidate_spread": 0.003776604719526233
+            },
+            "local": {
+              "threads": 8,
+              "metric": "actual NN rows/s",
+              "samples": [
+                816.23,
+                839.28,
+                839.33,
+                814.54
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 815.3845621545696,
+              "candidate_geomean": 839.3049996276682,
+              "improvement": 0.029336387495357164,
+              "baseline_spread": 0.002074790679401861,
+              "candidate_spread": 5.957487370134018e-05,
+              "visits_per_second": {
+                "samples": [
+                  989.07,
+                  1003.65,
+                  1008.74,
+                  975.89
+                ],
+                "accepted": true,
+                "stable": true,
+                "baseline_geomean": 982.4578984872585,
+                "candidate_geomean": 1006.1917814214147,
+                "improvement": 0.024157659041370128,
+                "baseline_spread": 0.01350562051050841,
+                "candidate_spread": 0.0050714890649130595
+              },
+              "nn_rows_gate_accepted": true
+            }
+          },
+          "startup_seconds": {
+            "accuracy_w1_warmup": 0.3437,
+            "accuracy_w32_warmup": 0.31810000000000005
+          }
+        }
+      },
+      "recommended_accuracy_variants": [
+        "light"
+      ]
+    },
+    "b15": {
+      "model": "models/b15-ffn-pruned-a8.bin.gz",
+      "model_sha256": "3f216ee88226ee49ca826eaa5f7e1e9982ff48a96625914bfc4e5ad20ee095a7",
+      "validation_samples_per_window": 128,
+      "validation_semantic_positions": 16,
+      "validation_symmetries": 8,
+      "accuracy": [
+        {
+          "profile": "on-w1",
+          "compared_to": "same-window FP16",
+          "user_gate": {
+            "result": "PASS",
+            "max_abs": 0.01594722270965576,
+            "max_percentage_points": 1.5947222709655762,
+            "limit_abs": 0.06,
+            "limit_percentage_points": 6,
+            "reference": "fp16-w1",
+            "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+          },
+          "metrics": {
+            "cases": 128,
+            "policy_kl_mean": 0.0002642904073481157,
+            "policy_kl_max": 0.0010379344385841554,
+            "win_probability_max_abs": 0.01594722270965576,
+            "win_probability_mean_abs": 0.0013229465157564846,
+            "score_mean_max_abs": 0.05707069020718336,
+            "score_mean_mean_abs": 0.01800753745919792,
+            "top1_matches": 125
+          },
+          "original_fp32_gate": "FAIL"
+        },
+        {
+          "profile": "on-w32",
+          "compared_to": "same-window FP16",
+          "user_gate": {
+            "result": "PASS",
+            "max_abs": 0.00984799861907959,
+            "max_percentage_points": 0.984799861907959,
+            "limit_abs": 0.06,
+            "limit_percentage_points": 6,
+            "reference": "fp16-w32",
+            "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+          },
+          "metrics": {
+            "cases": 128,
+            "policy_kl_mean": 0.0002693921123329064,
+            "policy_kl_max": 0.0032700719059636577,
+            "win_probability_max_abs": 0.00984799861907959,
+            "win_probability_mean_abs": 0.0012130427021475043,
+            "score_mean_max_abs": 0.05834007263183594,
+            "score_mean_mean_abs": 0.017525810220831772,
+            "top1_matches": 125
+          },
+          "original_fp32_gate": "FAIL"
+        }
+      ],
+      "performance": {
+        "worker_c1": {
+          "capacity": 1,
+          "metric": "uncached RPC/s",
+          "samples": [
+            295.2473608482826,
+            301.1522544040135,
+            300.299243503976,
+            294.840334457201
+          ],
+          "accepted": true,
+          "stable": true,
+          "baseline_geomean": 295.04377746380874,
+          "candidate_geomean": 300.72544650734534,
+          "improvement": 0.019257037353494155,
+          "baseline_spread": 0.0013804976575912953,
+          "candidate_spread": 0.002840536293346352,
+          "variant": "light",
+          "environment": {
+            "KATAGO_CUDA_INT8_GEMM_TUNE": "0",
+            "KATAGO_CUDA_ATTN_TILE": "q64"
+          }
+        },
+        "worker_c32": {
+          "capacity": 32,
+          "metric": "uncached RPC/s",
+          "samples": [
+            709.1409181944836,
+            728.7279317395422,
+            726.6985683080154,
+            706.6434316233632
+          ],
+          "accepted": true,
+          "stable": true,
+          "baseline_geomean": 707.8910734975354,
+          "candidate_geomean": 727.712542616373,
+          "improvement": 0.028000733249684773,
+          "baseline_spread": 0.003534295316922398,
+          "candidate_spread": 0.0027925793720109393,
+          "variant": "light",
+          "environment": {
+            "KATAGO_CUDA_INT8_GEMM_TUNE": "0",
+            "KATAGO_CUDA_ATTN_TILE": "q64"
+          }
+        },
+        "local": {
+          "threads": 8,
+          "metric": "actual NN rows/s",
+          "samples": [
+            586.7,
+            598.2,
+            601.86,
+            585.9
+          ],
+          "accepted": true,
+          "stable": true,
+          "baseline_geomean": 586.2998635510672,
+          "candidate_geomean": 600.027209383041,
+          "improvement": 0.02341352383886086,
+          "baseline_spread": 0.0013654207202595803,
+          "candidate_spread": 0.006118355065195535,
+          "visits_per_second": {
+            "samples": [
+              716.88,
+              730.34,
+              729.36,
+              708.49
+            ],
+            "accepted": true,
+            "stable": true,
+            "baseline_geomean": 712.6726536075312,
+            "candidate_geomean": 729.8498355141281,
+            "improvement": 0.024102484948238745,
+            "baseline_spread": 0.011842086691414178,
+            "candidate_spread": 0.0013436437424592107
+          },
+          "nn_rows_gate_accepted": true,
+          "variant": "light",
+          "environment": {
+            "KATAGO_CUDA_INT8_GEMM_TUNE": "0",
+            "KATAGO_CUDA_ATTN_TILE": "q64"
+          }
+        }
+      },
+      "startup_seconds": {
+        "accuracy_w1_warmup": 0.45089999999999997,
+        "accuracy_w32_warmup": 0.4586
+      },
+      "local_workload": {
+        "threads": [
+          8
+        ],
+        "positions": 8,
+        "visits": 1024
+      },
+      "worker_workload": {
+        "requests": 4096,
+        "warmup_requests": 256,
+        "ownership": false
+      },
+      "variants": {
+        "full": {
+          "model": "models/b15-ffn-pruned-a8.bin.gz",
+          "model_sha256": "3f216ee88226ee49ca826eaa5f7e1e9982ff48a96625914bfc4e5ad20ee095a7",
+          "validation_samples_per_window": 128,
+          "validation_semantic_positions": 16,
+          "validation_symmetries": 8,
+          "accuracy": [
+            {
+              "profile": "on-w1",
+              "compared_to": "same-window FP16",
+              "user_gate": {
+                "result": "PASS",
+                "max_abs": 0.01594722270965576,
+                "max_percentage_points": 1.5947222709655762,
+                "limit_abs": 0.06,
+                "limit_percentage_points": 6,
+                "reference": "fp16-w1",
+                "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+              },
+              "metrics": {
+                "cases": 128,
+                "policy_kl_mean": 0.0002642904073481157,
+                "policy_kl_max": 0.0010379344385841554,
+                "win_probability_max_abs": 0.01594722270965576,
+                "win_probability_mean_abs": 0.0013229465157564846,
+                "score_mean_max_abs": 0.05707069020718336,
+                "score_mean_mean_abs": 0.01800753745919792,
+                "top1_matches": 125
+              },
+              "original_fp32_gate": "FAIL"
+            },
+            {
+              "profile": "on-w32",
+              "compared_to": "same-window FP16",
+              "user_gate": {
+                "result": "PASS",
+                "max_abs": 0.00984799861907959,
+                "max_percentage_points": 0.984799861907959,
+                "limit_abs": 0.06,
+                "limit_percentage_points": 6,
+                "reference": "fp16-w32",
+                "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+              },
+              "metrics": {
+                "cases": 128,
+                "policy_kl_mean": 0.0002694274597935304,
+                "policy_kl_max": 0.0032700719059636577,
+                "win_probability_max_abs": 0.00984799861907959,
+                "win_probability_mean_abs": 0.0012119893763156142,
+                "score_mean_max_abs": 0.05834007263183594,
+                "score_mean_mean_abs": 0.017469745620473986,
+                "top1_matches": 125
+              },
+              "original_fp32_gate": "FAIL"
+            }
+          ],
+          "performance": {
+            "worker_c1": {
+              "capacity": 1,
+              "metric": "uncached RPC/s",
+              "samples": [
+                296.87785389782647,
+                303.31873049144417,
+                302.76683800145446,
+                296.9542807347916
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 296.9160648572551,
+              "candidate_geomean": 303.04265861015335,
+              "improvement": 0.020634093193454106,
+              "baseline_spread": 0.0002574352918605083,
+              "candidate_spread": 0.00182283004847128
+            },
+            "worker_c32": {
+              "capacity": 32,
+              "metric": "uncached RPC/s",
+              "samples": [
+                709.5323277722006,
+                726.0465697188878,
+                728.4347954735247,
+                707.2326643693922
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 708.381562878757,
+              "candidate_geomean": 727.2397022422745,
+              "improvement": 0.026621442950718333,
+              "baseline_spread": 0.003251636298302163,
+              "candidate_spread": 0.0032893561573628105
+            },
+            "local": {
+              "threads": 8,
+              "metric": "actual NN rows/s",
+              "samples": [
+                589.84,
+                600.36,
+                603.37,
+                586.77
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 588.3029974426446,
+              "candidate_geomean": 601.8631183250889,
+              "improvement": 0.02304955259685948,
+              "baseline_spread": 0.005232032994188618,
+              "candidate_spread": 0.005013658471583637,
+              "visits_per_second": {
+                "samples": [
+                  713.59,
+                  727.52,
+                  739.82,
+                  718.31
+                ],
+                "accepted": true,
+                "stable": true,
+                "baseline_geomean": 715.9461103323354,
+                "candidate_geomean": 733.644223312635,
+                "improvement": 0.024719895429118566,
+                "baseline_spread": 0.006614442466962744,
+                "candidate_spread": 0.016906751704420575
+              },
+              "nn_rows_gate_accepted": true
+            }
+          },
+          "startup_seconds": {
+            "accuracy_w1_warmup": 88.22510000000001,
+            "accuracy_w32_warmup": 88.3442
+          },
+          "local_workload": {
+            "threads": [
+              8
+            ],
+            "positions": 8,
+            "visits": 1024
+          },
+          "worker_workload": {
+            "requests": 4096,
+            "warmup_requests": 256,
+            "ownership": false
+          }
+        },
+        "light": {
+          "accuracy": [
+            {
+              "profile": "on-w1",
+              "compared_to": "same-window FP16",
+              "user_gate": {
+                "result": "PASS",
+                "max_abs": 0.01594722270965576,
+                "max_percentage_points": 1.5947222709655762,
+                "limit_abs": 0.06,
+                "limit_percentage_points": 6,
+                "reference": "fp16-w1",
+                "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+              },
+              "metrics": {
+                "cases": 128,
+                "policy_kl_mean": 0.0002642904073481157,
+                "policy_kl_max": 0.0010379344385841554,
+                "win_probability_max_abs": 0.01594722270965576,
+                "win_probability_mean_abs": 0.0013229465157564846,
+                "score_mean_max_abs": 0.05707069020718336,
+                "score_mean_mean_abs": 0.01800753745919792,
+                "top1_matches": 125
+              },
+              "original_fp32_gate": "FAIL"
+            },
+            {
+              "profile": "on-w32",
+              "compared_to": "same-window FP16",
+              "user_gate": {
+                "result": "PASS",
+                "max_abs": 0.00984799861907959,
+                "max_percentage_points": 0.984799861907959,
+                "limit_abs": 0.06,
+                "limit_percentage_points": 6,
+                "reference": "fp16-w32",
+                "scope": "maximum over the 128 tested semantic/symmetry requests; not an all-position guarantee"
+              },
+              "metrics": {
+                "cases": 128,
+                "policy_kl_mean": 0.0002693921123329064,
+                "policy_kl_max": 0.0032700719059636577,
+                "win_probability_max_abs": 0.00984799861907959,
+                "win_probability_mean_abs": 0.0012130427021475043,
+                "score_mean_max_abs": 0.05834007263183594,
+                "score_mean_mean_abs": 0.017525810220831772,
+                "top1_matches": 125
+              },
+              "original_fp32_gate": "FAIL"
+            }
+          ],
+          "performance": {
+            "worker_c1": {
+              "capacity": 1,
+              "metric": "uncached RPC/s",
+              "samples": [
+                295.2473608482826,
+                301.1522544040135,
+                300.299243503976,
+                294.840334457201
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 295.04377746380874,
+              "candidate_geomean": 300.72544650734534,
+              "improvement": 0.019257037353494155,
+              "baseline_spread": 0.0013804976575912953,
+              "candidate_spread": 0.002840536293346352
+            },
+            "worker_c32": {
+              "capacity": 32,
+              "metric": "uncached RPC/s",
+              "samples": [
+                709.1409181944836,
+                728.7279317395422,
+                726.6985683080154,
+                706.6434316233632
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 707.8910734975354,
+              "candidate_geomean": 727.712542616373,
+              "improvement": 0.028000733249684773,
+              "baseline_spread": 0.003534295316922398,
+              "candidate_spread": 0.0027925793720109393
+            },
+            "local": {
+              "threads": 8,
+              "metric": "actual NN rows/s",
+              "samples": [
+                586.7,
+                598.2,
+                601.86,
+                585.9
+              ],
+              "accepted": true,
+              "stable": true,
+              "baseline_geomean": 586.2998635510672,
+              "candidate_geomean": 600.027209383041,
+              "improvement": 0.02341352383886086,
+              "baseline_spread": 0.0013654207202595803,
+              "candidate_spread": 0.006118355065195535,
+              "visits_per_second": {
+                "samples": [
+                  716.88,
+                  730.34,
+                  729.36,
+                  708.49
+                ],
+                "accepted": true,
+                "stable": true,
+                "baseline_geomean": 712.6726536075312,
+                "candidate_geomean": 729.8498355141281,
+                "improvement": 0.024102484948238745,
+                "baseline_spread": 0.011842086691414178,
+                "candidate_spread": 0.0013436437424592107
+              },
+              "nn_rows_gate_accepted": true
+            }
+          },
+          "startup_seconds": {
+            "accuracy_w1_warmup": 0.45089999999999997,
+            "accuracy_w32_warmup": 0.4586
+          }
+        }
+      },
+      "recommended_accuracy_variants": [
+        "light"
+      ]
+    }
+  },
+  "artifacts": {
+    "target/int8-gemm-study/accuracy-b11/report.json": "de081ae1e9fbc20abf552d607b05e6d984945c0152afa63075b0330e5d5f289f",
+    "target/int8-gemm-study/worker-b11/report.json": "355426dad05d155ced1e8dd575a665b46b3aec45246c6b4d37660daf79e0e166",
+    "target/int8-gemm-study/local-b11/report.json": "222d6b2d42adf7cda69760dac40a15a5f5692b5f5f6ad746b149197e05eadadc",
+    "target/int8-gemm-study/accuracy-b15/report.json": "f79cf18707654d9827f9bd55b4dfe07042e03b04280efa11da815a92368f99f5",
+    "target/int8-gemm-study/worker-b15/report.json": "4ebc6c79a561e679bf9c76b2f4d6a668343bbbb70ccbdc7b56d8c5bf69545f5e",
+    "target/int8-gemm-study/local-b15/report.json": "cd6c8d986434e66540c1d93b6929713613d41e8aab8402294d164dde4faf7378",
+    "target/int8-gemm-study/tune-test-final.log": "b79e69f53745ce22bc280bdd081bd0fb4ce0169b17e06042ea1d40b82793da5f",
+    "target/int8-gemm-study/int8-kernels-r1.log": "e90b430e9db61d6c502fbeeea4f292041f1306c5cc4cfe89a8bfb406d6f6e27a",
+    "target/int8-gemm-study/raw-equivalence.json": "e3f0207de8c0a5373ae1e3a4e2d814a99950747c9330cc451110e78ec19b6496",
+    "target/int8-gemm-study/launcher-smoke.json": "0490b6d98cc0ccd6ad39eee5037685eb406c8ce2d4a5028b01a45c5921f218e6",
+    "target/int8-gemm-study/launcher-b11.stdout": "fd89de579b26275bc63c03292aee7eb9cdb0730a4bed58bcc3b8db51440bf6ce",
+    "target/int8-gemm-study/launcher-b11.stderr": "dbdd219966a16f692b18948544d19f15336a2a8f931c9d2ac33bfc82413391b3",
+    "target/int8-gemm-study/launcher-b15.stdout": "079fddc2c7b6dddd3b4bb50d2376b4a2a55e2dfa0e7f270f82894a416790e285",
+    "target/int8-gemm-study/launcher-b15.stderr": "4703046dd75c9d5ecc6f563176aed8fbc18f31c7a07d01a9b5aecb1ac40fb1c5",
+    "target/int8-gemm-study/accuracy-light-b11/report.json": "17dd6b1e6e8f7053b036887f06b168131e95f57f67e6a443a8893d0d70a610e1",
+    "target/int8-gemm-study/worker-light-b11/report.json": "624574200f6cabe240232ec5dc4944b601da2006851eb9c1dd9ffcf533c2e323",
+    "target/int8-gemm-study/local-light-b11/report.json": "d8f50f4fb3cfbb1a93a0a4614559ea45765623366c042b9d27aeb386260b9ad0",
+    "target/int8-gemm-study/accuracy-light-b15/report.json": "1d5c39005f99bfa7a9cd1542538e18ad594f809fda70fac94c34a49864555770",
+    "target/int8-gemm-study/worker-light-b15/report.json": "40f0d7bb9e2ab0cb28629a87f5072eb722aab91f80b4b163f7fc12f4d030e71a",
+    "target/int8-gemm-study/local-light-b15/report.json": "521a817af4da9072a297160cfeeeb3c8bf20c99d55bf4410f2a301c37f9a2c13"
+  },
+  "source_sha256": {
+    "crates/kata_nn/src/backends/int8.rs": "883f3635ca31917cb73d7ce1cb245c8af67212548dc9d0556dc3cf4b253fcb39",
+    "crates/kata_nn/src/backends/cuda.rs": "a1adbffdb042c4c384937e5dd95161b7778861326936fea899a09e44319b67be",
+    "crates/kata_nn/tests/int8_gemm_tuning.rs": "89f013dc58c34367b79f59d43c178aa42372fd90d8c15c020e50e6e05f6e4db0",
+    "scripts/validate_int8_gemm_tuning.py": "1850f143b3e291aaac6f9c0d71bb00db4f68be79e5e4e49117525cdb803f5ee1",
+    "scripts/run_int8_tuned.ps1": "0db27c8a6b4a1693b8abdea93f5efb297d50a628bf640b609903357b5b444ed0"
+  },
+  "config_sha256": {
+    "configs/gtp_int8.cfg": "f77eec956d5d6b5f5a84d3fdcce2d842a2641b391da3353f980b88b6a4807f20",
+    "configs/worker_int8.cfg": "baeca2c81fc10d7b5af6bf5c828ee2e254a0ed389e427fbb37ef3b5ae235ec5f"
+  },
+  "selection_policy": "Prefer light q64 with no GEMM timing when its corresponding ABBA gates pass; otherwise use accepted full tuning. This favors startup, not a claim that light has higher steady-state throughput.",
+  "validation_total_requests": 3072,
+  "unique_validation_semantic_positions": 16,
+  "extra_experiment_reason": "Full tuning costs about 90 seconds at B15 startup; explicitly compare q64-only to retain useful speed without this cost.",
+  "launcher_revision_note": "2026-09-23: Worker startup diagnostics now print the target Server, worker ID and capacity, and clarify that the launcher does not start the Server. No inference, connection or measured configuration change."
+}
