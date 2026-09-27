@@ -1,0 +1,2848 @@
+{
+  "schema": "rust_katago_v7_19_npz_audit_v1",
+  "generated_utc": "2026-09-26T23:10:02.343450+00:00",
+  "options": {
+    "allow_missing_qvalue": true,
+    "full_board_only": true
+  },
+  "status": "ok",
+  "files_found": 24,
+  "errors": [],
+  "files_ok": 24,
+  "files_error": 0,
+  "files": [
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/02870720AC4EB817.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "403 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "0dcbd6f0047fdb02b8c91ee9bda0237aeac1440b112f643b4e3a1eed00e20c48",
+      "rows": 2418,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            2418,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            2418,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            2418,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            2418,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            2418,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            2418,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 2015,
+        "rows_with_nonfull_onboard_plane": 403,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 2418,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 2093,
+          "false": 325,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 2096,
+          "false": 322,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8668320926385442,
+        "potential_side_rows": 322,
+        "potential_side_fraction": 0.13316790736145576,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 2418,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 2015,
+        "unique_games": 30,
+        "duplicate_game_turn_rows": 269,
+        "split_rows": {
+          "train": 1543,
+          "val": 282,
+          "test": 190
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/04FAAD373808ECE4.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "691 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "639ca6958661733cd8080dfb193e58c4c6a1af80acde892f4d835c0c97f01231",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 4309,
+        "rows_with_nonfull_onboard_plane": 691,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4357,
+          "false": 643,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4358,
+          "false": 642,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8716,
+        "potential_side_rows": 642,
+        "potential_side_fraction": 0.1284,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 4309,
+        "unique_games": 64,
+        "duplicate_game_turn_rows": 558,
+        "split_rows": {
+          "train": 3343,
+          "val": 252,
+          "test": 714
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/079703AD5A40826A.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "1127 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "86ed67b1e979ae00b74cb5c296aa90171166429929127ad38c9d8f2625c4e922",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 3873,
+        "rows_with_nonfull_onboard_plane": 1127,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4331,
+          "false": 669,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4333,
+          "false": 667,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8666,
+        "potential_side_rows": 667,
+        "potential_side_fraction": 0.1334,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 3873,
+        "unique_games": 53,
+        "duplicate_game_turn_rows": 536,
+        "split_rows": {
+          "train": 3341,
+          "val": 367,
+          "test": 165
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/16A31D78D435969B.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "388 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "86b860b5145faf25390be5889cd8c7e6d587ad89bc456209660fba6158b7377b",
+      "rows": 2651,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            2651,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            2651,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            2651,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            2651,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            2651,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            2651,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 2263,
+        "rows_with_nonfull_onboard_plane": 388,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 2651,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 2298,
+          "false": 353,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 2298,
+          "false": 353,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8668427008675972,
+        "potential_side_rows": 353,
+        "potential_side_fraction": 0.13315729913240287,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 2651,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 2263,
+        "unique_games": 33,
+        "duplicate_game_turn_rows": 277,
+        "split_rows": {
+          "train": 1826,
+          "val": 143,
+          "test": 294
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/214C912A31909B4E.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "711 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "04d52dc9e9f36e8dcef7af8fd9583beedd3da9a09720867d53ab1402f222ed48",
+      "rows": 4520,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            4520,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            4520,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            4520,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            4520,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            4520,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            4520,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 3809,
+        "rows_with_nonfull_onboard_plane": 711,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 4520,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 3940,
+          "false": 580,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 3941,
+          "false": 579,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8719026548672566,
+        "potential_side_rows": 579,
+        "potential_side_fraction": 0.12809734513274337,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 4520,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 3809,
+        "unique_games": 52,
+        "duplicate_game_turn_rows": 492,
+        "split_rows": {
+          "train": 2785,
+          "val": 735,
+          "test": 289
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/2EFC4C5EC332ABC8.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "993 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "e38fc75b52d39843cf6ce46758abb66dad439e793b957fd31cd612ac5d4fa740",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 4007,
+        "rows_with_nonfull_onboard_plane": 993,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4417,
+          "false": 583,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4420,
+          "false": 580,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.884,
+        "potential_side_rows": 580,
+        "potential_side_fraction": 0.116,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 4007,
+        "unique_games": 63,
+        "duplicate_game_turn_rows": 486,
+        "split_rows": {
+          "train": 3468,
+          "val": 354,
+          "test": 185
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/40ADEAC2AF470FF0.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "620 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "845914b9b3fd14997930f9968593cb679be09ff06861e0b0d19a53da319eae53",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 4380,
+        "rows_with_nonfull_onboard_plane": 620,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4311,
+          "false": 689,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4313,
+          "false": 687,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8626,
+        "potential_side_rows": 687,
+        "potential_side_fraction": 0.1374,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 4380,
+        "unique_games": 63,
+        "duplicate_game_turn_rows": 537,
+        "split_rows": {
+          "train": 3316,
+          "val": 556,
+          "test": 508
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/4BF1A85853BD528E.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable"
+      ],
+      "sha256": "e2d0e8570a8ab76041c16a47ab785d7efd33f2ef7b27bdc07de9454eb5ed3e3d",
+      "rows": 1244,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            1244,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            1244,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            1244,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            1244,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            1244,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            1244,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 1244,
+        "rows_with_nonfull_onboard_plane": 0,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 1244,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 1060,
+          "false": 184,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 1060,
+          "false": 184,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8520900321543409,
+        "potential_side_rows": 184,
+        "potential_side_fraction": 0.14790996784565916,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 1244,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 1244,
+        "unique_games": 15,
+        "duplicate_game_turn_rows": 179,
+        "split_rows": {
+          "train": 840,
+          "val": 318,
+          "test": 86
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/6F5C0AA598662D27.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "3032 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "2883fe4b516ee11dcc6cbfae9daa5c8cf0ea2838dfef28e487135bb29e20ea4f",
+      "rows": 4903,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            4903,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            4903,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            4903,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            4903,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            4903,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            4903,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 1871,
+        "rows_with_nonfull_onboard_plane": 3032,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 4903,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4305,
+          "false": 598,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4308,
+          "false": 595,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8786457271058535,
+        "potential_side_rows": 595,
+        "potential_side_fraction": 0.12135427289414644,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 4903,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 1871,
+        "unique_games": 49,
+        "duplicate_game_turn_rows": 229,
+        "split_rows": {
+          "train": 1172,
+          "val": 429,
+          "test": 270
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/797074C1E723D6B5.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "2153 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "2763b06c50c3d82ed4f1dc34b0c0288766b4b3c4a4e25ab35d40c99b13d2b15a",
+      "rows": 3932,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            3932,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            3932,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            3932,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            3932,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            3932,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            3932,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 1779,
+        "rows_with_nonfull_onboard_plane": 2153,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 3932,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 3434,
+          "false": 498,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 3435,
+          "false": 497,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8736012207527976,
+        "potential_side_rows": 497,
+        "potential_side_fraction": 0.12639877924720244,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 3932,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 1779,
+        "unique_games": 36,
+        "duplicate_game_turn_rows": 202,
+        "split_rows": {
+          "train": 1590,
+          "val": 135,
+          "test": 54
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/7AD1967F72DC215F.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "384 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "abca4f5914c6c6d8cfdd32b32f171de113b683e1bb0255c7966a0998b3cf2d3e",
+      "rows": 4452,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            4452,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            4452,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            4452,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            4452,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            4452,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            4452,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 4068,
+        "rows_with_nonfull_onboard_plane": 384,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 4452,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 3880,
+          "false": 572,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 3881,
+          "false": 571,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8717430368373764,
+        "potential_side_rows": 571,
+        "potential_side_fraction": 0.12825696316262353,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 4452,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 4068,
+        "unique_games": 57,
+        "duplicate_game_turn_rows": 529,
+        "split_rows": {
+          "train": 3054,
+          "val": 446,
+          "test": 568
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/7B76A62E4438B222.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "1120 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "ed34f64f82517cc0b79af3a075f7b14d90890e71df899e843ab27df690366270",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 3880,
+        "rows_with_nonfull_onboard_plane": 1120,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4356,
+          "false": 644,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4357,
+          "false": 643,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8714,
+        "potential_side_rows": 643,
+        "potential_side_fraction": 0.1286,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 3880,
+        "unique_games": 54,
+        "duplicate_game_turn_rows": 503,
+        "split_rows": {
+          "train": 3146,
+          "val": 355,
+          "test": 379
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/7E7512651740D7E1.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "249 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "11de7a8ee31f5947402cf12b570178ec37ed13213733f7fdf3bd0ab5bc7c17d2",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 4751,
+        "rows_with_nonfull_onboard_plane": 249,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4405,
+          "false": 595,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4406,
+          "false": 594,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8812,
+        "potential_side_rows": 594,
+        "potential_side_fraction": 0.1188,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 4751,
+        "unique_games": 69,
+        "duplicate_game_turn_rows": 613,
+        "split_rows": {
+          "train": 3431,
+          "val": 615,
+          "test": 705
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/972DF24B5CF69893.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "627 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "ac303a523b150c07bbb41bf52a9ee208d22508bf89e38e1473760e7e694c29ca",
+      "rows": 3037,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            3037,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            3037,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            3037,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            3037,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            3037,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            3037,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 2410,
+        "rows_with_nonfull_onboard_plane": 627,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 3037,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 2673,
+          "false": 364,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 2674,
+          "false": 363,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8804741521238064,
+        "potential_side_rows": 363,
+        "potential_side_fraction": 0.11952584787619361,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 3037,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 2410,
+        "unique_games": 34,
+        "duplicate_game_turn_rows": 319,
+        "split_rows": {
+          "train": 1431,
+          "val": 343,
+          "test": 636
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/99202E744B012911.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable"
+      ],
+      "sha256": "c4d4b847aaa2dd9e2ab044322c9e4fb563f02047aa1c5d6f9804648fce04aaa7",
+      "rows": 737,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            737,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            737,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            737,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            737,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            737,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            737,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 737,
+        "rows_with_nonfull_onboard_plane": 0,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 737,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 631,
+          "false": 106,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 631,
+          "false": 106,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8561736770691994,
+        "potential_side_rows": 106,
+        "potential_side_fraction": 0.14382632293080055,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 737,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 737,
+        "unique_games": 9,
+        "duplicate_game_turn_rows": 104,
+        "split_rows": {
+          "train": 737,
+          "val": 0,
+          "test": 0
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/9EE762B6B5803826.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "1121 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "abe9f1e07aa2c846b36271f1a18190688972a143a71c79890998cb4450819900",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 3879,
+        "rows_with_nonfull_onboard_plane": 1121,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4398,
+          "false": 602,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4401,
+          "false": 599,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8802,
+        "potential_side_rows": 599,
+        "potential_side_fraction": 0.1198,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 3879,
+        "unique_games": 66,
+        "duplicate_game_turn_rows": 479,
+        "split_rows": {
+          "train": 3324,
+          "val": 247,
+          "test": 308
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/A59AD3DD942C6849.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "937 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "f5d3f20fbc247b2a508ddd7eeae044bdcc6efd429072feab199c998e74e5ec28",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 4063,
+        "rows_with_nonfull_onboard_plane": 937,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4302,
+          "false": 698,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4306,
+          "false": 694,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8612,
+        "potential_side_rows": 694,
+        "potential_side_fraction": 0.1388,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 4063,
+        "unique_games": 61,
+        "duplicate_game_turn_rows": 536,
+        "split_rows": {
+          "train": 3164,
+          "val": 321,
+          "test": 578
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/A5E09E4212C159D1.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "835 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "c1abec85c7468813e25b74e1a8b901dc00ff676658373d9578877b8b7c81c485",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 4165,
+        "rows_with_nonfull_onboard_plane": 835,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4378,
+          "false": 622,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4380,
+          "false": 620,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.876,
+        "potential_side_rows": 620,
+        "potential_side_fraction": 0.124,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 4165,
+        "unique_games": 66,
+        "duplicate_game_turn_rows": 525,
+        "split_rows": {
+          "train": 3230,
+          "val": 228,
+          "test": 707
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/B26F17E4B999B850.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "998 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "0438a1b87f3f50f64ce5d46f7249a596aa8a6bf5fa0443ca56412a3acc7366ce",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 4002,
+        "rows_with_nonfull_onboard_plane": 998,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4333,
+          "false": 667,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4336,
+          "false": 664,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8672,
+        "potential_side_rows": 664,
+        "potential_side_fraction": 0.1328,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 4002,
+        "unique_games": 67,
+        "duplicate_game_turn_rows": 537,
+        "split_rows": {
+          "train": 3002,
+          "val": 352,
+          "test": 648
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/C3578D1E4F498198.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "2643 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "eb5d407eb94110772523dad62eed2c998664d4a7a83253116c803430a98d7859",
+      "rows": 3230,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            3230,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            3230,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            3230,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            3230,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            3230,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            3230,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 587,
+        "rows_with_nonfull_onboard_plane": 2643,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 3230,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 2850,
+          "false": 380,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 2853,
+          "false": 377,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8832817337461301,
+        "potential_side_rows": 377,
+        "potential_side_fraction": 0.11671826625386997,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 3230,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 587,
+        "unique_games": 20,
+        "duplicate_game_turn_rows": 61,
+        "split_rows": {
+          "train": 519,
+          "val": 37,
+          "test": 31
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/CF8BB5E836D71C38.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "730 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "92daa1253684c3ea1b43facec9acf6481051afde24f4ee1b56cd956d0dc5c2c3",
+      "rows": 5000,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            5000,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            5000,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            5000,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            5000,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            5000,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            5000,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 4270,
+        "rows_with_nonfull_onboard_plane": 730,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 5000,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 4330,
+          "false": 670,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 4330,
+          "false": 670,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.866,
+        "potential_side_rows": 670,
+        "potential_side_fraction": 0.134,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 5000,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 4270,
+        "unique_games": 67,
+        "duplicate_game_turn_rows": 555,
+        "split_rows": {
+          "train": 3735,
+          "val": 215,
+          "test": 320
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/E673D97B16B90649.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "709 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "ce275f9f05a7e9b3ce121bacaaeabe9e571eba7ab37322174bf49d598cf6244f",
+      "rows": 3506,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            3506,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            3506,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            3506,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            3506,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            3506,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            3506,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 2797,
+        "rows_with_nonfull_onboard_plane": 709,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 3506,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 3056,
+          "false": 450,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 3060,
+          "false": 446,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8727895037079293,
+        "potential_side_rows": 446,
+        "potential_side_fraction": 0.12721049629207073,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 3506,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 2797,
+        "unique_games": 38,
+        "duplicate_game_turn_rows": 369,
+        "split_rows": {
+          "train": 2404,
+          "val": 257,
+          "test": 136
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/E7A7A31D69925109.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "472 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "f9ffa30fe0fb0013f7ce20aab0177aa6de289b9a4bf464ba95616c3bf752c7d7",
+      "rows": 3629,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            3629,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            3629,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            3629,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            3629,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            3629,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            3629,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 3157,
+        "rows_with_nonfull_onboard_plane": 472,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 3629,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 3171,
+          "false": 458,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 3173,
+          "false": 456,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8743455497382199,
+        "potential_side_rows": 456,
+        "potential_side_fraction": 0.1256544502617801,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 3629,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 3157,
+        "unique_games": 44,
+        "duplicate_game_turn_rows": 411,
+        "split_rows": {
+          "train": 2790,
+          "val": 193,
+          "test": 174
+        }
+      }
+    },
+    {
+      "path": "research/jev-clm-go/data/zzb28c512n-s8289960320-d4601883654/tdata/F3E25D3F5AC5A26C.npz",
+      "status": "ok",
+      "errors": [],
+      "warnings": [
+        "qValueTargetsNCMove is absent; Q-based candidate analysis is unavailable",
+        "180 non-19x19 rows excluded from game-level split and probe"
+      ],
+      "sha256": "4faa1d02080666e8bf2faf28e16060e6dc8b86849004e74aea57c60d1aedf702",
+      "rows": 1223,
+      "arrays": {
+        "binaryInputNCHWPacked": {
+          "shape": [
+            1223,
+            22,
+            46
+          ],
+          "dtype": "uint8"
+        },
+        "globalInputNC": {
+          "shape": [
+            1223,
+            19
+          ],
+          "dtype": "float32"
+        },
+        "policyTargetsNCMove": {
+          "shape": [
+            1223,
+            2,
+            362
+          ],
+          "dtype": "int16"
+        },
+        "globalTargetsNC": {
+          "shape": [
+            1223,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "scoreDistrN": {
+          "shape": [
+            1223,
+            842
+          ],
+          "dtype": "int8"
+        },
+        "valueTargetsNCHW": {
+          "shape": [
+            1223,
+            5,
+            19,
+            19
+          ],
+          "dtype": "int8"
+        }
+      },
+      "spatial_msb": {
+        "unpacked_positions": 361,
+        "nonzero_padding_bits": 0,
+        "full_19x19_rows": 1043,
+        "rows_with_nonfull_onboard_plane": 180,
+        "rows_with_both_stone_colors_on_one_point": 0
+      },
+      "nonfinite": {
+        "globalInputNC": 0,
+        "globalTargetsNC": 0
+      },
+      "target_schema_version_invalid_rows": 0,
+      "policy": {
+        "current_target_available": {
+          "true": 1223,
+          "false": 0,
+          "invalid": 0
+        },
+        "next_target_available": {
+          "true": 1053,
+          "false": 170,
+          "invalid": 0
+        },
+        "note": "policyTargetsNCMove stores visit targets or a uniform fallback; nonzero entries are not a legal-move mask",
+        "negative_target_values": 0,
+        "available_current_with_zero_mass": 0,
+        "available_next_with_zero_mass": 0
+      },
+      "future_boards": {
+        "target_available": {
+          "true": 1053,
+          "false": 170,
+          "invalid": 0
+        },
+        "coverage_fraction": 0.8609975470155355,
+        "potential_side_rows": 170,
+        "potential_side_fraction": 0.13900245298446443,
+        "invalid_occupancy_values": 0,
+        "unavailable_rows_with_nonzero_future_channels": 0,
+        "horizons_moves": [
+          8,
+          32
+        ],
+        "note": "both horizons share flag [33]; near the end of a game each target is clipped to the final board; [33]=0 is a side-position clue, not a definitive label"
+      },
+      "game_hash": {
+        "valid_rows": 1223,
+        "invalid_rows": 0,
+        "invalid_turn_rows": 0,
+        "selected_full_board_rows": 1043,
+        "unique_games": 17,
+        "duplicate_game_turn_rows": 124,
+        "split_rows": {
+          "train": 812,
+          "val": 63,
+          "test": 168
+        }
+      }
+    }
+  ],
+  "split": {
+    "method": "SHA-256 of original 128-bit game hash plus seed; 80/10/10 thresholds",
+    "seed": "clm-v1",
+    "valid_rows": 73359,
+    "unique_games": 1127,
+    "rows": {
+      "train": 58003,
+      "val": 7243,
+      "test": 8113
+    },
+    "games": {
+      "train": 896,
+      "val": 111,
+      "test": 120
+    },
+    "row_fraction": {
+      "train": 0.7906732643574749,
+      "val": 0.09873362504941452,
+      "test": 0.1105931105931106
+    },
+    "game_fraction": {
+      "train": 0.7950310559006211,
+      "val": 0.09849157054125998,
+      "test": 0.1064773735581189
+    },
+    "duplicate_game_turn_rows": 9430
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "schema": "rust_katago_tar_census_v1",
+  "generated_utc": "2026-09-26T23:12:48.748904+00:00",
+  "status": "ok",
+  "source": {
+    "path": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/zzb28c512n-s8289960320-d4601883654.tar",
+    "bytes": 1559855104,
+    "sha256": "45a67c46903250afc7ebfc0cbcb3fa8f811aff0ab1ce355dd982c69107c82573"
+  },
+  "tar": {
+    "members": 1630,
+    "directories": 2,
+    "regular_npz_files": 1628,
+    "npz_bytes": 1558601588
+  },
+  "npz": {
+    "files_inspected": 1628,
+    "total_rows": 6946609,
+    "full_19x19_rows": 5063978,
+    "other_board_rows": 1882631,
+    "full_19x19_fraction": 0.7289856101012738,
+    "min_rows_per_file": 189,
+    "max_rows_per_file": 5000,
+    "files_missing_qValueTargetsNCMove": 1628,
+    "keysets": [
+      {
+        "members": [
+          "binaryInputNCHWPacked",
+          "globalInputNC",
+          "globalTargetsNC",
+          "policyTargetsNCMove",
+          "scoreDistrN",
+          "valueTargetsNCHW"
+        ],
+        "file_count": 1628
+      }
+    ]
+  },
+  "error_count": 0,
+  "errors": [],
+  "note": "Only exact 19x19 packed board-mask rows are counted; no files were extracted."
+}

@@ -1,0 +1,77 @@
+{
+  "schema": "rust_katago_multitask_cache_v1",
+  "generated_utc": "2026-09-26T23:51:25.238697+00:00",
+  "source": {
+    "kind": "archive",
+    "path": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/2026-08-20npzs.tgz",
+    "bytes": 954362446,
+    "sha256": "b541cb0e499b03a9d4aaf180eab000f3855cede5281047d796ab6bf604a857dc",
+    "all_tar_members": 36254,
+    "all_npz_files": 36252,
+    "excluded_npz_files": 1800,
+    "selected_npz_files": 34452
+  },
+  "exclusion": {
+    "manifest": "research/jev-clm-go/runs/2026-09-27-aug20/sample_manifest.json",
+    "prior_sample_dir": "research/jev-clm-go/data/2026-08-20npzs",
+    "prior_game_hashes": 1800,
+    "file_disjoint": true,
+    "game_disjoint_from_prior_sample": true
+  },
+  "selection": {
+    "max_files": null,
+    "algorithm": "SHA-256 rank of archive member path or directory-relative path after prior-file exclusion",
+    "full_19x19": "packed on-board plane exactly 361 ones",
+    "policy": "globalTargetsNC[26]=1, [25]>0, target0 visit sum>0"
+  },
+  "split": {
+    "seed": "multitask-v1-aug20-2026-09-27",
+    "algorithm": "audit_npz._split_for_game: SHA-256 80/10/10 by 128-bit game hash",
+    "codes": {
+      "train": 0,
+      "val": 1,
+      "test": 2
+    },
+    "rows": {
+      "train": 1130029,
+      "val": 144866,
+      "test": 143129
+    },
+    "games": {
+      "train": 16667,
+      "val": 2124,
+      "test": 2097
+    }
+  },
+  "labels": {
+    "perspective": "player to move, called nextPlayer in KataGo writer",
+    "policy_counts": "MCTS visit target0, current position; zeros do not mean illegal",
+    "value_probs": "final/TD target globalTargetsNC[0:3] (win, loss, no-result); weight=(1-[35]) if [62]=1 else 0",
+    "score_mean": "final/TD scalar score globalTargetsNC[3]; weight=[27] if [62]=1 else 0",
+    "score_distr": "final score distribution scoreDistrN/100 at use time; weight=[27] if [62]=1 else 0; unavailable rows contain dummy bins",
+    "ownership": "final ownership valueTargetsNCHW[0], +1 for player to move; weight=[27] if [62]=1 else 0",
+    "row_weight": "globalTargetsNC[25] multiplies each head's weight",
+    "input_only": [
+      "packed",
+      "global_input"
+    ]
+  },
+  "totals": {
+    "source_rows": 2019517,
+    "nonfull_rows": 601493,
+    "invalid_policy_rows": 0,
+    "prior_game_rows": 0,
+    "selected_rows": 1418024
+  },
+  "shards": 173,
+  "cache_manifest_sha256": "b5be9f568f2bda53a9968e1acfa45ae77938d969654bc2769de38176a15fbc0a",
+  "file_hashes_in_ignored_cache_manifest": 34452,
+  "note": "Original archive and shard cache are Git-ignored; deterministic preparation can recreate them after copying the source archive.",
+  "benchmark_input_pack": {
+    "path": "benchmark-inputs.npz",
+    "sha256": "5b0b0a639273a386e944df31a7b93e3212863a87f7cbeb7a9f9c46e0cb1d342e",
+    "rows": 32,
+    "source_npz_sha256": "8639f83fa1ff3f4aa89ed1fd3b21d9f040647decdecf39e505c4a3e14aef0483",
+    "selection": "first 32 full-board rows from source NPZ, which belongs to excluded prior sample"
+  }
+}
