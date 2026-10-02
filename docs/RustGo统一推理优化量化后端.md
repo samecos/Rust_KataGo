@@ -6,7 +6,7 @@
 
 ## 2026-10-02 当前交付与启动
 
-后续用户授权：先提交当前代码到本地 Git 仓库，然后由代理校验精度。确认的门限为**同模型 FP16 基线下，白方胜率最大绝对偏差 ≤5 个百分点**，例如 50%→55% 恰好到门限。这取代此前“精度由用户完成”的任务范围；新阶段另存实际输出与报告，旧 6 个百分点结果仍是历史数据，目前未产生新 5 个百分点通过结论。
+后续用户授权：先提交当前代码到本地 Git 仓库，然后由代理校验精度。代码已本地提交为 **`bdddaa4`**，未推送。确认的门限为**同模型 FP16 基线下，白方胜率最大绝对偏差 ≤5 个百分点**，例如 50%→55% 恰好到门限。这取代此前“精度由用户完成”的任务范围；下方为新程序的独立实测结果，旧 6 个百分点结果仍是历史数据。
 
 用户确认推理优化完全放在 Rust_KataGo，授权执行。**`D:/Go/Server` 已恢复原提交 `b9873656b5d158664ae79dd12e7b71309881d54c` 的源码，工作区干净。Server 按原方式启动，不需要 `--execution-profile`。** 此前同步的 7 个文件及 2 个新增测试/示例已撤回并归档，回执为 `D:/Go/Server/target/execution-profile-rollback-r2/result.json`；旧同步与测量原件保留。
 
@@ -16,6 +16,19 @@
 
 B15/B8 新程序已连接**原 Server WorkerPool**，完成一个真实请求：模型与本地 profile 一致，completed=1、failed=0、in_flight=0，Worker 与探针由各自持有的 Popen 正常 wait，均 exit 0。实际 profile 为 `rustgo-quant-v1:1e797d8f9e7323ffb69668474aa494bd27f9523d23ca647bbbb9ab9cc8281f35`。探针使用原 Server 库，代码位于 Rust_KataGo 的 `tools/original_worker_probe`，不修改 Server 业务源码。结果在 `target/worker-original-protocol-composition-r1/result.json`。原协议没有显式 Drain ACK，incoming 是否干净半关闭仍未知，不由流结束推断进程正常退出。
 
+### B15 胜率精度校验结果
+
+最新 `0cdafa6f…` 程序在 RTX 5070 Ti 上完成四次原协议 Worker 采集。每次使用同一组 **128 盘、8,049 个留出局面**；混合配方分别对照相同程序、模型、batch 上限、C32/W32 和环境的完整全 FP16 配方，关闭缓存和随机对称。比较读取原始 protobuf 的白方胜率，单位为百分点：
+
+| 配置 | FFN 精度 | 最大偏差 | 平均偏差 | P95 | ≤5 个百分点 |
+| --- | --- | ---: | ---: | ---: | --- |
+| B15/B3 | 10 INT8 + 35 FP16 | 2.9832 | 0.0597 | 0.2880 | 通过 |
+| B15/B8 | 23 INT8 + 22 FP16 | 2.9899 | 0.0696 | 0.3312 | 通过 |
+
+四次 Worker 均实际正常 wait/exit 0、完整完成 8,049 个请求；实际 loader、Hello 和本地 ExpectedProfile 一致，输出有限值及 policy 合法性检查通过。另一次只读审计独立重读全部 **32,196 个原始结果 protobuf**，复算两组最大值完全一致，82 项来源首末稳定。实际比较和独立审计均 exit 0。
+
+计划、原始请求/输出、正常退出凭据及报告保存在 `target/worker-original-protocol-accuracy-5pp-r1`，最终结果为 `result.json`，独立复核为 `audit-result.json`。本阶段另有 4/4 次模型启动，不改变旧速度阶段的 96/96 预算、失败记录或三个锁；B11 没有新增已确认提速的配方，本次未纳入。此结果覆盖本组 NN 输出相对 FP16 的胜率门限，未测棋力、原始 FP32 或其它 GPU，也不新增本程序的速度认证。请求 batch 条件相同，物理 batch 分布未比较。
+
 ### 启动已准备的 Worker
 
 本机 RTX 5070 Ti 的两个配置已经准备好，服务地址为 `http://127.0.0.1:50051`。在 PowerShell 执行以下之一，默认前台持续运行，并使用原 Worker 重连机制：
@@ -24,11 +37,11 @@ B15/B8 新程序已连接**原 Server WorkerPool**，完成一个真实请求：
 # B15，batch 上限 8，并发容量 32；本次真实接入验证使用这组配置
 & D:\code\Rust_KataGo\target\worker-original-protocol-preparation-b8-r1\launch-worker.ps1
 
-# B15，batch 上限 3，并发容量 32；本次只完成元数据准备，未另启动模型
+# B15，batch 上限 3，并发容量 32；已完成本次完整胜率精度采集
 & D:\code\Rust_KataGo\target\worker-original-protocol-preparation-b3-r1\launch-worker.ps1
 ```
 
-脚本启动前核对程序、模型、配方、配置与环境 SHA，设置固定环境。添加 `-Once` 可限制为一次连接。B3 的本地 expected profile 为 `rustgo-quant-v1:941b0ffce0368db6e75eea7c41549257bd211e57119d63aa02226b5336ba6aac`，本次未观察它在新 Worker 中实际加载；加载时仍须通过后端身份硬门。B11 保留原后端与原配置使用方式，本轮没有发布已确认提速的 B11 新方案。
+脚本启动前核对程序、模型、配方、配置与环境 SHA，设置固定环境。添加 `-Once` 可限制为一次连接。B3 的本地 expected profile 为 `rustgo-quant-v1:941b0ffce0368db6e75eea7c41549257bd211e57119d63aa02226b5336ba6aac`，本次已在原协议 Worker 精度采集中确认实际加载，后续每次加载仍须通过后端身份硬门。B11 保留原后端与原配置使用方式，本轮没有发布已确认提速的 B11 新方案。
 
 若服务地址或 Worker ID 不同，使用新入口重新准备到一个不存在的目录，例如：
 
