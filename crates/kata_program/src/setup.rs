@@ -1619,7 +1619,7 @@ pub fn get_backend_prefixes() -> Vec<String> {
 /// `model_idx` selects the per-model key `nnBackend{i}`; `None` reads the
 /// base `nnBackend` key. Returns `Ok(None)` when the key is absent, and a
 /// normalized backend name otherwise ("dummybackend" / "trtbackend" /
-/// "cudabackend" / "eigenbackend").
+/// "cudabackend" / "cudaint8backend" / "cudaquantbackend" / "eigenbackend").
 fn select_backend_prefix(
     cfg: &ConfigParser,
     model_idx: Option<usize>,
@@ -1637,6 +1637,7 @@ fn select_backend_prefix(
         "trt" | "tensorrt" | "trtbackend" => "trtbackend".to_string(),
         "cuda" | "cudabackend" => "cudabackend".to_string(),
         "cudaint8" | "cudaint8backend" => "cudaint8backend".to_string(),
+        "cudaquant" | "cudaquantbackend" => "cudaquantbackend".to_string(),
         "eigen" | "cpu" | "eigenbackend" => "eigenbackend".to_string(),
         _ => {
             return Err(StringError::new(format!(
@@ -1862,7 +1863,10 @@ pub fn initialize_nn_evaluators(
 
         // TensorRT 后端使用 NCHW 布局（与 C++ setup 一致：TRT 强制 NCHW）。
         // 手写 CUDA 后端（cuda_exec）同样只支持 NCHW（im2col 输入 [B,22,19,19]）。
-        if matches!(backend_prefix.as_str(), "trtbackend" | "cudabackend" | "cudaint8backend") {
+        if matches!(
+            backend_prefix.as_str(),
+            "trtbackend" | "cudabackend" | "cudaint8backend" | "cudaquantbackend"
+        ) {
             inputs_use_nhwc = false;
         }
 
@@ -2150,12 +2154,15 @@ pub fn initialize_nn_evaluators(
                 nn_eval.set_backend(Arc::new(kata_nn::backends::trt::TensorRtBackend));
                 nn_eval.load_model().map_err(to_string_error)?;
             }
-            "cudabackend" | "cudaint8backend" => {
+            "cudabackend" | "cudaint8backend" | "cudaquantbackend" => {
                 #[cfg(feature = "cuda")]
                 {
-                    nn_eval.set_backend(Arc::new(if backend_prefix == "cudaint8backend" {
-                        kata_nn::backends::cuda::CudaInt8Backend
-                    } else { kata_nn::backends::cuda::CudaBackend }));
+                    let backend = match backend_prefix.as_str() {
+                        "cudaint8backend" => kata_nn::backends::cuda::CudaInt8Backend,
+                        "cudaquantbackend" => kata_nn::backends::cuda::CudaQuantBackend,
+                        _ => kata_nn::backends::cuda::CudaBackend,
+                    };
+                    nn_eval.set_backend(Arc::new(backend));
                     nn_eval.load_model().map_err(to_string_error)?;
                 }
                 #[cfg(not(feature = "cuda"))]
@@ -2344,6 +2351,26 @@ mod tests {
         assert_eq!(select_backend_prefix(&cfg, Some(2)).unwrap(), None);
         let bad = ConfigParser::from_str("nnBackend=int8-misspelled\n", false, false).unwrap();
         assert!(select_backend_prefix(&bad, None).is_err());
+    }
+
+    #[test]
+    fn test_quant_backend_selection_and_per_model_override() {
+        for name in ["cudaquant", "cudaquantbackend"] {
+            let cfg = ConfigParser::from_str(
+                &format!("nnBackend=cuda\nnnBackend1={name}\n"),
+                false,
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                select_backend_prefix(&cfg, None).unwrap().as_deref(),
+                Some("cudabackend")
+            );
+            assert_eq!(
+                select_backend_prefix(&cfg, Some(1)).unwrap().as_deref(),
+                Some("cudaquantbackend")
+            );
+        }
     }
 
     #[test]

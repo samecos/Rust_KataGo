@@ -78,6 +78,7 @@ impl Engine {
             bail!("capacity must be in [1,4096]");
         }
         let backend = selected_backend(cfg)?;
+        let expected_inference_profile = expected_inference_profile(cfg, backend)?;
         match backend {
             "trtbackend" => bail!(
                 "Go Server worker currently supports CUDA; TensorRT model-bound cache not yet validated"
@@ -149,6 +150,16 @@ impl Engine {
         if !synthetic && evaluator.model_version() <= 0 {
             bail!("real evaluator did not report a loaded model version");
         }
+        let inference_profile = evaluator.inference_profile_id();
+        if let Some(expected) = expected_inference_profile.as_deref() {
+            validate_inference_profile(expected, inference_profile.as_deref())?;
+        }
+        let execution_profile_id = loaded_execution_profile(
+            synthetic,
+            backend,
+            inference_profile.as_deref(),
+            evaluator.execution_profile_id().as_deref(),
+        )?;
         if !synthetic {
             let mut supported = false;
             evaluator.supported_rules(Rules::parse_rules("chinese")?, &mut supported);
@@ -179,8 +190,15 @@ impl Engine {
             let min_width = if cfg.contains("cudaInt8MinFfnWidth") { cfg.get_string("cudaInt8MinFfnWidth")? } else { "0".into() };
             backend_info.push_str(&format!("; precision=W8A8-mixed; int8-scope={scope}; int8-min-ffn-width={min_width}; quantization=w8a8-row-out-rne-v1"));
         }
+        if let Some(profile) = inference_profile {
+            backend_info.push_str(&format!("; inference-profile={profile}"));
+        }
+        if execution_profile_id.is_empty() {
+            backend_info.push_str("; execution-profile-mode=legacy-only; typed-identity=unavailable");
+        }
         let metadata = Metadata {
             model_sha256,
+            execution_profile_id,
             model_version: evaluator.model_version().max(0) as u32,
             engine_commit,
             backend_info,
@@ -301,10 +319,67 @@ fn selected_backend(cfg: &ConfigParser) -> Result<&'static str> {
         "dummy" | "dummybackend" => Ok("dummybackend"),
         "cuda" | "cudabackend" => Ok("cudabackend"),
         "cudaint8" | "cudaint8backend" => Ok("cudaint8backend"),
+        "cudaquant" | "cudaquantbackend" => Ok("cudaquantbackend"),
         "trt" | "tensorrt" | "trtbackend" => Ok("trtbackend"),
         "eigen" | "cpu" | "eigenbackend" => Ok("eigenbackend"),
         _ => bail!("unknown nnBackend: {value}"),
     }
+}
+
+/// Explicit local execution pin; the original v1 transport carries no profile.
+fn expected_inference_profile(cfg: &ConfigParser, backend: &str) -> Result<Option<String>> {
+    if backend != "cudaquantbackend" {
+        return Ok(None);
+    }
+    if !cfg.contains("cudaQuantExpectedProfile") {
+        bail!(
+            "cudaquantbackend worker requires explicit cudaQuantExpectedProfile matching the actual loaded profile"
+        );
+    }
+    let expected = cfg.get_string("cudaQuantExpectedProfile")?;
+    if expected.trim().is_empty() {
+        bail!("cudaQuantExpectedProfile must not be empty");
+    }
+    Ok(Some(expected))
+}
+
+pub(crate) fn loaded_execution_profile(
+    synthetic: bool,
+    backend: &str,
+    quant_profile: Option<&str>,
+    execution_profile: Option<&str>,
+) -> Result<String> {
+    if synthetic {
+        // Explicit dummy engines retain their old empty-profile CPU test mode.
+        if backend != "dummybackend" {
+            bail!("synthetic execution identity is restricted to the dummy backend");
+        }
+        return Ok(String::new());
+    }
+    let cuda = matches!(backend, "cudabackend" | "cudaint8backend" | "cudaquantbackend");
+    if !cuda && execution_profile.is_none() {
+        // Unsupported typed backends keep an explicit legacy-only namespace.
+        return Ok(String::new());
+    }
+    let actual = execution_profile.filter(|value| {
+        !value.is_empty() && value.len() <= 256 && value.bytes().all(|b| b.is_ascii_graphic())
+    }).ok_or_else(|| anyhow::anyhow!("loaded real backend did not provide a valid execution profile identity"))?;
+    if backend == "cudaquantbackend" && quant_profile != Some(actual) {
+        bail!("loaded quantized execution identity differs from the actual inference profile");
+    }
+    Ok(actual.to_owned())
+}
+
+fn validate_inference_profile(expected: &str, actual: Option<&str>) -> Result<()> {
+    let actual = actual.filter(|value| !value.is_empty()).ok_or_else(|| {
+        anyhow::anyhow!("loaded cudaquantbackend model did not report an inference profile identity")
+    })?;
+    if expected != actual {
+        bail!(
+            "cudaQuantExpectedProfile mismatch: expected {expected}, loaded {actual}; refusing worker startup"
+        );
+    }
+    Ok(())
 }
 
 struct Prepared {
@@ -578,6 +653,13 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// CPU-only feature reconstruction for explicitly bound Worker requests.
+#[path = "input_encoding.rs"]
+pub mod input_encoding;
+
+#[path = "output_postprocessing.rs"]
+pub mod output_postprocessing;
+
 #[cfg(test)]
 #[path = "input_fixture_export.rs"]
 mod input_fixture_export;
@@ -832,6 +914,58 @@ mod tests {
             ConfigParser::from_str("nnBackend=cuda\nnnBackend0=dummy\n", false, false).unwrap();
         assert_eq!(selected_backend(&cfg).unwrap(), "dummybackend");
         assert!(Engine::load("/dev/null", None, &cfg, 2, false).is_err());
+    }
+
+    #[test]
+    fn quantized_worker_requires_profile_opt_in_before_reading_model() {
+        for backend in ["cudaquant", "cudaquantbackend"] {
+            let cfg = ConfigParser::from_str(
+                &format!("nnBackend=cuda\nnnBackend0={backend}\n"),
+                false,
+                false,
+            )
+            .unwrap();
+            assert_eq!(selected_backend(&cfg).unwrap(), "cudaquantbackend");
+            let error = Engine::load("unread-model.bin.gz", None, &cfg, 2, false)
+                .err()
+                .expect("profile opt-in must precede model loading");
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires explicit cudaQuantExpectedProfile")
+            );
+        }
+        let cfg = ConfigParser::from_str("cudaQuantExpectedProfile=\"   \"\n", false, false).unwrap();
+        assert!(expected_inference_profile(&cfg, "cudaquantbackend").is_err());
+    }
+
+    #[test]
+    fn quantized_worker_matches_actual_profile_and_preserves_legacy_backends() {
+        let cfg = ConfigParser::from_str(
+            "cudaQuantExpectedProfile=recipe-v1:model-a\n",
+            false,
+            false,
+        )
+        .unwrap();
+        let expected = expected_inference_profile(&cfg, "cudaquantbackend")
+            .unwrap()
+            .unwrap();
+        assert!(validate_inference_profile(&expected, Some("recipe-v1:model-a")).is_ok());
+        for actual in [
+            None,
+            Some(""),
+            Some("recipe-v1:model-b"),
+            Some("RECIPE-v1:model-a"),
+        ] {
+            assert!(validate_inference_profile(&expected, actual).is_err());
+        }
+        for backend in ["dummybackend", "cudabackend", "cudaint8backend"] {
+            assert_eq!(expected_inference_profile(&cfg, backend).unwrap(), None);
+            assert_eq!(
+                expected_inference_profile(&ConfigParser::new(false, false), backend).unwrap(),
+                None
+            );
+        }
     }
 
     #[test]

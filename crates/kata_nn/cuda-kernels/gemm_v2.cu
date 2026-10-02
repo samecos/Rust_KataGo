@@ -118,22 +118,34 @@ __device__ __forceinline__ void v2_epilogue(
             } else {
                 float* cp = Cf + (size_t)row * N + col;
                 if (vec && col + 1 < N) {
-                    const float2 r = *reinterpret_cast<const float2*>(cp);
-                    const float2 w = {v0 + beta * r.x, v1 + beta * r.y};
-                    *reinterpret_cast<float2*>(cp) = w;
+                    // beta=0 must not read C: a previous rejected forward may
+                    // have left NaN/Inf here. Retain the explicit +0 boundary.
+                    if (beta == 0.0f) {
+                        const float2 w = {v0 + 0.0f, v1 + 0.0f};
+                        *reinterpret_cast<float2*>(cp) = w;
+                    } else {
+                        const float2 r = *reinterpret_cast<const float2*>(cp);
+                        const float2 w = {v0 + beta * r.x, v1 + beta * r.y};
+                        *reinterpret_cast<float2*>(cp) = w;
+                    }
                 } else {
-                    cp[0] = v0 + beta * cp[0];
-                    if (col + 1 < N) cp[1] = v1 + beta * cp[1];
+                    cp[0] = beta == 0.0f ? v0 + 0.0f : v0 + beta * cp[0];
+                    if (col + 1 < N) cp[1] = beta == 0.0f ? v1 + 0.0f : v1 + beta * cp[1];
                 }
                 float* cp2 = cp + 8 * N;
                 if (row + 8 < M) {
                     if (vec && col + 1 < N) {
-                        const float2 r = *reinterpret_cast<const float2*>(cp2);
-                        const float2 w = {v2 + beta * r.x, v3 + beta * r.y};
-                        *reinterpret_cast<float2*>(cp2) = w;
+                        if (beta == 0.0f) {
+                            const float2 w = {v2 + 0.0f, v3 + 0.0f};
+                            *reinterpret_cast<float2*>(cp2) = w;
+                        } else {
+                            const float2 r = *reinterpret_cast<const float2*>(cp2);
+                            const float2 w = {v2 + beta * r.x, v3 + beta * r.y};
+                            *reinterpret_cast<float2*>(cp2) = w;
+                        }
                     } else {
-                        cp2[0] = v2 + beta * cp2[0];
-                        if (col + 1 < N) cp2[1] = v3 + beta * cp2[1];
+                        cp2[0] = beta == 0.0f ? v2 + 0.0f : v2 + beta * cp2[0];
+                        if (col + 1 < N) cp2[1] = beta == 0.0f ? v3 + 0.0f : v3 + beta * cp2[1];
                     }
                 }
             }
@@ -164,16 +176,20 @@ __device__ __forceinline__ void v2_epilogue_gatesilu(
             const int col = col0 + j * 8;
             if (col >= N) continue;
             float* cp = Cf + (size_t)row * N + col;
-            // 残差（原位读 C）：r0/r1 = row 的 col..col+1。
-            const float r0 = alpha * c[i][j][0] + beta * cp[0];
-            const float r1 = alpha * c[i][j][1] + beta * cp[1];
+            // beta=0 does not read the old residual (0*NaN is still NaN).
+            const float r0 = beta == 0.0f ? alpha * c[i][j][0] + 0.0f
+                                         : alpha * c[i][j][0] + beta * cp[0];
+            const float r1 = beta == 0.0f ? alpha * c[i][j][1] + 0.0f
+                                         : alpha * c[i][j][1] + beta * cp[1];
             // r2/r3 = row+8（越界行只读不写，与原 epilogue 同规则）。
             const bool has_hi = row + 8 < M;
             float* cp2 = cp + 8 * N;
             const float r2 =
-                has_hi ? alpha * c[i][j][2] + beta * cp2[0] : 0.0f;
+                has_hi ? (beta == 0.0f ? alpha * c[i][j][2] + 0.0f
+                                       : alpha * c[i][j][2] + beta * cp2[0]) : 0.0f;
             const float r3 =
-                has_hi ? alpha * c[i][j][3] + beta * cp2[1] : 0.0f;
+                has_hi ? (beta == 0.0f ? alpha * c[i][j][3] + 0.0f
+                                       : alpha * c[i][j][3] + beta * cp2[1]) : 0.0f;
             // affine + silu（精确 expf，与 gate_silu kernel 同公式）
             float a0 = r0 * scale[col] + bias[col];
             float a1 = r1 * scale[col + 1] + bias[col + 1];
@@ -625,11 +641,11 @@ __device__ __forceinline__ void t64_hgemm_impl(
             }
         } else {
             float* cp = Cf + (size_t)row * N + col;
-            cp[0] = v0 + beta * cp[0];
-            if (col + 1 < N) cp[1] = v1 + beta * cp[1];
+            cp[0] = beta == 0.0f ? v0 + 0.0f : v0 + beta * cp[0];
+            if (col + 1 < N) cp[1] = beta == 0.0f ? v1 + 0.0f : v1 + beta * cp[1];
             if (row + 8 < M) {
-                cp[8 * N] = v2 + beta * cp[8 * N];
-                if (col + 1 < N) cp[8 * N + 1] = v3 + beta * cp[8 * N + 1];
+                cp[8 * N] = beta == 0.0f ? v2 + 0.0f : v2 + beta * cp[8 * N];
+                if (col + 1 < N) cp[8 * N + 1] = beta == 0.0f ? v3 + 0.0f : v3 + beta * cp[8 * N + 1];
             }
         }
     }
@@ -823,11 +839,11 @@ __device__ __forceinline__ void t32_hgemm_impl(
             }
         } else {
             float* cp = Cf + (size_t)row * N + col;
-            cp[0] = v0 + beta * cp[0];
-            if (col + 1 < N) cp[1] = v1 + beta * cp[1];
+            cp[0] = beta == 0.0f ? v0 + 0.0f : v0 + beta * cp[0];
+            if (col + 1 < N) cp[1] = beta == 0.0f ? v1 + 0.0f : v1 + beta * cp[1];
             if (row + 8 < M) {
-                cp[8 * N] = v2 + beta * cp[8 * N];
-                if (col + 1 < N) cp[8 * N + 1] = v3 + beta * cp[8 * N + 1];
+                cp[8 * N] = beta == 0.0f ? v2 + 0.0f : v2 + beta * cp[8 * N];
+                if (col + 1 < N) cp[8 * N + 1] = beta == 0.0f ? v3 + 0.0f : v3 + beta * cp[8 * N + 1];
             }
         }
     }
@@ -989,7 +1005,7 @@ extern "C" __global__ void splitk_reduce_kernel(float* __restrict__ C,
     for (int s = 0; s < splits; ++s) {
         acc += Cp[(size_t)s * M * N + i];
     }
-    C[i] = acc + beta * C[i];
+    C[i] = beta == 0.0f ? acc + 0.0f : acc + beta * C[i];
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,11 +1136,11 @@ __device__ __forceinline__ void t64n32_hgemm_impl(
             }
         } else {
             float* cp = Cf + (size_t)row * N + col;
-            cp[0] = v0 + beta * cp[0];
-            if (col + 1 < N) cp[1] = v1 + beta * cp[1];
+            cp[0] = beta == 0.0f ? v0 + 0.0f : v0 + beta * cp[0];
+            if (col + 1 < N) cp[1] = beta == 0.0f ? v1 + 0.0f : v1 + beta * cp[1];
             if (row + 8 < M) {
-                cp[8 * N] = v2 + beta * cp[8 * N];
-                if (col + 1 < N) cp[8 * N + 1] = v3 + beta * cp[8 * N + 1];
+                cp[8 * N] = beta == 0.0f ? v2 + 0.0f : v2 + beta * cp[8 * N];
+                if (col + 1 < N) cp[8 * N + 1] = beta == 0.0f ? v3 + 0.0f : v3 + beta * cp[8 * N + 1];
             }
         }
     }

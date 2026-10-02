@@ -7,10 +7,11 @@ rust-version.workspace = true
 
 [features]
 default = []
-cuda = ["kata_nn/cuda", "kata_program/cuda"]
+cuda = ["kata_nn/cuda", "kata_program/cuda", "dep:cudarc"]
 
 [dependencies]
 anyhow.workspace = true
+cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system", "nvrtc", "cublaslt", "cublas"] }
 kata_core = { path = "../kata_core" }
 kata_game = { path = "../kata_game" }
 kata_nn = { path = "../kata_nn" }
@@ -30,4 +31,5 @@ tonic-prost-build = "0.14"
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
+serde.workspace = true
 serde_json.workspace = true

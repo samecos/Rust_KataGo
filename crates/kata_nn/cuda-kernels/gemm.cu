@@ -110,6 +110,7 @@ hgemm_m16n8k16_kernel(const __half* __restrict__ A,
 
     // --- 写出 C（含 beta 残差；cp[1] 必须单独守卫 col+1<N，否则 N=1/奇数 N
     //     会越界写坏下一行） ---
+    // beta=0 must not read stale C; retain the explicit +0 addition boundary.
     const int c_row = m0 + lane / 4;
     const int c_col = n0 + (lane % 4) * 2;
     #pragma unroll
@@ -119,16 +120,20 @@ hgemm_m16n8k16_kernel(const __half* __restrict__ A,
             const int col = c_col + t * 16 + j * 8;
             if (c_row < M && col < N) {
                 float* cp = C + (size_t)c_row * N + col;
-                cp[0] = alpha * c[t][j][0] + beta * cp[0];
+                cp[0] = beta == 0.0f ? alpha * c[t][j][0] + 0.0f
+                                     : alpha * c[t][j][0] + beta * cp[0];
                 if (col + 1 < N) {
-                    cp[1] = alpha * c[t][j][1] + beta * cp[1];
+                    cp[1] = beta == 0.0f ? alpha * c[t][j][1] + 0.0f
+                                     : alpha * c[t][j][1] + beta * cp[1];
                 }
             }
             if (c_row + 8 < M && col < N) {
                 float* cp = C + (size_t)(c_row + 8) * N + col;
-                cp[0] = alpha * c[t][j][2] + beta * cp[0];
+                cp[0] = beta == 0.0f ? alpha * c[t][j][2] + 0.0f
+                                     : alpha * c[t][j][2] + beta * cp[0];
                 if (col + 1 < N) {
-                    cp[1] = alpha * c[t][j][3] + beta * cp[1];
+                    cp[1] = beta == 0.0f ? alpha * c[t][j][3] + 0.0f
+                                     : alpha * c[t][j][3] + beta * cp[1];
                 }
             }
         }

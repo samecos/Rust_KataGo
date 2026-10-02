@@ -439,6 +439,7 @@ mod imp {
             let key = stream.cu_stream() as usize;
             let mut workspaces = st.workspaces.lock().unwrap();
             if !workspaces.contains_key(&key) {
+                crate::backends::group_cost::setup_observed();
                 // cudarc uses stream-ordered allocation when supported, so
                 // allocate on the same stream that will consume the buffer.
                 let ws = unsafe { stream.alloc(st.workspace_len) };
@@ -558,6 +559,7 @@ mod imp {
             let algo = match cached {
                 Some(a) => Some(a),
                 None => {
+                    crate::backends::group_cost::setup_observed();
                     let cands = self.cublaslt_select_algos(st, m, n, k, false, layout)?;
                     if let Some(index) = preset_index {
                         // No timing, precision changes, or fallback: the fixed
@@ -668,6 +670,7 @@ mod imp {
             let algo = match cached {
                 Some(a) => Some(a),
                 None => {
+                    crate::backends::group_cost::setup_observed();
                     let cands = self.cublaslt_select_algos(st, m, n, k, true, layout)?;
                     if cands.is_empty() {
                         None
@@ -1755,25 +1758,186 @@ mod backend_impl {
     use crate::desc::ModelDesc;
     use kata_core::config::Config;
     use kata_core::logger::Logger;
-    use kata_game::symmetry::{copy_inputs_with_symmetry, copy_outputs_with_symmetry};
+    use kata_game::symmetry::copy_inputs_with_symmetry;
     use std::any::Any;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// CUDA 后端（手写 kernel，sm-targets.json 选择编译目标）。
-    pub struct CudaBackend { int8: bool }
+    pub struct CudaBackend { int8: bool, quantized: bool }
 
     // Preserve the existing unit-value API used by callers while selecting
     // precision explicitly through a separate backend value.
     #[allow(non_upper_case_globals)]
-    pub const CudaBackend: CudaBackend = CudaBackend { int8: false };
+    pub const CudaBackend: CudaBackend = CudaBackend { int8: false, quantized: false };
     #[allow(non_upper_case_globals)]
-    pub const CudaInt8Backend: CudaBackend = CudaBackend { int8: true };
+    pub const CudaInt8Backend: CudaBackend = CudaBackend { int8: true, quantized: false };
+    /// Immutable per-projection precision recipe on the shared CUDA executor.
+    #[allow(non_upper_case_globals)]
+    pub const CudaQuantBackend: CudaBackend = CudaBackend { int8: false, quantized: true };
 
-    fn policy_channel(policy: &[f32], row: usize, channel: usize, area: usize) -> &[f32] {
-        let stride = area + 1;
-        let offset = (row * 6 + channel) * stride;
-        &policy[offset..offset + stride]
+    /// Identify the actual loaded recipe and its execution environment. This is
+    /// not a numerical/performance certification: it is the immutable key to
+    /// which those separately collected records must refer.
+    fn quantized_profile_id(
+        model: &CudaLoadedModel,
+        execution_model: &CudaModel,
+        recipe_sha256: &str,
+        cfg: &Config,
+    ) -> Result<String, NeuralNetError> {
+        use sha2::{Digest, Sha256};
+        use std::collections::BTreeMap;
+        static EXECUTABLE_SHA: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+        let executable_sha = EXECUTABLE_SHA.get_or_init(|| {
+            let path = std::env::current_exe().map_err(|e| format!("quantized executable identity: {e}"))?;
+            crate::tactic_plan::sha256_file(&path)
+        }).as_ref().map_err(|e| NeuralNetError(e.clone()))?;
+        let device = super::device_fingerprint(&model.rt.device).map_err(NeuralNetError)?;
+        let mut tactics = BTreeMap::new();
+        for key in crate::tactic_plan::ALLOWED_TACTIC_KEYS.iter().copied().chain([
+            "KATAGO_CUDA_INT8_GEMM_TUNE", "KATAGO_CUDA_INT8_RMS_FUSION",
+        ]) {
+            let value = match crate::tactic_plan::tactic_var(key) {
+                Ok(value) => Some(value),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(_) => return Err(NeuralNetError(format!("non-Unicode tactic {key}"))),
+            };
+            tactics.insert(key, value);
+        }
+        let mut execution_config = BTreeMap::new();
+        for key in ["nnMaxBatchSize", "numNNServerThreadsPerModel", "nnUseFP16", "nnUseNHWC"] {
+            let value = if cfg.contains(key) {
+                Some(cfg.get_string(key).map_err(|e| NeuralNetError(e.to_string()))?)
+            } else { None };
+            execution_config.insert(key, value);
+        }
+        let mut driver_version = 0;
+        let status = unsafe { cudarc::driver::sys::cuDriverGetVersion(&mut driver_version) };
+        if status != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+            return Err(NeuralNetError(format!("quantized driver identity: {status:?}")));
+        }
+        let contract = serde_json::json!({
+            "schema": "rustgo-quantized-execution-v1",
+            "model_sha256": model.source_model_sha256,
+            "recipe_sha256": recipe_sha256,
+            "executable_sha256": executable_sha,
+            "backend_build": super::backend_build_fingerprint(),
+            "device": {"gpu_name": device.gpu_name, "compute_capability": device.compute_capability,
+                "sm_count": device.sm_count, "l2_cache_bytes": device.l2_cache_bytes},
+            "driver_version": driver_version,
+            "tactics": tactics,
+            "actual_execution": {
+                "mxfp8_scale_clear_fusion": execution_model.mxfp8_scale_clear_fusion_enabled(),
+            },
+            "execution_config": execution_config,
+        });
+        let bytes = serde_json::to_vec(&contract).map_err(|e| NeuralNetError(e.to_string()))?;
+        Ok(format!("rustgo-quant-v1:{}", hex::encode(Sha256::digest(&bytes))))
+    }
+
+    #[cfg(test)]
+    use crate::output_postprocess::policy_channel;
+
+    fn validate_expected_quant_profile(cfg: &Config, actual: &str) -> Result<(), NeuralNetError> {
+        if cfg.contains("cudaQuantExpectedProfile") {
+            let expected = cfg.get_string("cudaQuantExpectedProfile")
+                .map_err(|e| NeuralNetError(e.to_string()))?;
+            if expected != actual {
+                return Err(NeuralNetError(format!("quantized inference profile mismatch: expected {expected}, actual {actual}")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind facts from the successful upload and the frozen policy it uses.
+    /// This does not assert that graph capture/fallback chose one kernel for
+    /// every shape. Timing-based algorithm caches need a future observed key.
+    fn legacy_execution_profile_id(
+        model: &CudaLoadedModel, uploaded: &CudaModel, cfg: &Config,
+        nn_x_len: i32, nn_y_len: i32,
+        tactics: &std::collections::BTreeMap<String, Option<String>>,
+    ) -> Result<Option<String>, NeuralNetError> {
+        use std::collections::BTreeMap;
+        if crate::execution_identity::timing_selected(tactics)
+            || !cfg.contains("rustgoResolvedInputsUseNHWC")
+            || !cfg.contains("rustgoResolvedRequireExactNNLen") {
+            return Ok(None);
+        }
+        static EXECUTABLE_SHA: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+        let executable_sha256 = EXECUTABLE_SHA.get_or_init(|| {
+            let path = std::env::current_exe().map_err(|e| e.to_string())?;
+            crate::tactic_plan::sha256_file(&path)
+        }).as_ref().map_err(|e| NeuralNetError(e.clone()))?.clone();
+        let device = super::device_fingerprint(&model.rt.device).map_err(NeuralNetError)?;
+        let uuid = model.rt.device.uuid().map_err(|e| NeuralNetError(format!("CUDA device UUID: {e}")))?;
+        let uuid_bytes: Vec<u8> = uuid.bytes.iter().map(|b| *b as u8).collect();
+        let mut driver_version = 0;
+        let status = unsafe { cudarc::driver::sys::cuDriverGetVersion(&mut driver_version) };
+        if status != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+            return Err(NeuralNetError(format!("CUDA driver identity: {status:?}")));
+        }
+        let mut execution_config = BTreeMap::new();
+        for (key, min, max) in [("nnMaxBatchSize", 1, 65536), ("numNNServerThreadsPerModel", 1, 65536)] {
+            execution_config.insert(key.into(), cfg.get_int(key, min, max)
+                .map_err(|e| NeuralNetError(e.to_string()))?.to_string());
+        }
+        for key in ["rustgoResolvedInputsUseNHWC", "rustgoResolvedRequireExactNNLen"] {
+            execution_config.insert(key.into(), cfg.get_bool(key).map_err(|e| NeuralNetError(e.to_string()))?.to_string());
+        }
+        execution_config.insert("nn_x_len".into(), nn_x_len.to_string());
+        execution_config.insert("nn_y_len".into(), nn_y_len.to_string());
+        let contract = crate::execution_identity::LegacyCudaExecution {
+            model_sha256: model.source_model_sha256.clone(), executable_sha256,
+            backend_mode: if model.int8 { "cuda-int8" } else { "cuda-fp16" }.into(),
+            backend_build: serde_json::to_value(super::backend_build_fingerprint()).map_err(|e| NeuralNetError(e.to_string()))?,
+            device: serde_json::json!({"uuid":hex::encode(uuid_bytes), "ordinal":model.rt.device.ordinal(),
+                "gpu_name":device.gpu_name, "compute_capability":device.compute_capability,
+                "sm_count":device.sm_count, "l2_cache_bytes":device.l2_cache_bytes}),
+            driver_version, kernel_target: model.rt.target_id.clone(),
+            installed_plan_id: crate::tactic_plan::installed_plan_id().map(str::to_owned),
+            tactics: tactics.clone(), execution_config,
+            loaded_execution: serde_json::json!({
+                "gemm_layout": crate::backends::cuda_exec::selected_gemm_layout().map_err(NeuralNetError)?,
+                "int8_scope":uploaded.int8_scope().map(|s| s.name()),
+                "int8_min_ffn_width":uploaded.int8_min_ffn_width(), "int8_ffn_count":uploaded.int8_ffn_count(),
+                "int8_quantization_version": if model.int8 { Some(crate::backends::int8::QUANTIZATION_VERSION) } else { None },
+                "ffn_compact":uploaded.ffn_compact_enabled(),
+                "dual_ffn_handle_ready":uploaded.dual_ffn_handle_ready(),
+                "dual_ffn_effective":crate::backends::cuda_exec::dual_ffn_enabled(),
+                "cublaslt_available":model.rt.cublaslt_handle().is_some(),
+                "cublaslt_workspace_bytes":model.rt.cublaslt_workspace_len(),
+                "mixed_fp16_fp32":true,
+            }),
+        };
+        contract.profile_id().map(Some).map_err(NeuralNetError)
+    }
+
+    // Diagnostic only: match the same encoded request, physical batch and row
+    // across processes without exporting board contents. Disabled measurements
+    // incur only a cached flag read; traced runs are never performance evidence.
+    fn trace_completed_batch(physical_batch: usize, inputs: &[&mut NNResultBuf], host: &CudaOutputsHost) {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED.get_or_init(|| crate::tactic_plan::execution_env_var("KATAGO_CUDA_BATCH_TRACE").as_deref() == Ok("1")) { return; }
+        use sha2::{Digest, Sha256};
+        let rows = inputs.iter().enumerate().map(|(row, input)| {
+            let mut encoded = Sha256::new();
+            for values in [&input.row_spatial_buf, &input.row_global_buf] {
+                encoded.update((values.len() as u64).to_le_bytes());
+                for value in values { encoded.update(value.to_bits().to_le_bytes()); }
+            }
+            encoded.update(input.symmetry.to_le_bytes());
+            encoded.update(input.policy_optimism.to_bits().to_le_bytes());
+            let mut raw = Sha256::new();
+            for (values, width) in [(&host.policy, 6 * 362), (&host.value, 3),
+                (&host.misc, 10), (&host.moremisc, 8), (&host.ownership, 361)] {
+                for value in &values[row * width..(row + 1) * width] {
+                    raw.update(value.to_bits().to_le_bytes());
+                }
+            }
+            serde_json::json!({"row":row,"input_sha256":hex::encode(encoded.finalize()),
+                "raw_output_sha256":hex::encode(raw.finalize())})
+        }).collect::<Vec<_>>();
+        eprintln!("[cuda-batch-trace] {}", serde_json::json!({"physical_batch":physical_batch,"logical_rows":inputs.len(),"rows":rows}));
     }
 
     #[cfg(test)]
@@ -1798,7 +1962,12 @@ mod backend_impl {
 
     /// Validate and, when requested, execute the real production DualFFN
     /// capability probe before any serve thread can submit inference.
-    pub(crate) fn ensure_requested_cuda_capabilities(model: &CudaModel) -> Result<(), String> {
+    pub fn ensure_requested_cuda_capabilities(model: &CudaModel) -> Result<(), String> {
+        crate::tactic_plan::validate_mxfp8_scale_clear_fusion_execution(
+            crate::tactic_plan::mxfp8_scale_clear_fusion_requested()?,
+            model.has_mxfp8(),
+            model.mxfp8_scale_clear_fusion_enabled(),
+        )?;
         if crate::tactic_plan::tactic_enabled("KATAGO_CUDA_DUALFFN") {
             let build = super::backend_build_fingerprint();
             let probe = if build.capabilities.dual_ffn {
@@ -1816,9 +1985,9 @@ mod backend_impl {
                 let reason = probe
                     .err()
                     .unwrap_or_else(|| "model DualFFN handle creation failed".to_string());
-                if crate::tactic_plan::installed_plan_id().is_some() {
+                if crate::tactic_plan::installed_plan_id().is_some() || model.quantization_recipe_id().is_some() {
                     return Err(format!(
-                        "certified plan requests DualFFN but it is unavailable: {reason}"
+                        "precision recipe or certified plan requests DualFFN but it is unavailable: {reason}"
                     ));
                 }
                 crate::backends::cuda_exec::set_dual_ffn_runtime_ready(false);
@@ -1831,6 +2000,31 @@ mod backend_impl {
         Ok(())
     }
 
+    /// Common admission for evaluator and direct recipe benchmarks. Recipe
+    /// execution has fixed tactics; timing-based selection needs G2 artifacts.
+    pub fn validate_quantized_runtime(rt: &CudaRuntime) -> Result<(), String> {
+        crate::tactic_plan::freeze_quantized_tactics()?;
+        crate::tactic_plan::mxfp8_scale_clear_fusion_requested()?;
+        if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT_RANK").as_deref() == Ok("time")
+            || crate::tactic_plan::tactic_enabled("KATAGO_CUDA_INT8_GEMM_TUNE") {
+            return Err("cudaquantbackend v1 requires deterministic algorithm selection; runtime timing choices need a persisted execution plan".into());
+        }
+        if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0")
+            && rt.cublaslt_handle().is_none() {
+            return Err("cudaquantbackend requested cuBLASLt but its handle is unavailable".into());
+        }
+        Ok(())
+    }
+
+    /// Bind model-specific artifacts to the exact source bytes already parsed.
+    pub fn validate_quantized_model_source(model_sha256: &str) -> Result<(), String> {
+        if crate::tactic_plan::ffn_compact_requested()?
+            && model_sha256 != crate::tactic_plan::FFN_COMPACT_MODEL {
+            return Err("FFN compact source model SHA mismatch".into());
+        }
+        crate::tactic_plan::validate_outproj_model_sha(model_sha256)
+    }
+
     /// GPU weights are uploaded only after the context's certified plan is
     /// installed. The parsed graph is discarded after the successful upload.
     enum CudaModelLoadState {
@@ -1838,6 +2032,9 @@ mod backend_impl {
         Uploaded {
             model: Arc<CudaModel>,
             gemm_layout: &'static str,
+            quant_recipe_source: Option<String>,
+            inference_profile_id: Option<String>,
+            execution_profile_id: Option<String>,
         },
     }
 
@@ -1845,11 +2042,14 @@ mod backend_impl {
     /// upload, before any compute handle, warmup, graph capture or serve thread.
     pub struct CudaLoadedModel {
         int8: bool,
+        quantized: bool,
         model_desc: ModelDesc,
         model: Mutex<CudaModelLoadState>,
         rt: Arc<CudaRuntime>,
         /// 模型文件路径（cudaTacticPlan 指纹校验时算 SHA-256 用）。
         model_path: String,
+        /// Hash of the exact bytes parsed, including native compression.
+        source_model_sha256: String,
     }
 
     impl LoadedModel for CudaLoadedModel {
@@ -1859,6 +2059,18 @@ mod backend_impl {
         fn as_any(&self) -> &dyn Any {
             self
         }
+        fn inference_profile_id(&self) -> Option<String> {
+            match &*self.model.lock().ok()? {
+                CudaModelLoadState::Uploaded { inference_profile_id, .. } => inference_profile_id.clone(),
+                CudaModelLoadState::Parsed(_) => None,
+            }
+        }
+        fn execution_profile_id(&self) -> Option<String> {
+            match &*self.model.lock().ok()? {
+                CudaModelLoadState::Uploaded { execution_profile_id, .. } => execution_profile_id.clone(),
+                CudaModelLoadState::Parsed(_) => None,
+            }
+        }
     }
 
     /// 跨线程共享的推理上下文：模型 + 运行时 + 棋盘尺寸。
@@ -1867,6 +2079,8 @@ mod backend_impl {
         rt: Arc<CudaRuntime>,
         nn_x_len: i32,
         nn_y_len: i32,
+        quant_max_batch_size: Option<i32>,
+        legacy_handle_identity: Option<(i32, bool)>,
     }
 
     impl ComputeContext for CudaComputeContext {
@@ -1880,6 +2094,8 @@ mod backend_impl {
     struct CudaSlot {
         /// 已捕获图；None = capture 失败降级直连。
         graph: Option<cudarc::driver::CudaGraph>,
+        /// Graph drops first; keep its MXFP8 descriptors, weights and runtime alive.
+        _quantized_graph_resources: Option<crate::backends::mxfp8::Mxfp8GraphResources>,
         in_spatial: cudarc::driver::CudaSlice<f32>,
         in_global: cudarc::driver::CudaSlice<f32>,
         in_sp_pin: cudarc::driver::PinnedHostSlice<f32>,
@@ -1889,6 +2105,8 @@ mod backend_impl {
         out_misc_pin: cudarc::driver::PinnedHostSlice<f32>,
         out_moremisc_pin: cudarc::driver::PinnedHostSlice<f32>,
         out_own_pin: cudarc::driver::PinnedHostSlice<f32>,
+        /// Per-submission snapshot: the next forward can reset the shared status.
+        quantized_status_pin: Option<cudarc::driver::PinnedHostSlice<u32>>,
         /// 前向完成事件（record 在 dtoh 后）。
         done_event: Option<cudarc::driver::CudaEvent>,
     }
@@ -1930,6 +2148,26 @@ mod backend_impl {
         inputs_use_nhwc: bool,
         /// B16 凑满：n>1 时物理 batch 补齐到 max_batch_size（尾批复制）。
         pad_to_max: bool,
+    }
+
+    impl Drop for CudaComputeHandle {
+        fn drop(&mut self) {
+            // A caller may cancel after submit without finish and release the
+            // loaded model/context first. Synchronize before Rust drops ANY
+            // fields: `model` owns non-MX weights uploaded on another stream,
+            // whereas each graph token only retains its MXFP8 resources.
+            // Graph destruction itself does not wait for an in-flight launch.
+            if let Err(error) = self.stream.synchronize() {
+                // Drop cannot return an error, and even stderr failure must not
+                // panic during unwinding. Do not imply pending outputs passed
+                // the normal completion/status validation on this error path.
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "[cuda-handle-drop] owner-stream synchronization failed: {error}; outstanding outputs were not validated"
+                );
+            }
+        }
     }
 
     impl ComputeHandle for CudaComputeHandle {
@@ -2039,7 +2277,7 @@ mod backend_impl {
                         .synchronize()
                         .map_err(|e| NeuralNetError(format!("pre-capture sync: {e}")))?;
                 }
-                let mut ws = CudaWorkspace::new(stream, &h.model, phys_batch)
+                let mut ws = CudaWorkspace::new_with_runtime(h.rt.clone(), stream, &h.model, phys_batch)
                     .map_err(|e| NeuralNetError(format!("CUDA workspace alloc failed: {e}")))?;
                 let mut slot_vec: Vec<CudaSlot> = Vec::with_capacity(2);
                 for slot_idx in 0..2 {
@@ -2066,6 +2304,12 @@ mod backend_impl {
                     let out_own_pin =
                         unsafe { h.rt.device.alloc_pinned::<f32>(phys_batch * policy_area) }
                             .map_err(|e| NeuralNetError(format!("pinned out_own: {e}")))?;
+                    let quantized_status_pin = if ws.has_mxfp8() {
+                        Some(unsafe { h.rt.device.alloc_pinned::<u32>(crate::backends::mxfp8::STATUS_WORDS) }
+                            .map_err(|e| NeuralNetError(format!("pinned quantized status: {e}")))?)
+                    } else {
+                        None
+                    };
                     // 完成事件无条件创建：直连（NOGRAPH）模式下流水线
                     // 仍需要事件做完成门控（finish/query 不再退化）。
                     let done_event = Some(
@@ -2101,6 +2345,8 @@ mod backend_impl {
                             h.model
                                 .apply(&h.rt, stream, &mut ws, &in_spatial, &in_global)
                                 .map_err(|e| NeuralNetError(format!("pre-capture warm: {e}")))?;
+                            ws.complete_quantized_warmup()
+                                .map_err(|e| NeuralNetError(format!("pre-capture quantized validation: {e}")))?;
                             h.rt.device.synchronize().map_err(|e| {
                                 NeuralNetError(format!("pre-capture warm sync: {e}"))
                             })?;
@@ -2116,8 +2362,9 @@ mod backend_impl {
                         // 使 capture 失效——serve=2 双流时双方 capture 互相打挂
                         // (Linux 亦然)。RELAXED 允许他流并发;本后端每 handle
                         // 单流、apply 内无跨流依赖,捕获内容不变,安全。
-                        // 若 RELAXED 仍失效(驱动差异)则自动回退 nograph(下方
-                        // match 分支),行为与旧版一致。
+                        // Legacy backends may fall back to direct launch. A
+                        // quantized profile binds this launch choice and fails
+                        // closed if its requested Graph cannot be captured.
                         cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED,
                     ).map_err(|e| NeuralNetError(format!("begin_capture: {e}")))?;
                                 h.model
@@ -2139,6 +2386,11 @@ mod backend_impl {
                             Ok(g) => Some(g),
                             Err(e) => {
                                 let _ = stream.end_capture(graph_instantiate_flags());
+                                if h.model.quantization_recipe_id().is_some() {
+                                    return Err(NeuralNetError(format!(
+                                        "quantized profile requires CUDA Graph; capture failed: {e}"
+                                    )));
+                                }
                                 eprintln!(
                                     "WARNING: CUDA graph capture failed ({e}); falling back to direct launch path"
                                 );
@@ -2152,6 +2404,8 @@ mod backend_impl {
                     }
                     slot_vec.push(CudaSlot {
                         graph,
+                        _quantized_graph_resources: ws.quantized_graph_resources()
+                            .map_err(|e| NeuralNetError(format!("quantized graph resources: {e}")))?,
                         in_spatial,
                         in_global,
                         in_sp_pin,
@@ -2161,6 +2415,7 @@ mod backend_impl {
                         out_misc_pin,
                         out_moremisc_pin,
                         out_own_pin,
+                        quantized_status_pin,
                         done_event,
                     });
                 }
@@ -2238,6 +2493,10 @@ mod backend_impl {
             stream
                 .memcpy_dtoh(&st.ws.out_ownership, &mut sl.out_own_pin)
                 .map_err(|e| NeuralNetError(format!("dtoh ownership: {e}")))?;
+            if let Some(status) = &mut sl.quantized_status_pin {
+                st.ws.enqueue_quantized_status_copy(status)
+                    .map_err(|e| NeuralNetError(format!("quantized status snapshot: {e}")))?;
+            }
             if let Some(ev) = sl.done_event.as_ref() {
                 ev.record(stream)
                     .map_err(|e| NeuralNetError(format!("event record: {e}")))?;
@@ -2258,7 +2517,6 @@ mod backend_impl {
         ) -> Result<(), NeuralNetError> {
             let nn_x_len = h.nn_x_len;
             let nn_y_len = h.nn_y_len;
-            let policy_area = (nn_x_len * nn_y_len) as usize;
             let slot = token & 1;
             // 状态按物理 batch（token 高位）索引——B16 凑满时 n 是逻辑行数,
             // 与 phys_batch 不同,必须用 token 解码而非 n。
@@ -2281,6 +2539,13 @@ mod backend_impl {
                     .stream
                     .synchronize()
                     .map_err(|e| NeuralNetError(format!("sync: {e}")))?,
+            }
+            // Reject the entire submitted batch before decoding or exposing any output.
+            // Never read shared workspace status here: another slot may already run.
+            if let Some(status) = &sl.quantized_status_pin {
+                CudaWorkspace::validate_quantized_status(status.as_slice()
+                    .map_err(|e| NeuralNetError(format!("sync quantized status: {e}")))?)
+                    .map_err(NeuralNetError)?;
             }
             let host = CudaOutputsHost {
                 policy: sl
@@ -2311,83 +2576,14 @@ mod backend_impl {
             };
             drop(g);
 
-            let mut tmp_policy_base = vec![0.0f32; policy_area];
-            let mut tmp_policy_opt = vec![0.0f32; policy_area];
-            let mut tmp_ownership = vec![0.0f32; policy_area];
-            for i in 0..n {
-                let sym_idx = input_bufs[i].symmetry;
-                // copy_outputs_with_symmetry already reverses the input
-                // transform. Passing invert(sym_idx) reverses it twice for
-                // quarter-turn symmetries 5 and 6.
-                let base_channel = policy_channel(&host.policy, i, 0, policy_area);
-                let opt_channel = policy_channel(&host.policy, i, 5, policy_area);
-                let base_src = &base_channel[..policy_area];
-                // policy_concat_kernel writes [B,6,S+1]: each channel has its
-                // own trailing pass logit. Include it in the channel stride.
-                let opt_src = &opt_channel[..policy_area];
-                if sym_idx != 0 {
-                    copy_outputs_with_symmetry(
-                        base_src,
-                        &mut tmp_policy_base,
-                        1,
-                        nn_y_len,
-                        nn_x_len,
-                        sym_idx,
-                    );
-                    copy_outputs_with_symmetry(
-                        opt_src,
-                        &mut tmp_policy_opt,
-                        1,
-                        nn_y_len,
-                        nn_x_len,
-                        sym_idx,
-                    );
-                } else {
-                    tmp_policy_base.copy_from_slice(base_src);
-                    tmp_policy_opt.copy_from_slice(opt_src);
-                }
-                let optimism = input_bufs[i].policy_optimism as f32;
-                for pos in 0..policy_area {
-                    outputs[i].policy_probs[pos] = tmp_policy_base[pos]
-                        + (tmp_policy_opt[pos] - tmp_policy_base[pos]) * optimism;
-                }
-                let base_pass = base_channel[policy_area];
-                let opt_pass = opt_channel[policy_area];
-                outputs[i].policy_probs[policy_area] =
-                    base_pass + (opt_pass - base_pass) * optimism;
-                let v_off = i * 3;
-                outputs[i].white_win_prob = host.value[v_off];
-                outputs[i].white_loss_prob = host.value[v_off + 1];
-                outputs[i].white_no_result_prob = host.value[v_off + 2];
-                let m_off = i * 10;
-                outputs[i].white_score_mean = host.misc[m_off];
-                outputs[i].white_score_mean_sq = host.misc[m_off + 1];
-                outputs[i].white_lead = host.misc[m_off + 2];
-                outputs[i].var_time_left = host.misc[m_off + 3];
-                let mm_off = i * 8;
-                outputs[i].shortterm_winloss_error = host.moremisc[mm_off];
-                outputs[i].shortterm_score_error = host.moremisc[mm_off + 1];
-                if input_bufs[i].include_owner_map {
-                    let o_off = i * policy_area;
-                    let src = &host.ownership[o_off..o_off + policy_area];
-                    if sym_idx != 0 {
-                        copy_outputs_with_symmetry(
-                            src,
-                            &mut tmp_ownership,
-                            1,
-                            nn_y_len,
-                            nn_x_len,
-                            sym_idx,
-                        );
-                    } else {
-                        tmp_ownership.copy_from_slice(src);
-                    }
-                    outputs[i].white_owner_map = Some(tmp_ownership.clone().into_boxed_slice());
-                }
-                outputs[i].nn_x_len = nn_x_len;
-                outputs[i].nn_y_len = nn_y_len;
-                outputs[i].policy_optimism_used = input_bufs[i].policy_optimism as f32;
-            }
+            trace_completed_batch(phys_batch, &input_bufs[..n], &host);
+
+            crate::output_postprocess::decode_raw_outputs(
+                nn_x_len, nn_y_len, n, input_bufs,
+                crate::output_postprocess::RawHeads { policy: &host.policy, value: &host.value,
+                    misc: &host.misc, moremisc: &host.moremisc, ownership: &host.ownership },
+                outputs,
+            );
             Ok(())
         }
 
@@ -2416,7 +2612,7 @@ mod backend_impl {
         fn global_cleanup(&self) {}
 
         fn print_devices(&self) {
-            println!("CUDA backend precision={} (SM120-first)", if self.int8 { "W8A8 mixed" } else { "FP16 mixed" });
+            println!("CUDA backend precision={} (SM120-first)", if self.quantized { "per-projection recipe" } else if self.int8 { "W8A8 mixed" } else { "FP16 mixed" });
         }
 
         fn load_model_file(
@@ -2426,12 +2622,12 @@ mod backend_impl {
         ) -> Result<Box<dyn LoadedModel>, NeuralNetError> {
             let bytes = std::fs::read(file)
                 .map_err(|e| NeuralNetError(format!("could not read {file}: {e}")))?;
+            use sha2::{Digest, Sha256};
+            let source_model_sha256 = hex::encode(Sha256::digest(&bytes));
             if !expected_sha256.is_empty() {
-                use sha2::{Digest, Sha256};
-                let actual = hex::encode(Sha256::digest(&bytes));
-                if !actual.eq_ignore_ascii_case(expected_sha256) {
+                if !source_model_sha256.eq_ignore_ascii_case(expected_sha256) {
                     return Err(NeuralNetError(format!(
-                        "model SHA256 mismatch for {file}: expected {expected_sha256}, got {actual}"
+                        "model SHA256 mismatch for {file}: expected {expected_sha256}, got {source_model_sha256}"
                     )));
                 }
             }
@@ -2473,10 +2669,12 @@ mod backend_impl {
             // Retain the parsed graph and defer all weight uploads instead.
             Ok(Box::new(CudaLoadedModel {
                 int8: self.int8,
+                quantized: self.quantized,
                 model_desc,
                 model: Mutex::new(CudaModelLoadState::Parsed(graph)),
                 rt,
                 model_path: file.to_string(),
+                source_model_sha256,
             }))
         }
 
@@ -2495,9 +2693,47 @@ mod backend_impl {
                 .as_any()
                 .downcast_ref::<CudaLoadedModel>()
                 .ok_or_else(|| NeuralNetError("Wrong loaded model type".to_string()))?;
-            if model.int8 != self.int8 {
+            if model.int8 != self.int8 || model.quantized != self.quantized {
                 return Err(NeuralNetError("CUDA loaded model/backend precision mismatch".into()));
             }
+            let quant_recipe_path = if self.quantized {
+                for key in ["cudaTacticPlan", "cudaInt8Scope", "cudaInt8MinFfnWidth"] {
+                    if cfg.contains(key) {
+                        return Err(NeuralNetError(format!("cudaquantbackend uses cudaQuantPlan; incompatible option {key}")));
+                    }
+                }
+                if crate::tactic_plan::installed_plan_id().is_some() {
+                    return Err(NeuralNetError("cudaquantbackend cannot inherit an installed FP16 tactic plan; use a separate process".into()));
+                }
+                validate_quantized_runtime(&model.rt).map_err(NeuralNetError)?;
+                if cfg.contains("cudaQuantPlan") {
+                    let path = cfg.get_string("cudaQuantPlan").map_err(|e| NeuralNetError(e.to_string()))?;
+                    if path.trim().is_empty() {
+                        return Err(NeuralNetError("cudaQuantPlan must not be empty; omit it for the FP16 base recipe".into()));
+                    }
+                    Some(std::path::PathBuf::from(path))
+                } else { None }
+            } else {
+                if cfg.contains("cudaQuantPlan") || cfg.contains("cudaQuantExpectedProfile") {
+                    return Err(NeuralNetError("cudaQuantPlan/cudaQuantExpectedProfile requires nnBackend=cudaquantbackend".into()));
+                }
+                None
+            };
+            let quant_max_batch_size = if self.quantized {
+                Some(cfg.get_int("nnMaxBatchSize", 1, 65536).map_err(|e| NeuralNetError(format!("cudaquantbackend requires resolved batch capacity: {e}")))?)
+            } else { None };
+            // Hash and resolve the same bytes, even if an external publisher
+            // replaces the recipe path during context creation.
+            let quant_recipe_bytes = quant_recipe_path.as_ref().map(|path| {
+                std::fs::read(path).map_err(|e| NeuralNetError(format!("cudaQuantPlan {}: {e}", path.display())))
+            }).transpose()?;
+            let quant_recipe_source = if self.quantized {
+                use sha2::{Digest, Sha256};
+                Some(match &quant_recipe_bytes {
+                    Some(bytes) => hex::encode(Sha256::digest(bytes)),
+                    None => "builtin-fp16-v1".into(),
+                })
+            } else { None };
             let int8_scope = if self.int8 {
                 if cfg.contains("cudaTacticPlan") {
                     return Err(NeuralNetError("cudaint8backend cannot reuse a FP16 cudaTacticPlan; omit it and validate the quantized model separately".into()));
@@ -2539,15 +2775,24 @@ mod backend_impl {
                     crate::tactic_plan::installed_plan_id().unwrap_or("?")
                 ));
             }
+            let legacy_tactics = if self.quantized { None } else {
+                Some(crate::tactic_plan::freeze_legacy_tactics().map_err(NeuralNetError)?)
+            };
+            let legacy_handle_identity = if !self.quantized && cfg.contains("rustgoResolvedInputsUseNHWC") {
+                Some((cfg.get_int("nnMaxBatchSize", 1, 65536).map_err(|e| NeuralNetError(e.to_string()))?,
+                    cfg.get_bool("rustgoResolvedInputsUseNHWC").map_err(|e| NeuralNetError(e.to_string()))?))
+            } else { None };
             model
                 .rt
                 .validate_residual_algo_request()
                 .map_err(NeuralNetError)?;
-            if crate::tactic_plan::ffn_compact_requested().map_err(NeuralNetError)? {
+            if self.quantized {
+                validate_quantized_model_source(&model.source_model_sha256).map_err(NeuralNetError)?;
+            } else if crate::tactic_plan::ffn_compact_requested().map_err(NeuralNetError)? {
                 let sha = crate::tactic_plan::sha256_file(std::path::Path::new(&model.model_path)).map_err(NeuralNetError)?;
                 if sha != crate::tactic_plan::FFN_COMPACT_MODEL { return Err(NeuralNetError("FFN compact source model SHA mismatch".into())); }
             }
-            if crate::tactic_plan::outproj_n128_requested().map_err(NeuralNetError)? {
+            if !self.quantized && crate::tactic_plan::outproj_n128_requested().map_err(NeuralNetError)? {
                 let sha=crate::tactic_plan::sha256_file(std::path::Path::new(&model.model_path)).map_err(NeuralNetError)?;
                 crate::tactic_plan::validate_outproj_model_sha(&sha).map_err(NeuralNetError)?;
             }
@@ -2561,9 +2806,32 @@ mod backend_impl {
                     CudaModelLoadState::Uploaded {
                         model,
                         gemm_layout: uploaded_layout,
+                        quant_recipe_source: uploaded_source,
+                        inference_profile_id,
+                        execution_profile_id,
                     } => {
-                        if model.int8_scope() != int8_scope || model.int8_min_ffn_width() != int8_min_ffn_width {
+                        if !self.quantized && (model.int8_scope() != int8_scope || model.int8_min_ffn_width() != int8_min_ffn_width) {
                             return Err(NeuralNetError("CUDA quantization scope/layer selection changed after upload; reload the model".into()));
+                        }
+                        if *uploaded_source != quant_recipe_source {
+                            return Err(NeuralNetError("CUDA quantization recipe changed after upload; reload the model".into()));
+                        }
+                        if self.quantized {
+                            let recipe_id = model.quantization_recipe_id().ok_or_else(|| NeuralNetError("missing uploaded quantization recipe identity".into()))?;
+                            // The outer loaded model is shadowed by this match binding.
+                            let loaded = loaded_model.as_any().downcast_ref::<CudaLoadedModel>().unwrap();
+                            let actual = quantized_profile_id(loaded, model, recipe_id, cfg)?;
+                            validate_expected_quant_profile(cfg, &actual)?;
+                            if inference_profile_id.as_deref() != Some(actual.as_str()) {
+                                return Err(NeuralNetError("CUDA quantized execution options changed after upload; reload in a new process".into()));
+                            }
+                        }
+                        if let Some(tactics) = &legacy_tactics {
+                            let loaded = loaded_model.as_any().downcast_ref::<CudaLoadedModel>().unwrap();
+                            let actual = legacy_execution_profile_id(loaded, model, cfg, nn_x_len, nn_y_len, tactics)?;
+                            if execution_profile_id != &actual {
+                                return Err(NeuralNetError("CUDA legacy execution options changed after upload; reload in a new process".into()));
+                            }
                         }
                         if *uploaded_layout != gemm_layout {
                             return Err(NeuralNetError(format!(
@@ -2578,11 +2846,22 @@ mod backend_impl {
                         let load_stream = model.rt.device.new_stream().map_err(|e| {
                             NeuralNetError(format!("CUDA stream create failed: {e}"))
                         })?;
-                        let uploaded =
-                            Arc::new(match int8_scope {
-                                Some(scope) => CudaModel::load_int8_selective(graph, &model.rt, &load_stream, scope, int8_min_ffn_width),
-                                None => CudaModel::load(graph, &model.rt, &load_stream),
-                            }.map_err(
+                        let recipe = if self.quantized {
+                            Some(match &quant_recipe_bytes {
+                                Some(bytes) => {
+                                    let parsed: crate::quantization_plan::PrecisionRecipe = serde_json::from_slice(bytes)
+                                        .map_err(|e| NeuralNetError(format!("cudaQuantPlan JSON: {e}")))?;
+                                    crate::quantization_plan::resolve_recipe(&parsed, graph, &model.source_model_sha256)
+                                },
+                                None => crate::quantization_plan::fp16_recipe(graph, &model.source_model_sha256),
+                            }.map_err(NeuralNetError)?)
+                        } else { None };
+                        let uploaded = Arc::new(if let Some(recipe) = &recipe {
+                            CudaModel::load_quantized(graph, &model.rt, &load_stream, recipe)
+                        } else { match int8_scope {
+                            Some(scope) => CudaModel::load_int8_selective(graph, &model.rt, &load_stream, scope, int8_min_ffn_width),
+                            None => CudaModel::load(graph, &model.rt, &load_stream),
+                        } }.map_err(
                                 |e| NeuralNetError(format!("CUDA model upload failed: {e}")),
                             )?);
                         model
@@ -2590,9 +2869,26 @@ mod backend_impl {
                             .device
                             .synchronize()
                             .map_err(|e| NeuralNetError(format!("CUDA sync failed: {e}")))?;
+                        let inference_profile_id = if let Some(recipe) = &recipe {
+                            ensure_requested_cuda_capabilities(&uploaded).map_err(NeuralNetError)?;
+                            let identity = quantized_profile_id(model, &uploaded, &recipe.recipe_sha256, cfg)?;
+                            validate_expected_quant_profile(cfg, &identity)?;
+                            logger.write(&format!("[cuda-quant] model_sha256={} graph_sha256={} recipe_sha256={} inference_profile={} validation=unverified\n",
+                                model.source_model_sha256, recipe.graph_sha256, recipe.recipe_sha256, identity));
+                            Some(identity)
+                        } else { None };
+                        let execution_profile_id = if let Some(tactics) = &legacy_tactics {
+                            // Observe the existing capability/fallback result;
+                            // the getter itself never initializes GPU state.
+                            ensure_requested_cuda_capabilities(&uploaded).map_err(NeuralNetError)?;
+                            legacy_execution_profile_id(model, &uploaded, cfg, nn_x_len, nn_y_len, tactics)?
+                        } else { inference_profile_id.clone() };
                         *state = CudaModelLoadState::Uploaded {
                             model: uploaded.clone(),
                             gemm_layout,
+                            quant_recipe_source: quant_recipe_source.clone(),
+                            inference_profile_id,
+                            execution_profile_id,
                         };
                         uploaded
                     }
@@ -2610,6 +2906,8 @@ mod backend_impl {
                 rt: model.rt.clone(),
                 nn_x_len,
                 nn_y_len,
+                quant_max_batch_size,
+                legacy_handle_identity,
             }))
         }
 
@@ -2628,6 +2926,16 @@ mod backend_impl {
                 .as_any()
                 .downcast_ref::<CudaComputeContext>()
                 .ok_or_else(|| NeuralNetError("Wrong compute context type".to_string()))?;
+            if let Some(expected_batch) = c.quant_max_batch_size {
+                if max_batch_size != expected_batch || inputs_use_nhwc {
+                    return Err(NeuralNetError(format!("quantized compute handle differs from its execution identity: expected batch={expected_batch}, NCHW; got batch={max_batch_size}, NHWC={inputs_use_nhwc}")));
+                }
+            }
+            if let Some((batch, nhwc)) = c.legacy_handle_identity {
+                if max_batch_size != batch || inputs_use_nhwc != nhwc {
+                    return Err(NeuralNetError("legacy CUDA handle differs from its loaded execution identity".into()));
+                }
+            }
             // 每 handle 独立 non-blocking 流：多 server 线程并行提交推理，
             // 避免 legacy 默认流全设备串行化。
             let stream =
@@ -2765,4 +3073,4 @@ mod backend_impl {
 }
 
 #[cfg(feature = "cuda")]
-pub use backend_impl::{CudaBackend, CudaInt8Backend};
+pub use backend_impl::{CudaBackend, CudaInt8Backend, CudaQuantBackend, ensure_requested_cuda_capabilities, validate_quantized_runtime, validate_quantized_model_source};

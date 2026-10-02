@@ -23,7 +23,7 @@ use kata_core::thread::queue::ThreadSafeQueue;
 use kata_game::board::location;
 use kata_game::board::{Board, P_BLACK, PASS_LOC, Player, P_WHITE};
 use kata_game::history::BoardHistory;
-use kata_game::rules::{KoRule, Rules, ScoringRule};
+use kata_game::rules::Rules;
 use kata_game::symmetry::NUM_SYMMETRIES;
 
 use crate::backend::dummy::DummyInputBuffers;
@@ -535,7 +535,7 @@ impl SharedState {
         // 锁只用于取出 Arc 克隆，get_output 在锁外执行：
         // backend / input_buffers 是全局共享，持锁贯穿推理会把多个
         // server 线程完全串行化（batch 化收益被锁吃掉）。
-        let serve_prof = std::env::var("KATAGO_CUDA_HOST_PROFILE").is_ok();
+        let serve_prof = crate::tactic_plan::execution_env_var("KATAGO_CUDA_HOST_PROFILE").is_ok();
         let p0 = std::time::Instant::now();
         let backend = self.backend.lock().unwrap().clone();
         let input_buffers = self.input_buffers.lock().unwrap().clone();
@@ -680,199 +680,9 @@ impl SharedState {
         output: &mut NNOutput,
     ) {
         let (model_version, pp) = *self.postprocess_cfg.lock().unwrap();
-        let policy_size = self.policy_size as usize;
-        let x_size = board.x_size;
-        let y_size = board.y_size;
-
-        // --- Policy ---------------------------------------------------------
-        let policy_output_scaling = pp.output_scale_multiplier
-            / nn_input_params.nn_policy_temperature.clamp(1e-6, 1e6);
-
-        let mut is_legal = vec![false; policy_size];
-        let mut legal_count = 0usize;
-        for i in 0..policy_size {
-            let loc = nn_pos::pos_to_loc(
-                i as i32,
-                x_size,
-                y_size,
-                self.nn_x_len,
-                self.nn_y_len,
-            );
-            is_legal[i] = history.is_legal(board, loc, next_player);
-        }
-        // TODO(selfplay): the C++ avoidMYTDaggerHack dagger-match ban is not
-        // ported here; it only affects selfplay training, not GTP play.
-
-        let mut max_policy = -1e25f32;
-        for i in 0..policy_size {
-            let v = if is_legal[i] {
-                legal_count += 1;
-                output.policy_probs[i] * policy_output_scaling
-            } else {
-                -1e30f32
-            };
-            output.policy_probs[i] = v;
-            if v > max_policy {
-                max_policy = v;
-            }
-        }
-
-        let mut policy_sum = 0.0f32;
-        if nn_input_params.enable_passing_hacks {
-            // Cap passing prior policy at 95% (19x other moves).
-            let max_pass_policy_sum_factor = 19.0f32;
-            for i in 0..policy_size - 1 {
-                let v = (output.policy_probs[i] - max_policy).exp();
-                output.policy_probs[i] = v;
-                policy_sum += v;
-            }
-            let i = policy_size - 1;
-            let v = (output.policy_probs[i] - max_policy)
-                .exp()
-                .min(policy_sum * max_pass_policy_sum_factor)
-                .max(1e-20);
-            output.policy_probs[i] = v;
-            policy_sum += v;
-        } else {
-            for v in output.policy_probs.iter_mut().take(policy_size) {
-                *v = (*v - max_policy).exp();
-                policy_sum += *v;
-            }
-        }
-
-        if policy_sum <= 0.0 {
-            // Somehow all legal moves rounded to 0 probability.
-            let uniform = 1.0f32 / legal_count.max(1) as f32;
-            for i in 0..policy_size {
-                output.policy_probs[i] = if is_legal[i] { uniform } else { -1.0 };
-            }
-        } else {
-            for i in 0..policy_size {
-                output.policy_probs[i] = if is_legal[i] {
-                    output.policy_probs[i] / policy_sum
-                } else {
-                    -1.0
-                };
-            }
-        }
-        for v in output.policy_probs.iter_mut().skip(policy_size) {
-            *v = -1.0f32;
-        }
-        output.policy_optimism_used = nn_input_params.policy_optimism as f32;
-
-        // --- Value / score (model version >= 4) ------------------------------
-        if model_version >= 4 {
-            let win_logits = output.white_win_prob as f64 * pp.output_scale_multiplier as f64;
-            let loss_logits = output.white_loss_prob as f64 * pp.output_scale_multiplier as f64;
-            let mut no_result_logits =
-                output.white_no_result_prob as f64 * pp.output_scale_multiplier as f64;
-            let score_mean_pre = output.white_score_mean as f64 * pp.output_scale_multiplier as f64;
-            let score_stdev_pre =
-                output.white_score_mean_sq as f64 * pp.output_scale_multiplier as f64;
-            let lead_pre = output.white_lead as f64 * pp.output_scale_multiplier as f64;
-            let var_time_pre = output.var_time_left as f64 * pp.output_scale_multiplier as f64;
-            let swin_pre =
-                output.shortterm_winloss_error as f64 * pp.output_scale_multiplier as f64;
-            let sscore_pre =
-                output.shortterm_score_error as f64 * pp.output_scale_multiplier as f64;
-
-            if history.rules.ko_rule != KoRule::Simple
-                && history.rules.scoring_rule != ScoringRule::Territory
-            {
-                no_result_logits -= 100000.0;
-            }
-
-            let max_logits = win_logits.max(loss_logits).max(no_result_logits);
-            let mut win_prob = (win_logits - max_logits).exp();
-            let mut loss_prob = (loss_logits - max_logits).exp();
-            let mut no_result_prob = (no_result_logits - max_logits).exp();
-            if history.rules.ko_rule != KoRule::Simple
-                && history.rules.scoring_rule != ScoringRule::Territory
-            {
-                no_result_prob = 0.0;
-            }
-            let prob_sum = win_prob + loss_prob + no_result_prob;
-            win_prob /= prob_sum;
-            loss_prob /= prob_sum;
-            no_result_prob /= prob_sum;
-
-            let mut score_mean = score_mean_pre * pp.score_mean_multiplier;
-            let score_stdev = softplus(score_stdev_pre) * pp.score_stdev_multiplier;
-            let mut score_mean_sq = score_mean * score_mean + score_stdev * score_stdev;
-            let mut lead = lead_pre * pp.lead_multiplier;
-            let var_time_left = softplus(var_time_pre) * pp.variance_time_multiplier;
-            // No-result counts as 0 score for score-value purposes.
-            score_mean *= 1.0 - no_result_prob;
-            score_mean_sq *= 1.0 - no_result_prob;
-            lead *= 1.0 - no_result_prob;
-
-            let (shortterm_winloss_error, shortterm_score_error) = if model_version >= 14 {
-                let s1 = softplus(swin_pre * 0.5);
-                let s2 = softplus(sscore_pre * 0.5);
-                (
-                    (s1 * s1 * pp.shortterm_value_error_multiplier).sqrt(),
-                    (s2 * s2 * pp.shortterm_score_error_multiplier).sqrt(),
-                )
-            } else if model_version >= 10 {
-                (
-                    (softplus(swin_pre) * pp.shortterm_value_error_multiplier).sqrt(),
-                    (softplus(sscore_pre) * pp.shortterm_score_error_multiplier).sqrt(),
-                )
-            } else {
-                (softplus(swin_pre), softplus(sscore_pre) * 10.0)
-            };
-
-            // Flip from player-to-move to white's perspective.
-            if next_player == P_WHITE {
-                output.white_win_prob = win_prob as f32;
-                output.white_loss_prob = loss_prob as f32;
-                output.white_no_result_prob = no_result_prob as f32;
-                output.white_score_mean = score_mean as f32;
-                output.white_score_mean_sq = score_mean_sq as f32;
-                output.white_lead = lead as f32;
-            } else {
-                output.white_win_prob = loss_prob as f32;
-                output.white_loss_prob = win_prob as f32;
-                output.white_no_result_prob = no_result_prob as f32;
-                output.white_score_mean = -(score_mean as f32);
-                output.white_score_mean_sq = score_mean_sq as f32;
-                output.white_lead = -(lead as f32);
-            }
-            if model_version >= 9 {
-                output.var_time_left = var_time_left as f32;
-                output.shortterm_winloss_error = shortterm_winloss_error as f32;
-                output.shortterm_score_error = shortterm_score_error as f32;
-            } else {
-                output.var_time_left = -1.0;
-                output.shortterm_winloss_error = -1.0;
-                output.shortterm_score_error = -1.0;
-            }
-        }
-
-        // --- Ownership ---------------------------------------------------------
-        if let Some(map) = &mut output.white_owner_map {
-            let s = pp.output_scale_multiplier;
-            for pos in 0..(self.nn_x_len * self.nn_y_len) as usize {
-                let y = pos as i32 / self.nn_x_len;
-                let x = pos as i32 % self.nn_x_len;
-                if y >= board.y_size || x >= board.x_size {
-                    map[pos] = 0.0f32;
-                } else {
-                    // Same as value: flip player-to-move → white and tanh.
-                    let v = map[pos] * s;
-                    map[pos] = if next_player == P_WHITE { v.tanh() } else { -v.tanh() };
-                }
-            }
-        }
-    }
-}
-
-/// Softplus: `log(1 + exp(x))`, linear for large x (mirrors C++ `softPlus`).
-fn softplus(x: f64) -> f64 {
-    if x > 40.0 {
-        x
-    } else {
-        (1.0 + x.exp()).ln()
+        crate::output_postprocess::postprocess_output(model_version, pp,
+            self.nn_x_len, self.nn_y_len, self.policy_size,
+            board, history, next_player, nn_input_params, output);
     }
 }
 
@@ -1110,6 +920,22 @@ impl NnEvaluator {
     /// Model version reported by the loader.
     pub fn model_version(&self) -> i32 {
         self.model_version
+    }
+
+    /// Resolved inference identity reported by the loaded model, if supported.
+    /// Inspect during exclusive setup, before sharing the evaluator with clients.
+    pub fn inference_profile_id(&self) -> Option<String> {
+        self.loaded_model
+            .as_ref()
+            .and_then(|model| model.inference_profile_id())
+    }
+
+    /// Typed routing identity from the actual loaded backend, not config text.
+    /// None explicitly means this loaded backend cannot serve a typed pool.
+    pub fn execution_profile_id(&self) -> Option<String> {
+        self.loaded_model
+            .as_ref()
+            .and_then(|model| model.execution_profile_id())
     }
 
     /// Model-declared history defaults, inspected during exclusive worker setup.
@@ -1487,7 +1313,7 @@ impl NnEvaluator {
             condvar.wait(&mut req_buf);
         }
         let fa2 = std::time::Instant::now();
-        if std::env::var("KATAGO_CUDA_HOST_PROFILE").is_ok() {
+        if crate::tactic_plan::execution_env_var("KATAGO_CUDA_HOST_PROFILE").is_ok() {
             use std::sync::atomic::{AtomicU64, Ordering};
             static CNT: AtomicU64 = AtomicU64::new(0);
             static ACC_FILL: AtomicU64 = AtomicU64::new(0);
@@ -1617,7 +1443,7 @@ impl NnEvaluator {
         if batches.is_empty() {
             return Ok(());
         }
-        if std::env::var("KATAGO_CUDA_TEST_FORCE_WARMUP_FAIL").as_deref() == Ok("1") {
+        if crate::tactic_plan::execution_env_var("KATAGO_CUDA_TEST_FORCE_WARMUP_FAIL").as_deref() == Ok("1") {
             return Err(StringError::new(
                 "CUDA handle warmup forced to fail by test hook".to_string(),
             ));
@@ -1702,19 +1528,16 @@ impl NnEvaluator {
         let model = backend
             .load_model_file(&self.model_file_name, &self.expected_sha256)
             .map_err(|e| StringError::new(format!("Could not load model file: {e}")))?;
-        self.internal_model_name = model.model_desc().get_short_info_string();
-        self.model_version = model.model_desc().model_version;
-        self.inputs_version = get_inputs_version(self.model_version)
-            .map_err(|e| StringError::new(format!("Could not determine inputs version: {e}")))?;
-        self.num_input_meta_channels = model.model_desc().num_input_meta_channels;
-        self.post_process_params = model.model_desc().post_process_params;
-        // Mirror into SharedState so server threads can postprocess raw
-        // backend outputs. Runs before spawn_server_threads, so a plain
-        // mutex-guarded pair is fine.
-        *self.shared.postprocess_cfg.lock().unwrap() =
-            (self.model_version, self.post_process_params);
-
-        let cfg = &self.cfg;
+        // Backend identities must see the resolved batch capacity, including
+        // values supplied by Worker/benchmark rather than the config file.
+        let mut resolved_cfg = self.cfg.clone();
+        resolved_cfg.override_key("nnMaxBatchSize", &self.max_batch_size.to_string());
+        resolved_cfg.override_key("numNNServerThreadsPerModel", &self.gpu_idx_by_server_thread.len().max(1).to_string());
+        // Private resolved arguments for legacy identity; the existing quant
+        // hash consumes neither key and retains its original input encoding.
+        resolved_cfg.override_key("rustgoResolvedInputsUseNHWC", if self.inputs_use_nhwc { "true" } else { "false" });
+        resolved_cfg.override_key("rustgoResolvedRequireExactNNLen", if self.require_exact_nn_len { "true" } else { "false" });
+        let cfg = &resolved_cfg;
         let compute_context = backend
             .create_compute_context(
                 &self.gpu_idx_by_server_thread,
@@ -1739,6 +1562,11 @@ impl NnEvaluator {
                 0,
             )
             .map_err(|e| StringError::new(format!("Could not create compute handle: {e}")))?;
+        crate::execution_identity::require_unchanged(
+            self.execution_profile_id().as_deref(), model.execution_profile_id().as_deref(),
+        ).map_err(StringError::new)?;
+        let inputs_version = get_inputs_version(model.model_desc().model_version)
+            .map_err(|e| StringError::new(format!("Could not determine inputs version: {e}")))?;
         let input_buffers = Arc::new(backend
             .create_input_buffers(
                 &*model,
@@ -1748,6 +1576,12 @@ impl NnEvaluator {
             )
             .map_err(|e| StringError::new(format!("Could not create input buffers: {e}")))?);
 
+        self.internal_model_name = model.model_desc().get_short_info_string();
+        self.model_version = model.model_desc().model_version;
+        self.inputs_version = inputs_version;
+        self.num_input_meta_channels = model.model_desc().num_input_meta_channels;
+        self.post_process_params = model.model_desc().post_process_params;
+        *self.shared.postprocess_cfg.lock().unwrap() = (self.model_version, self.post_process_params);
         self.compute_context = Some(compute_context);
         self.compute_handle = Some(compute_handle);
         // Store the input buffers in SharedState so server threads can use
@@ -2435,6 +2269,71 @@ mod tests {
         assert!(eval.compute_handle.is_some());
         assert!(eval.shared.input_buffers.lock().unwrap().is_some());
         assert!(eval.loaded_model.is_some());
+        assert_eq!(eval.inference_profile_id(), None);
+    }
+
+    #[test]
+    fn test_execution_identity_preserves_inference_profile_from_loaded_model() {
+        struct ProfileModel(crate::desc::ModelDesc, bool);
+
+        impl LoadedModel for ProfileModel {
+            fn model_desc(&self) -> &crate::desc::ModelDesc {
+                &self.0
+            }
+
+            fn inference_profile_id(&self) -> Option<String> {
+                if self.1 { None } else { Some("loaded-profile-identity".to_string()) }
+            }
+
+            fn execution_profile_id(&self) -> Option<String> {
+                if self.1 { Some("loaded-legacy-identity".to_string()) } else { self.inference_profile_id() }
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        let cfg = ConfigParser::from_str(
+            "nnBackend=cudaquantbackend\ncudaQuantExpectedProfile=configured-but-unloaded\n",
+            false,
+            false,
+        )
+        .unwrap();
+        let mut eval = NnEvaluator::new(
+            "m".to_string(),
+            "m.bin".to_string(),
+            String::new(),
+            test_logger(),
+            1,
+            19,
+            19,
+            true,
+            false,
+            -1,
+            0,
+            false,
+            String::new(),
+            Enabled::Auto,
+            0,
+            Vec::new(),
+            String::new(),
+            false,
+            0,
+            true,
+            &cfg,
+        );
+        assert_eq!(eval.inference_profile_id(), None);
+        assert_eq!(eval.execution_profile_id(), None);
+        eval.loaded_model = Some(Box::new(ProfileModel(crate::desc::ModelDesc::default(), false)));
+        assert_eq!(
+            eval.inference_profile_id().as_deref(),
+            Some("loaded-profile-identity")
+        );
+        assert_eq!(eval.execution_profile_id(), eval.inference_profile_id());
+        eval.loaded_model = Some(Box::new(ProfileModel(crate::desc::ModelDesc::default(), true)));
+        assert_eq!(eval.inference_profile_id(), None);
+        assert_eq!(eval.execution_profile_id().as_deref(), Some("loaded-legacy-identity"));
     }
 
     #[test]
@@ -2650,6 +2549,7 @@ mod tests {
 #[cfg(test)]
 mod worker_failure_tests {
     use super::*;
+    use kata_game::rules::KoRule;
     use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
     use std::sync::mpsc;
     use std::time::Duration;

@@ -610,7 +610,8 @@ extern "C" __global__ void rms_norm_splitk_kernel(
     float acc[12];
 #pragma unroll
     for (int i = 0; i < 12; ++i) {
-        float v = xr[lane + i * 32] * beta;
+        // beta=0 discards the old residual without evaluating 0*NaN/Inf.
+        float v = beta == 0.0f ? 0.0f : xr[lane + i * 32] * beta;
         for (int sp = 0; sp < splits; ++sp) {
             v += cpr[(size_t)sp * (size_t)rows * ncols + lane + i * 32];
         }

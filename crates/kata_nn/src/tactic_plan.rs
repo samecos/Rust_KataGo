@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// plan `apply.tactic_overrides` 允许的 tactic 键（= 环境变量名）。
 /// 出现未知键 = 加载失败（防 plan 与代码版本漂移后静默失配）。
@@ -29,6 +29,7 @@ pub const ALLOWED_TACTIC_KEYS: &[&str] = &[
     "KATAGO_CUDA_DUALFFN",
     "KATAGO_CUDA_FUSION",
     "KATAGO_CUDA_GEMM_LAYOUT",
+    "KATAGO_CUDA_MXFP8_SCALE_CLEAR_FUSION",
     "KATAGO_CUDA_NOGRAPH",
     "KATAGO_CUDA_NOPIPELINE",
     "KATAGO_CUDA_PADBATCH",
@@ -354,16 +355,199 @@ struct Installed {
 }
 
 static INSTALLED: OnceLock<Installed> = OnceLock::new();
+// The current executor still reads process-level tactics. Until execution
+// plans move into each model, a recipe process freezes these inputs and cannot
+// install a legacy FP16 plan afterwards (or inherit one installed earlier).
+static EXECUTION_INSTALL_LOCK: Mutex<()> = Mutex::new(());
+static QUANTIZED_TACTICS: OnceLock<HashMap<String, Option<String>>> = OnceLock::new();
+// Legacy uploads must consume the same effective choices as their routing
+// identity, even after graph/algo caches have been populated. This is separate
+// from recipe freezing and preserves plan > environment precedence.
+static LEGACY_TACTICS: OnceLock<std::collections::BTreeMap<String, Option<String>>> = OnceLock::new();
+const LEGACY_EXECUTION_ENV_KEYS: &[&str] = &[
+    "KATAGO_CUDA_PROFILE", "KATAGO_CUDA_HOST_PROFILE", "KATAGO_CUDA_DEBUG_LAYER",
+    "KATAGO_CUDA_BATCH_TRACE", "KATAGO_CUDA_TEST_FORCE_DUALFFN_PROBE_FAIL",
+    "KATAGO_CUDA_TEST_FORCE_WARMUP_FAIL",
+];
+
+fn legacy_snapshot(
+    overrides: Option<&HashMap<String, String>>,
+    mut environment: impl FnMut(&str) -> Result<String, std::env::VarError>,
+) -> Result<std::collections::BTreeMap<String, Option<String>>, String> {
+    let mut snapshot = std::collections::BTreeMap::new();
+    for key in ALLOWED_TACTIC_KEYS.iter().copied().chain([
+        "KATAGO_CUDA_INT8_GEMM_TUNE", "KATAGO_CUDA_INT8_RMS_FUSION",
+    ]).chain(LEGACY_EXECUTION_ENV_KEYS.iter().copied()) {
+        let value = match overrides.and_then(|values| values.get(key)).cloned().map(Ok)
+            .unwrap_or_else(|| environment(key)) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => return Err(format!("non-Unicode tactic {key}")),
+        };
+        snapshot.insert(key.to_owned(), value);
+    }
+    Ok(snapshot)
+}
+
+fn check_legacy_freeze(
+    quantized: bool,
+    existing: Option<&std::collections::BTreeMap<String, Option<String>>>,
+    requested: &std::collections::BTreeMap<String, Option<String>>,
+) -> Result<(), String> {
+    if quantized { return Err("legacy CUDA and precision recipes require separate processes".into()); }
+    if existing.is_some_and(|old| old != requested) {
+        return Err("legacy CUDA tactics changed after upload; start a new process".into());
+    }
+    Ok(())
+}
+
+/// Called after any legacy plan install and before layout/upload/cache reads.
+/// Repeated calls compare fresh effective inputs, but execution reads use only
+/// the original frozen snapshot. No process environment is modified.
+pub fn freeze_legacy_tactics() -> Result<std::collections::BTreeMap<String, Option<String>>, String> {
+    let _guard = EXECUTION_INSTALL_LOCK.lock().map_err(|_| "CUDA execution installation lock poisoned")?;
+    let snapshot = legacy_snapshot(INSTALLED.get().map(|i| &i.overrides), |key| std::env::var(key))?;
+    check_legacy_freeze(QUANTIZED_TACTICS.get().is_some(), LEGACY_TACTICS.get(), &snapshot)?;
+    if LEGACY_TACTICS.get().is_none() {
+        LEGACY_TACTICS.set(snapshot.clone()).map_err(|_| "legacy tactic initialization raced")?;
+    }
+    Ok(snapshot)
+}
+
+fn check_quantized_freeze(plan_installed: bool, legacy_frozen: bool) -> Result<(), String> {
+    if plan_installed || legacy_frozen {
+        return Err("precision recipes and legacy FP16 tactic plans require separate processes".into());
+    }
+    Ok(())
+}
+
+fn check_legacy_plan_install(quantized_frozen: bool, legacy_frozen: bool, plan_installed: bool) -> Result<(), String> {
+    if quantized_frozen {
+        return Err("cannot install a legacy FP16 tactic plan after initializing precision recipes; use a separate process".into());
+    }
+    if legacy_frozen && !plan_installed {
+        return Err("cannot install a FP16 tactic plan after legacy CUDA upload; use a separate process".into());
+    }
+    Ok(())
+}
+
+pub fn freeze_quantized_tactics() -> Result<(), String> {
+    let _guard = EXECUTION_INSTALL_LOCK.lock().map_err(|_| "CUDA execution installation lock poisoned")?;
+    check_quantized_freeze(INSTALLED.get().is_some(), LEGACY_TACTICS.get().is_some())?;
+    let mut snapshot = HashMap::new();
+    for key in ALLOWED_TACTIC_KEYS.iter().copied().chain([
+        "KATAGO_CUDA_INT8_GEMM_TUNE", "KATAGO_CUDA_INT8_RMS_FUSION",
+    ]) {
+        let value = match std::env::var(key) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => return Err(format!("non-Unicode tactic {key}")),
+        };
+        snapshot.insert(key.to_string(), value);
+    }
+    if let Some(existing) = QUANTIZED_TACTICS.get() {
+        if existing != &snapshot {
+            return Err("precision recipe process tactics changed after initialization; start a new process".into());
+        }
+    } else {
+        QUANTIZED_TACTICS.set(snapshot).map_err(|_| "precision tactic initialization raced")?;
+    }
+    Ok(())
+}
 
 /// 读一个 tactic 配置：plan 覆盖优先，其次环境变量。
 /// 语义与 `std::env::var` 一致（未设置返回 `Err`）。
 pub fn tactic_var(key: &str) -> Result<String, std::env::VarError> {
+    if let Some(snapshot) = QUANTIZED_TACTICS.get()
+        && let Some(value) = snapshot.get(key) {
+        return value.clone().ok_or(std::env::VarError::NotPresent);
+    }
+    if let Some(snapshot) = LEGACY_TACTICS.get()
+        && let Some(value) = snapshot.get(key) {
+        return value.clone().ok_or(std::env::VarError::NotPresent);
+    }
     if let Some(inst) = INSTALLED.get() {
         if let Some(v) = inst.overrides.get(key) {
             return Ok(v.clone());
         }
     }
     std::env::var(key)
+}
+
+/// Diagnostic/effect switches are frozen only for the new legacy path.
+/// Recipes and standalone probes retain their original environment semantics.
+pub(crate) fn execution_env_var(key: &str) -> Result<String, std::env::VarError> {
+    if let Some(snapshot) = LEGACY_TACTICS.get()
+        && let Some(value) = snapshot.get(key) {
+        return value.clone().ok_or(std::env::VarError::NotPresent);
+    }
+    std::env::var(key)
+}
+
+pub(crate) fn execution_env_present(key: &str) -> bool {
+    !matches!(execution_env_var(key), Err(std::env::VarError::NotPresent))
+}
+
+pub const MXFP8_SCALE_CLEAR_FUSION_KEY: &str = "KATAGO_CUDA_MXFP8_SCALE_CLEAR_FUSION";
+
+fn validate_mxfp8_scale_clear_fusion_request(
+    value: Result<String, std::env::VarError>,
+    legacy_plan_installed: bool,
+) -> Result<bool, String> {
+    let requested = match value {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "0" => false,
+        Ok(value) if value == "1" => true,
+        Ok(value) => {
+            return Err(format!("invalid value '{value}' for {MXFP8_SCALE_CLEAR_FUSION_KEY}; expected 0 or 1"));
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!("non-Unicode tactic {MXFP8_SCALE_CLEAR_FUSION_KEY}"));
+        }
+    };
+    if requested && legacy_plan_installed {
+        return Err(format!(
+            "{MXFP8_SCALE_CLEAR_FUSION_KEY}=1 requires an MXFP8 precision recipe and cannot be enabled by a legacy FP16 tactic plan"
+        ));
+    }
+    Ok(requested)
+}
+
+/// Experimental MXFP8 packing optimization, default off. A prepared model
+/// snapshots this choice; unified execution freezes it before model upload.
+pub fn mxfp8_scale_clear_fusion_requested() -> Result<bool, String> {
+    validate_mxfp8_scale_clear_fusion_request(
+        tactic_var(MXFP8_SCALE_CLEAR_FUSION_KEY),
+        INSTALLED.get().is_some(),
+    )
+}
+
+fn validate_mxfp8_scale_clear_fusion_plan(
+    overrides: &HashMap<String, String>,
+    fallback: impl FnOnce() -> Result<String, std::env::VarError>,
+) -> Result<(), String> {
+    let value = overrides.get(MXFP8_SCALE_CLEAR_FUSION_KEY).cloned()
+        .map(Ok).unwrap_or_else(fallback);
+    validate_mxfp8_scale_clear_fusion_request(value, true).map(|_| ())
+}
+
+/// Keep the requested tactic and the prepared model's actual path in agreement.
+/// In particular, a non-MXFP8 model must not report a successful enabled tactic.
+pub(crate) fn validate_mxfp8_scale_clear_fusion_execution(
+    requested: bool,
+    has_mxfp8: bool,
+    actual: bool,
+) -> Result<(), String> {
+    if (requested || actual) && !has_mxfp8 {
+        return Err(format!("{MXFP8_SCALE_CLEAR_FUSION_KEY}=1 requires an MXFP8 projection"));
+    }
+    if requested != actual {
+        return Err(format!(
+            "{MXFP8_SCALE_CLEAR_FUSION_KEY} request differs from the prepared model: requested={}, actual={}",
+            u8::from(requested), u8::from(actual)
+        ));
+    }
+    Ok(())
 }
 
 fn residual_preset_value(value: Option<&str>) -> Result<bool, String> {
@@ -437,6 +621,7 @@ fn validate_value(key: &str, value: &str) -> Result<(), String> {
         | QKV_N128_KEY
         | OUTPROJ_N128_KEY
         | FFN_COMPACT_KEY
+        | MXFP8_SCALE_CLEAR_FUSION_KEY
         | "KATAGO_CUDA_T32"
         | "KATAGO_CUDA_T64N32" => value == "0" || value == "1",
         // 旧路径回退开关
@@ -494,6 +679,11 @@ pub fn load_and_install(
         validate_value(key, value).map_err(&ctx)?;
     }
     validate_plan_backend(&plan, backend_build).map_err(&ctx)?;
+    // Explicit plan=0 keeps normal precedence over env=1. A missing key must
+    // not let an old FP16 plan silently inherit this experimental MXFP8 path.
+    validate_mxfp8_scale_clear_fusion_plan(&plan.apply.tactic_overrides, || {
+        tactic_var(MXFP8_SCALE_CLEAR_FUSION_KEY)
+    }).map_err(&ctx)?;
     // Validate the effective request before installation, including the case
     // where an old plan omits this key and the environment tries to enable it.
     let residual_value = plan
@@ -573,6 +763,11 @@ pub fn load_and_install(
 }
 
 fn validate_plan_backend(plan: &PlanFile, actual: &BackendBuildFingerprint) -> Result<(), String> {
+    validate_mxfp8_scale_clear_fusion_request(
+        plan.apply.tactic_overrides.get(MXFP8_SCALE_CLEAR_FUSION_KEY).cloned()
+            .ok_or(std::env::VarError::NotPresent),
+        true,
+    )?;
     let outproj=outproj_value(plan.apply.tactic_overrides.get(OUTPROJ_N128_KEY).map(String::as_str))?;
     validate_outproj_options(outproj,&|k|plan.apply.tactic_overrides.get(k).cloned(),Some(&plan.apply.tactic_overrides))?;
     let expected_outproj=plan.backend_build.as_ref().and_then(|b|b.outproj_n128_artifact.as_deref());
@@ -785,6 +980,8 @@ fn validate_required_capabilities(
 
 /// 安装覆盖（幂等：与已安装内容逐键相同则成功，冲突则报错）。
 fn install(plan_id: String, overrides: HashMap<String, String>) -> Result<(), String> {
+    let _guard = EXECUTION_INSTALL_LOCK.lock().map_err(|_| "CUDA execution installation lock poisoned")?;
+    check_legacy_plan_install(QUANTIZED_TACTICS.get().is_some(), LEGACY_TACTICS.get().is_some(), INSTALLED.get().is_some())?;
     if INSTALLED
         .set(Installed {
             plan_id: plan_id.clone(),
@@ -827,6 +1024,45 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+mod execution_identity_tests {
+    use super::*;
+    #[test]
+    fn execution_identity_legacy_snapshot_uses_effective_plan_values() {
+        let overrides = HashMap::from([("KATAGO_CUDA_ATTN_TILE".into(), "q64".into())]);
+        let snapshot = legacy_snapshot(Some(&overrides), |key| match key {
+            "KATAGO_CUDA_ATTN_TILE" => panic!("plan override must not read environment"),
+            "KATAGO_CUDA_INT8_GEMM_TUNE" => Ok("0".into()),
+            _ => Err(std::env::VarError::NotPresent),
+        }).unwrap();
+        assert_eq!(snapshot["KATAGO_CUDA_ATTN_TILE"].as_deref(), Some("q64"));
+        assert_eq!(snapshot["KATAGO_CUDA_INT8_GEMM_TUNE"].as_deref(), Some("0"));
+        assert_eq!(snapshot["KATAGO_CUDA_INT8_RMS_FUSION"], None);
+        assert_eq!(snapshot.len(), ALLOWED_TACTIC_KEYS.len() + 2 + LEGACY_EXECUTION_ENV_KEYS.len());
+    }
+    #[test]
+    fn execution_identity_freeze_rejects_changed_inputs_without_replacing_snapshot() {
+        let old = legacy_snapshot(None, |_| Err(std::env::VarError::NotPresent)).unwrap();
+        assert!(check_legacy_freeze(false, Some(&old), &old).is_ok());
+        let mut changed = old.clone(); changed.insert("KATAGO_CUDA_GEMM_LAYOUT".into(), Some("nn_k384".into()));
+        assert!(check_legacy_freeze(false, Some(&old), &changed).is_err());
+        assert_eq!(old["KATAGO_CUDA_GEMM_LAYOUT"], None);
+        assert!(legacy_snapshot(None, |_| Err(std::env::VarError::NotUnicode("fixture".into()))).is_err());
+    }
+    #[test]
+    fn execution_identity_recipe_plan_and_legacy_freezes_are_mutually_exclusive() {
+        let empty = std::collections::BTreeMap::new();
+        assert!(check_legacy_freeze(true, None, &empty).is_err());
+        assert!(check_quantized_freeze(true, false).is_err());
+        assert!(check_quantized_freeze(false, true).is_err());
+        assert!(check_quantized_freeze(false, false).is_ok());
+        assert!(check_legacy_plan_install(true, false, false).is_err());
+        assert!(check_legacy_plan_install(false, true, false).is_err());
+        assert!(check_legacy_plan_install(false, true, true).is_ok());
+        assert!(check_legacy_plan_install(false, false, false).is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -979,6 +1215,77 @@ mod tests {
         }
         for value in ["", "nn", "fp16", "NN_K384"] {
             assert!(validate_value("KATAGO_CUDA_GEMM_LAYOUT", value).is_err());
+        }
+    }
+
+    #[test]
+    fn mxfp8_scale_clear_fusion_has_strict_default_off_values() {
+        use std::env::VarError;
+        assert!(ALLOWED_TACTIC_KEYS.contains(&MXFP8_SCALE_CLEAR_FUSION_KEY));
+        assert!(!validate_mxfp8_scale_clear_fusion_request(Err(VarError::NotPresent), false).unwrap());
+        for value in ["0", "1"] {
+            validate_value(MXFP8_SCALE_CLEAR_FUSION_KEY, value).unwrap();
+            assert_eq!(
+                validate_mxfp8_scale_clear_fusion_request(Ok(value.into()), false).unwrap(),
+                value == "1",
+            );
+        }
+        for value in ["", "true", "false", "2", "01", " 1", "1 "] {
+            assert!(validate_value(MXFP8_SCALE_CLEAR_FUSION_KEY, value).is_err());
+            assert!(validate_mxfp8_scale_clear_fusion_request(Ok(value.into()), false).is_err());
+        }
+        let error = validate_mxfp8_scale_clear_fusion_request(
+            Err(VarError::NotUnicode(std::ffi::OsString::new())), false,
+        ).unwrap_err();
+        assert!(error.contains("non-Unicode"), "{error}");
+    }
+
+    #[test]
+    fn mxfp8_scale_clear_fusion_cannot_leak_through_legacy_plan_omission() {
+        let missing = HashMap::new();
+        validate_mxfp8_scale_clear_fusion_plan(&missing, || Err(std::env::VarError::NotPresent)).unwrap();
+        validate_mxfp8_scale_clear_fusion_plan(&missing, || Ok("0".into())).unwrap();
+        let error = validate_mxfp8_scale_clear_fusion_plan(&missing, || Ok("1".into())).unwrap_err();
+        assert!(error.contains("legacy FP16 tactic plan"), "{error}");
+        assert!(validate_mxfp8_scale_clear_fusion_plan(&missing, || Ok("invalid".into())).is_err());
+        assert!(validate_mxfp8_scale_clear_fusion_plan(&missing, || {
+            Err(std::env::VarError::NotUnicode(std::ffi::OsString::new()))
+        }).is_err());
+        let off = HashMap::from([(MXFP8_SCALE_CLEAR_FUSION_KEY.into(), "0".into())]);
+        validate_mxfp8_scale_clear_fusion_plan(&off, || {
+            panic!("explicit plan=0 must mask the environment without reading it")
+        }).unwrap();
+        let on = HashMap::from([(MXFP8_SCALE_CLEAR_FUSION_KEY.into(), "1".into())]);
+        assert!(validate_mxfp8_scale_clear_fusion_plan(&on, || {
+            panic!("explicit plan=1 must be rejected independently of the environment")
+        }).is_err());
+    }
+
+    #[test]
+    fn mxfp8_scale_clear_fusion_is_not_a_legacy_plan_capability() {
+        let build = backend_build();
+        for schema in [1, 2] {
+            let on = r#"{ "KATAGO_CUDA_MXFP8_SCALE_CLEAR_FUSION": "1" }"#;
+            let error = validate_plan_backend(&backend_plan(schema, on, Some(&build)), &build).unwrap_err();
+            assert!(error.contains("legacy FP16 tactic plan"), "{error}");
+            let off = r#"{ "KATAGO_CUDA_MXFP8_SCALE_CLEAR_FUSION": "0" }"#;
+            validate_plan_backend(&backend_plan(schema, off, Some(&build)), &build).unwrap();
+            validate_plan_backend(&backend_plan(schema, "{}", Some(&build)), &build).unwrap();
+        }
+    }
+
+    #[test]
+    fn mxfp8_scale_clear_fusion_requires_actual_mxfp8_execution() {
+        for (requested, has_mxfp8, actual) in [
+            (false, false, false), (false, true, false), (true, true, true),
+        ] {
+            validate_mxfp8_scale_clear_fusion_execution(requested, has_mxfp8, actual).unwrap();
+        }
+        for (requested, has_mxfp8, actual) in [
+            (true, false, false), (true, false, true), (false, false, true),
+            (true, true, false), (false, true, true),
+        ] {
+            assert!(validate_mxfp8_scale_clear_fusion_execution(requested, has_mxfp8, actual).is_err());
         }
     }
 

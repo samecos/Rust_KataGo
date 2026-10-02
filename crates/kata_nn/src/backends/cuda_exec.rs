@@ -41,12 +41,19 @@
 
 use crate::backends::cuda::{CublasLtWeightLayout, CudaRuntime, f16_to_f32_bits, f32_to_f16_bits};
 use crate::backends::int8::{Int8Kernels, Int8Scope, Int8Weight, Int8Workspace};
+use crate::backends::group_cost::{self, GroupCostRecorder, GroupDescriptor, ProjectionLayout, Role};
+use crate::backends::mxfp8::{Mxfp8GraphResources, Mxfp8Kernels, Mxfp8Output, Mxfp8Weight, Mxfp8Workspace, PreparedProjectionId};
 use crate::onnx_parser::{Layer, LayerGraph, Tensor, TensorData};
-use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use crate::quantization_plan::{LayerPrecision, Precision, ResolvedRecipe};
+use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PinnedHostSlice, PushKernelArg};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+
+#[path = "int8_model_plan.rs"]
+mod int8_model_plan;
+pub use int8_model_plan::{Int8ModelInventory, Int8ModelProjection};
 
 /// cudarc 0.19 的流方法定义在 `Arc<CudaStream>` 上（`self: &Arc<Self>`）。
 type StreamRef = Arc<CudaStream>;
@@ -206,6 +213,49 @@ pub struct ParamBuf {
     pub len: usize,
 }
 
+/// A projection owns exactly one immutable precision for all Graph captures.
+enum ProjectionWeight {
+    Fp16(WeightBuf),
+    Int8(Int8Weight),
+    Mxfp8(Arc<Mxfp8Weight>),
+}
+
+impl ProjectionWeight {
+    fn name(&self) -> &'static str {
+        match self { Self::Fp16(_) => "fp16", Self::Int8(_) => "int8", Self::Mxfp8(_) => "mxfp8" }
+    }
+
+    fn fp16(&self) -> Option<&WeightBuf> {
+        match self { Self::Fp16(w) => Some(w), Self::Int8(_) | Self::Mxfp8(_) => None }
+    }
+
+    fn input_stride(&self) -> usize {
+        match self { Self::Fp16(w) => w.kp, Self::Int8(w) => w.k, Self::Mxfp8(w) => w.k() }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_half(
+        &self,
+        rt: &CudaRuntime,
+        stream: &StreamRef,
+        quant: &mut Option<Int8Workspace>,
+        mxfp8: &mut Option<Mxfp8Workspace>,
+        mxfp8_id: Option<PreparedProjectionId>,
+        layer_id: u32,
+        input: &CudaSlice<u16>,
+        output: &mut CudaSlice<u16>,
+        rows: usize,
+    ) -> Result<(), String> {
+        match self {
+            Self::Fp16(w) => hgemm_f16(rt, input, w, output, rows),
+            Self::Int8(w) => quant.as_mut().ok_or("missing INT8 workspace")?
+                .project_half(rt, stream, input, w.k, w, output, rows),
+            Self::Mxfp8(w) => mxfp8.as_mut().ok_or("missing MXFP8 workspace")?
+                .project_half(mxfp8_id.ok_or("missing prepared MXFP8 half projection")?, layer_id, input, w.k(), output),
+        }
+    }
+}
+
 /// 每层上传到设备的权重/参数。
 enum LayerBuf {
     Int8Ffn {
@@ -238,8 +288,8 @@ enum LayerBuf {
         channels: usize,
     },
     Attention {
-        qkv: WeightBuf,
-        out: WeightBuf,
+        qkv: ProjectionWeight,
+        out: ProjectionWeight,
         cos: CudaSlice<f32>,
         sin: CudaSlice<f32>,
         qk_scale: f32,
@@ -248,8 +298,8 @@ enum LayerBuf {
         s: usize,
     },
     Ffn {
-        dual: WeightBuf,
-        down: WeightBuf,
+        dual: ProjectionWeight,
+        down: ProjectionWeight,
         hidden: usize,
     },
     GateSilu {
@@ -295,12 +345,31 @@ enum LayerBuf {
 // CudaModel
 // ---------------------------------------------------------------------------
 
+pub(crate) fn validate_workspace_model(model: u64, workspace_model: u64) -> Result<(), String> {
+    if model == 0 || model != workspace_model {
+        Err("CUDA workspace was prepared for another model; create a model-specific workspace".into())
+    } else { Ok(()) }
+}
+
+pub(crate) fn validate_diagnostic_input_lengths(batch: usize, spatial: usize, global: usize) -> Result<(), String> {
+    if batch == 0 || batch.checked_mul(22 * 361) != Some(spatial)
+        || batch.checked_mul(19) != Some(global) {
+        return Err("group-cost encoded input lengths differ from physical batch".into());
+    }
+    Ok(())
+}
+
 /// 已加载的 CUDA 模型：全部层权重驻留设备，`apply` 前向执行。
 pub struct CudaModel {
+    owner_context: Arc<cudarc::driver::CudaContext>,
     layers: Vec<LayerBuf>,
     int8_scope: Option<Int8Scope>,
     int8_min_ffn_width: usize,
     int8_kernels: Option<Int8Kernels>,
+    mxfp8_kernels: Option<Mxfp8Kernels>,
+    model_instance_id: u64,
+    quantization_recipe_id: Option<String>,
+    precision_reported: AtomicBool,
     seq_len: usize,
     trunk: usize,
     mid: usize,
@@ -345,6 +414,7 @@ mod dual_ffn_ffi {
     unsafe extern "C" {
         pub fn katago_dual_ffn_create() -> *mut c_void;
         pub fn katago_dual_ffn_destroy(h: *mut c_void);
+        pub fn katago_dual_ffn_is_prepared(h: *const c_void, tokens: i32) -> i32;
         pub fn katago_dual_ffn_exec(
             h: *mut c_void,
             input: *const c_void,
@@ -362,7 +432,7 @@ mod dual_ffn_ffi {
 /// only after a certified plan is installed and before serve handles spawn.
 #[cfg(katago_dualffn)]
 pub(crate) fn dual_ffn_probe_once() -> Result<(), String> {
-    if std::env::var("KATAGO_CUDA_TEST_FORCE_DUALFFN_PROBE_FAIL").as_deref() == Ok("1") {
+    if crate::tactic_plan::execution_env_var("KATAGO_CUDA_TEST_FORCE_DUALFFN_PROBE_FAIL").as_deref() == Ok("1") {
         return Err("DualFFN production capability probe forced to fail by test hook".to_string());
     }
     static PROBE: OnceLock<Result<(), String>> = OnceLock::new();
@@ -500,10 +570,21 @@ fn dual_ffn_run(
         let mut handles = state.handles.lock().unwrap();
         *handles
             .entry(stream_key)
-            .or_insert_with(|| unsafe { dual_ffn_ffi::katago_dual_ffn_create() })
+            .or_insert_with(|| {
+                group_cost::setup_observed();
+                unsafe { dual_ffn_ffi::katago_dual_ffn_create() }
+            })
     };
     if handle.is_null() {
         return Err("dual_ffn handle creation failed".to_string());
+    }
+    if group_cost::enabled() {
+        let tokens = i32::try_from(m).map_err(|_| "dual_ffn diagnostic rows exceed i32")?;
+        match unsafe { dual_ffn_ffi::katago_dual_ffn_is_prepared(handle, tokens) } {
+            0 => group_cost::setup_observed(),
+            1 => (),
+            _ => return Err("dual_ffn diagnostic preparation query failed".into()),
+        }
     }
     let r = unsafe {
         dual_ffn_ffi::katago_dual_ffn_exec(
@@ -551,10 +632,35 @@ impl CudaModel {
         Self::load_precision_selective(graph, rt, stream, Some(scope), min_ffn_width)
     }
 
+    /// Load a validated immutable per-projection recipe. Legacy entry points
+    /// retain their original restrictions and numerical paths.
+    pub fn load_quantized(
+        graph: &LayerGraph,
+        rt: &CudaRuntime,
+        stream: &Arc<CudaStream>,
+        recipe: &ResolvedRecipe,
+    ) -> Result<Self, String> {
+        Self::load_precision_recipe(graph, rt, stream, None, 0, Some(recipe))
+    }
+
+    pub fn quantization_recipe_id(&self) -> Option<&str> {
+        self.quantization_recipe_id.as_deref()
+    }
+
+    pub fn has_mxfp8(&self) -> bool { self.mxfp8_kernels.is_some() }
+
+    pub fn mxfp8_scale_clear_fusion_enabled(&self) -> bool {
+        self.mxfp8_kernels.as_ref().is_some_and(Mxfp8Kernels::scale_clear_fusion_enabled)
+    }
+
     pub fn int8_scope(&self) -> Option<Int8Scope> { self.int8_scope }
     pub fn int8_min_ffn_width(&self) -> usize { self.int8_min_ffn_width }
     pub fn int8_ffn_count(&self) -> usize {
-        self.layers.iter().filter(|l| matches!(l, LayerBuf::Int8Ffn { .. })).count()
+        self.layers.iter().filter(|l| matches!(l,
+            LayerBuf::Int8Ffn { .. }
+            | LayerBuf::Ffn { dual: ProjectionWeight::Int8(_), .. }
+            | LayerBuf::Ffn { down: ProjectionWeight::Int8(_), .. }
+        )).count()
     }
 
     fn load_precision(graph: &LayerGraph, rt: &CudaRuntime, stream: &Arc<CudaStream>, int8_scope: Option<Int8Scope>) -> Result<Self, String> {
@@ -562,6 +668,16 @@ impl CudaModel {
     }
 
     fn load_precision_selective(graph: &LayerGraph, rt: &CudaRuntime, stream: &Arc<CudaStream>, int8_scope: Option<Int8Scope>, min_ffn_width: usize) -> Result<Self, String> {
+        Self::load_precision_recipe(graph, rt, stream, int8_scope, min_ffn_width, None)
+    }
+
+    fn load_precision_recipe(graph: &LayerGraph, rt: &CudaRuntime, stream: &Arc<CudaStream>, int8_scope: Option<Int8Scope>, min_ffn_width: usize, recipe: Option<&ResolvedRecipe>) -> Result<Self, String> {
+        if !Arc::ptr_eq(&rt.device, stream.context()) {
+            return Err("CUDA model upload stream belongs to another context".into());
+        }
+        if let Some(recipe) = recipe {
+            validate_recipe_execution(graph, recipe)?;
+        }
         super::int8::parse_min_ffn_width(&min_ffn_width.to_string())?;
         if int8_scope.is_none() && min_ffn_width != 0 {
             return Err("INT8 layer selection requires an INT8 backend".into());
@@ -601,7 +717,7 @@ impl CudaModel {
         let standard_ffn = graph.trunk_channels == 768 && graph.mid_channels == 384 && graph.layers.iter().all(|layer| {
             !matches!(layer, Layer::Ffn(f) if f.hidden != 1152)
         });
-        if !standard_ffn {
+        if !standard_ffn && recipe.is_none() {
             let fusion = crate::tactic_plan::tactic_var("KATAGO_CUDA_FUSION").unwrap_or_else(|_| "none".into());
             if crate::tactic_plan::tactic_enabled("KATAGO_CUDA_DUALFFN") || fusion != "none"
                 || crate::tactic_plan::tactic_enabled("KATAGO_CUDA_SPLITK") {
@@ -622,17 +738,28 @@ impl CudaModel {
         } else { None };
         let outproj_n128 = if crate::tactic_plan::outproj_n128_requested()? { Some(crate::backends::cuda::outproj_n128::OutprojN128::load(graph, &rt.device)?) } else { None };
         let stream = stream.clone();
+        let mxfp8_kernels = recipe.is_some_and(|r| r.layers.iter().any(LayerPrecision::any_mxfp8))
+            .then(|| Mxfp8Kernels::load(rt)).transpose()?;
         let mut layers = Vec::with_capacity(graph.layers.len());
         let mut ffn_index = 0;
-        for layer in &graph.layers {
+        for (layer_index, layer) in graph.layers.iter().enumerate() {
+            if let Some(recipe) = recipe {
+                let precision = &recipe.layers[layer_index];
+                if precision.any_quantized() {
+                    layers.push(upload_quantized_layer(rt, &stream, layer, precision, mxfp8_kernels.as_ref())?);
+                    // Compact artifacts use the original graph's FFN ordinal.
+                    if matches!(layer, Layer::Ffn(_)) { ffn_index += 1; }
+                    continue;
+                }
+            }
             if let Some(scope) = int8_scope
                 && (matches!(layer, Layer::Ffn(f) if f.hidden >= min_ffn_width) || (scope == Int8Scope::Transformer && matches!(layer, Layer::Attention(_)))) {
                 layers.push(upload_int8_layer(&stream, layer)?);
             } else if ffn_compact.is_some() && let Layer::Ffn(ffn) = layer {
                 let packed = crate::backends::cuda::ffn_compact::pack(ffn_index, ffn, f32_to_f16_bits)?;
                 layers.push(LayerBuf::Ffn {
-                    dual: upload_compact_half_weight(&stream, &packed.dual, 2 * packed.hidden, 384)?,
-                    down: upload_compact_half_weight(&stream, &packed.down, 384, packed.hidden)?,
+                    dual: ProjectionWeight::Fp16(upload_compact_half_weight(&stream, &packed.dual, 2 * packed.hidden, 384)?),
+                    down: ProjectionWeight::Fp16(upload_compact_half_weight(&stream, &packed.down, 384, packed.hidden)?),
                     hidden: packed.hidden,
                 });
                 ffn_index += 1;
@@ -640,11 +767,24 @@ impl CudaModel {
                 layers.push(upload_layer(&stream, layer)?);
             }
         }
+        // Every workspace captures the owning loaded instance, including FP16
+        // and INT8. A later diagnostic cannot infer ownership from its stream
+        // or assign it retroactively. One atomic at load; no heap allocation.
+        static NEXT_MODEL: AtomicU64 = AtomicU64::new(1);
+        let model_instance_id = NEXT_MODEL.fetch_update(Ordering::Relaxed,
+            Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| "CUDA model identity exhausted".to_owned())?;
         Ok(Self {
+            owner_context: rt.device.clone(),
             layers,
             int8_scope,
             int8_min_ffn_width: min_ffn_width,
-            int8_kernels: int8_scope.map(|_| Int8Kernels::load(rt)).transpose()?,
+            int8_kernels: (int8_scope.is_some() || recipe.is_some_and(|r| r.layers.iter().any(LayerPrecision::any_int8)))
+                .then(|| Int8Kernels::load(rt)).transpose()?,
+            mxfp8_kernels,
+            model_instance_id,
+            quantization_recipe_id: recipe.map(|r| r.recipe_sha256.clone()),
+            precision_reported: AtomicBool::new(false),
             seq_len: graph.board_size * graph.board_size,
             trunk: graph.trunk_channels,
             mid: graph.mid_channels,
@@ -679,6 +819,82 @@ impl CudaModel {
         self.layers.len()
     }
 
+    /// Explicit direct diagnostic preparation. Existing load/apply paths do
+    /// not construct this inventory or allocate any diagnostic resources.
+    pub fn prepare_group_cost(
+        &self, rt: &CudaRuntime, stream: &Arc<CudaStream>, ws: &mut CudaWorkspace,
+        graph: &LayerGraph, recipe: &ResolvedRecipe,
+    ) -> Result<GroupCostRecorder, String> {
+        validate_workspace_model(self.model_instance_id, ws.model_instance_id)?;
+        group_cost::require(Arc::ptr_eq(&self.owner_context, &rt.device),
+            "group-cost runtime differs from model upload context")?;
+        crate::backends::cuda::validate_quantized_runtime(rt)?;
+        if let Some(quant) = &ws.int8 { quant.group_cost_admission()?; }
+        crate::quantization_plan::validate_resolved_recipe(graph, recipe)?;
+        group_cost::require(self.quantization_recipe_id() == Some(recipe.recipe_sha256.as_str()),
+                            "group cost requires this model's actual unified recipe")?;
+        group_cost::require(!self.has_mxfp8() && self.ffn_compact.is_none(),
+                            "group cost v1 supports original/pruned FP16/INT8; no MXFP8 or compact artifact")?;
+        group_cost::require(self.layers.len() == graph.layers.len() && self.mid == graph.mid_channels
+            && self.seq_len == 361 && ws.normed.stream().cu_stream() == stream.cu_stream()
+            && Arc::ptr_eq(ws.normed.stream().context(), stream.context())
+            && Arc::ptr_eq(&rt.device, stream.context()),
+            "group cost graph/workspace/stream mismatch")?;
+        let manifest = crate::quantization_plan::graph_manifest(graph, &recipe.model_sha256)?;
+        group_cost::require(manifest.graph_sha256 == recipe.graph_sha256, "group graph digest mismatch")?;
+        let mut groups = Vec::new();
+        for dual in manifest.projections.iter().filter(|p| p.id.ends_with(".ffn.dual")) {
+            let prefix = dual.id.strip_suffix(".dual").ok_or("invalid FFN projection ID")?;
+            let down = manifest.projections.iter().find(|p| p.id == format!("{prefix}.down"))
+                .ok_or("missing matching FFN down projection")?;
+            let ffn_layer = dual.layer_index;
+            let rms_layer = ffn_layer.checked_sub(1).ok_or("FFN missing preceding RMS")?;
+            group_cost::require(down.layer_index == ffn_layer
+                && matches!(self.layers.get(rms_layer), Some(LayerBuf::RmsNorm { channels, .. }) if *channels == self.mid),
+                "FFN group is not adjacent to its actual RMS")?;
+            let (actual_dual, actual_down) = match &self.layers[ffn_layer] {
+                LayerBuf::Int8Ffn { dual, down } => (
+                    ProjectionLayout { precision: "int8", n: dual.n, k: dual.k, kp: dual.kp,
+                        input_stride: dual.k, output_stride: dual.n },
+                    ProjectionLayout { precision: "int8", n: down.n, k: down.k, kp: down.kp,
+                        input_stride: down.k, output_stride: down.n }),
+                LayerBuf::Ffn { dual, down, hidden } => {
+                    let describe = |p: &ProjectionWeight| -> Result<ProjectionLayout, String> {
+                        match p {
+                            ProjectionWeight::Fp16(w) => Ok(ProjectionLayout { precision: "fp16", n: w.n,
+                                k: w.k, kp: w.kp, input_stride: w.kp, output_stride: w.n }),
+                            ProjectionWeight::Int8(w) => Ok(ProjectionLayout { precision: "int8", n: w.n,
+                                k: w.k, kp: w.kp, input_stride: w.k, output_stride: w.n }),
+                            ProjectionWeight::Mxfp8(_) => Err("MXFP8 group cost unsupported".into()),
+                        }
+                    };
+                    let layouts = (describe(dual)?, describe(down)?);
+                    group_cost::require(*hidden == layouts.1.k, "uploaded FFN hidden width mismatch")?;
+                    layouts
+                }
+                _ => return Err("manifest FFN does not address an uploaded FFN".into()),
+            };
+            let precision = &recipe.layers[ffn_layer];
+            let precision_name = |p| match p { Precision::Fp16 => "fp16", Precision::Int8 => "int8", Precision::Mxfp8 => "mxfp8" };
+            group_cost::require(actual_dual.n == dual.n.checked_mul(2).ok_or("dual width overflow")?
+                && actual_dual.k == dual.k && actual_down.n == down.n && actual_down.k == down.k
+                && actual_dual.precision == precision_name(precision.ffn_dual)
+                && actual_down.precision == precision_name(precision.ffn_down), "uploaded FFN differs from recipe/manifest")?;
+            let has_gate = matches!(self.layers.get(ffn_layer + 1), Some(LayerBuf::GateSilu { channels, .. }) if *channels == self.mid);
+            groups.push(GroupDescriptor { id: prefix.to_owned(), rms_layer, ffn_layer,
+                end_layer: ffn_layer + 1 + usize::from(has_gate), mid: self.mid, hidden: down.k,
+                dual: actual_dual, down: actual_down });
+        }
+        group_cost::require(groups.len() == self.layers.iter().filter(|l| matches!(l, LayerBuf::Ffn { .. } | LayerBuf::Int8Ffn { .. })).count(),
+                            "group inventory does not cover every actual FFN")?;
+        let slot = match ws.group_cost_slot {
+            Some(slot) => slot,
+            None => { let slot = group_cost::next_slot_id()?; ws.group_cost_slot = Some(slot); slot }
+        };
+        GroupCostRecorder::new(group_cost::Binding::capture(rt, recipe)?, stream, ws.batch,
+            ws.batch.checked_mul(self.seq_len).ok_or("group row overflow")?, slot, groups)
+    }
+
     #[cfg(katago_dualffn)]
     pub(crate) fn dual_ffn_handle_ready(&self) -> bool {
         self.dual_ffn.is_some()
@@ -702,6 +918,59 @@ impl CudaModel {
         spatial: &CudaSlice<f32>,
         global: &CudaSlice<f32>,
     ) -> Result<(), String> {
+        let result = (|| {
+            ws.int8_algorithm_forward_entry(rt, stream)?;
+            self.apply_inner(rt, stream, ws, spatial, global, None)
+        })();
+        ws.int8_algorithm_forward_exit(result)
+    }
+
+    /// Same real kernels and fusion decisions, plus whole-group event markers.
+    /// A sample becomes readable only after this succeeds and drain() is called.
+    pub fn apply_with_group_cost(
+        &self, rt: &CudaRuntime, stream: &Arc<CudaStream>, ws: &mut CudaWorkspace,
+        spatial: &CudaSlice<f32>, global: &CudaSlice<f32>, recorder: &mut GroupCostRecorder,
+        phase: group_cost::Phase, input_label_sha256: &str,
+    ) -> Result<(), String> {
+        let result = (|| {
+            ws.int8_algorithm_forward_entry(rt, stream)?;
+            self.apply_with_group_cost_inner(rt, stream, ws, spatial, global, recorder, phase, input_label_sha256)
+        })();
+        ws.int8_algorithm_forward_exit(result)
+    }
+
+    fn apply_with_group_cost_inner(
+        &self, rt: &CudaRuntime, stream: &Arc<CudaStream>, ws: &mut CudaWorkspace,
+        spatial: &CudaSlice<f32>, global: &CudaSlice<f32>, recorder: &mut GroupCostRecorder,
+        phase: group_cost::Phase, input_label_sha256: &str,
+    ) -> Result<(), String> {
+        validate_workspace_model(self.model_instance_id, ws.model_instance_id)?;
+        validate_diagnostic_input_lengths(ws.batch, spatial.len(), global.len())?;
+        group_cost::require(Arc::ptr_eq(&self.owner_context, &rt.device),
+            "group-cost runtime differs from model upload context")?;
+        group_cost::require(spatial.stream().cu_stream() == stream.cu_stream()
+            && global.stream().cu_stream() == stream.cu_stream()
+            && ws.normed.stream().cu_stream() == stream.cu_stream()
+            && Arc::ptr_eq(spatial.stream().context(), stream.context())
+            && Arc::ptr_eq(global.stream().context(), stream.context())
+            && Arc::ptr_eq(ws.normed.stream().context(), stream.context())
+            && Arc::ptr_eq(&rt.device, stream.context()), "diagnostic input/workspace stream/context mismatch")?;
+        let scope = recorder.begin(stream, ws.batch, ws.group_cost_slot, self.quantization_recipe_id(), phase, input_label_sha256)?;
+        let result = self.apply_inner(rt, stream, ws, spatial, global, Some(&mut *recorder))
+            .and_then(|()| recorder.finish(&scope));
+        if result.is_err() {
+            recorder.poison();
+            ACTIVE_STREAM.with(|s| *s.borrow_mut() = None);
+        }
+        // Scope Drop clears observations even on a failed forward.
+        result
+    }
+
+    fn apply_inner(
+        &self, rt: &CudaRuntime, stream: &Arc<CudaStream>, ws: &mut CudaWorkspace,
+        spatial: &CudaSlice<f32>, global: &CudaSlice<f32>, mut group_cost: Option<&mut GroupCostRecorder>,
+    ) -> Result<(), String> {
+        validate_workspace_model(self.model_instance_id, ws.model_instance_id)?;
         if crate::tactic_plan::strict_attention_requested()? != self.strict_attention {
             return Err(
                 "strict attention selection changed after model preparation; reload the model"
@@ -719,6 +988,21 @@ impl CudaModel {
         } else {
             None
         };
+
+        if let Some(quant) = ws.mxfp8.as_mut() {
+            if !Arc::ptr_eq(quant.status().stream().context(), &rt.device) {
+                return Err("MXFP8 forward requires its workspace runtime and owner stream".into());
+            }
+            quant.validate_owner_stream(stream)?;
+            quant.validate_owner_stream(spatial.stream())?;
+            quant.validate_owner_stream(global.stream())?;
+            for output in [&ws.out_policy, &ws.out_value, &ws.out_misc, &ws.out_moremisc, &ws.out_ownership] {
+                quant.validate_owner_stream(output.stream())?;
+            }
+            // Capture this reset at the full-forward entry. Every MXFP8
+            // projection ORs the same sticky status until output completion.
+            quant.begin_forward()?;
+        }
         ACTIVE_STREAM.with(|s| *s.borrow_mut() = Some(stream.clone()));
         let batch = ws.batch;
         if let Some(qkv) = &self.qkv_immutable { qkv.report_scope(batch); }
@@ -762,12 +1046,14 @@ impl CudaModel {
         let out_moremisc = &mut ws.out_moremisc;
         let out_ownership = &mut ws.out_ownership;
         let int8 = &mut ws.int8;
+        let mxfp8 = &mut ws.mxfp8;
+        let mxfp8_plans = &ws.mxfp8_plans;
 
         // --- 逐层执行 ----------------------------------------------------
         // per-layer 剖析（KATAGO_CUDA_PROFILE=1）：层与子段使用独立事件对，
         // 每次 forward 各分配一次并复用，避免子段重录覆盖整层的起点。
         // capture 模式下跳过（事件同步会破坏 graph capture）。
-        let profiling = !capturing() && std::env::var("KATAGO_CUDA_PROFILE").is_ok();
+        let profiling = !capturing() && crate::tactic_plan::execution_env_var("KATAGO_CUDA_PROFILE").is_ok();
         let mut layer_times: Vec<(i64, &'static str, f32)> = Vec::new();
         let mut layer_sub_times: Vec<(usize, &'static str, Vec<(&'static str, f32)>)> = Vec::new();
         let (layer_events, sub_events) = if profiling {
@@ -803,9 +1089,14 @@ impl CudaModel {
         // 待下一个 RmsNorm 融合求和。KATAGO_CUDA_SPLITK=1 启用。
         let splitk_on = crate::tactic_plan::tactic_enabled("KATAGO_CUDA_SPLITK");
         let mut pending_splitk_beta: Option<f32> = None;
+        let report_precision = !capturing() && self.quantization_recipe_id.is_some()
+            && !self.precision_reported.swap(true, Ordering::Relaxed);
+        let mut act384_half_ready = false;
         let mut li = 0usize;
         while li < self.layers.len() {
+            if let Some(cost) = group_cost.as_deref_mut() { cost.before_layer(li, pending_splitk_beta.is_some())?; }
             let lb = &self.layers[li];
+            let mx_plan = mxfp8_plans.get(li).copied().unwrap_or_default();
             let layer_tag: &'static str = match lb {
                 LayerBuf::Int8Ffn { .. } => "Int8Ffn",
                 LayerBuf::Int8Attention { .. } => "Int8Attention",
@@ -901,7 +1192,8 @@ impl CudaModel {
                     if w.k == trunk && w.n == mid {
                         // Linear down（K=768, N=384, beta=0）：split-K partial
                         //（reduce 由后续 RmsNorm 融合）。KATAGO_CUDA_SPLITK=1。
-                        if splitk_on {
+                        if splitk_on && (self.quantization_recipe_id.is_none()
+                            || (splitk_weight_supported(w) && matches!(self.layers.get(li + 1), Some(LayerBuf::RmsNorm { channels: 384, .. })))) {
                             hgemm_splitk2_partial(rt, gated768, w, c_partial, m)?;
                             pending_splitk_beta = Some(0.0);
                         } else {
@@ -919,8 +1211,10 @@ impl CudaModel {
                             }) = self.layers.get(li + 1)
                         {
                             if *channels == trunk {
-                                // act384f16 已由块尾 Ffn down 的 gatesilu
-                                // epilogue 写好（f16 双写），直接读
+                                // Mixed INT8 down paths may leave this half buffer stale.
+                                if self.quantization_recipe_id.is_some() && !act384_half_ready {
+                                    f32_to_f16(rt, act384, act384f16, m * mid)?;
+                                }
                                 hgemm_residual_gatesilu_f16(
                                     rt,
                                     act384f16,
@@ -955,6 +1249,7 @@ impl CudaModel {
                     eps,
                     channels,
                 } => {
+                    group_cost::role(Role::Rms);
                     assert_eq!(*channels, mid, "RMSNorm 仅出现在 384 维流");
                     if let Some(beta) = pending_splitk_beta.take() {
                         // split-K partial 求和 + 残差 + RMSNorm 融合
@@ -974,7 +1269,7 @@ impl CudaModel {
                     } else if let Some(LayerBuf::Int8Ffn { dual, down, .. }) = self.layers.get(li + 1)
                         && int8.as_ref().is_some_and(|q| q.rms_fusion_enabled(*channels, self.int8_min_ffn_width))
                         && crate::tactic_plan::tactic_var("KATAGO_CUDA_RMS").as_deref() != Ok("v1")
-                        && std::env::var_os("KATAGO_CUDA_DEBUG_LAYER").is_none()
+                        && !crate::tactic_plan::execution_env_present("KATAGO_CUDA_DEBUG_LAYER")
                     {
                         let quant = int8.as_mut().ok_or("missing INT8 workspace")?;
                         timed!("int8_rms_ffn_fused", quant.ffn_rms(rt, &stream, &scale.data, *eps, dual, down, act384, m));
@@ -1007,12 +1302,12 @@ impl CudaModel {
                         // packed strides. The FFN scratch is idle in Attention;
                         // only its Q/K slots are written. V stays in act1152.
                         let strict = strict_attention.expect("prepared strict attention");
-                        if let Some(fused) = &self.qkv_immutable {
+                        if let Some(fused) = &self.qkv_immutable && let Some(qkv) = qkv.fp16() {
                             if (qkv.n,qkv.k,qkv.kp)!=(1152,384,384) || qkv.nn_data.is_some() { return Err("QKV epilogue requires unpadded TN weights".into()); }
                             timed!("qkv_rope", fused.launch(&stream,normed,&qkv.data,act1152,cos,sin));
                             timed!("attn", strict.launch_attention_rotated_packed(&stream,act1152,normed,scale));
                         } else {
-                        timed!("qkv", hgemm_f16(rt, normed, qkv, act1152, m));
+                        timed!("qkv", qkv.project_half(rt, &stream, int8, mxfp8, mx_plan.input, li as u32, normed, act1152, m));
                         timed!(
                             "rope",
                             strict.launch_rope(&stream, act1152, cos, sin, act2304)
@@ -1024,6 +1319,7 @@ impl CudaModel {
                         }
                         strict.report_scope(batch);
                     } else if use_v3 {
+                        let qkv = qkv.fp16().ok_or("v3 attention requires an FP16 QKV projection")?;
                         timed!("qkv", hgemm(rt, normed, qkv, gemm_out, m));
                         timed!(
                             "rope",
@@ -1075,7 +1371,7 @@ impl CudaModel {
                         } else {
                             q64_effective(q64_requested, q64_compiled)
                         };
-                        timed!("qkv", hgemm_f16(rt, normed, qkv, act1152, m));
+                        timed!("qkv", qkv.project_half(rt, &stream, int8, mxfp8, mx_plan.input, li as u32, normed, act1152, m));
                         timed!(
                             "attn",
                             attention_fa2(
@@ -1118,24 +1414,36 @@ impl CudaModel {
                     }
                     // 输出投影 beta=1 残差进 act384。split-K partial（reduce
                     // 由后续 RmsNorm 融合）。KATAGO_CUDA_SPLITK=1 启用。
-                    if splitk_on {
-                        timed!(
-                            "outproj_splitk_partial",
-                            hgemm_splitk2_partial(rt, normed, out, c_partial, m)
-                        );
-                        pending_splitk_beta = Some(1.0);
-                    } else {
-                        if batch == 14 && let Some(kernel) = &self.outproj_n128 {
-                            if (out.n,out.k,out.kp)!=(384,384,384) || out.nn_data.is_some() { return Err("outproj N128 requires original TN N384/K384 weights".into()); }
-                            timed!("outproj", kernel.launch(&stream, normed, &out.data, act384));
+                    if let ProjectionWeight::Int8(out) = out {
+                        let quant = int8.as_mut().ok_or("missing INT8 workspace")?;
+                        timed!("int8_out", quant.project_residual(rt, &stream, normed, mid, out, act384, m));
+                    } else if let ProjectionWeight::Mxfp8(out) = out {
+                        let quant = mxfp8.as_mut().ok_or("missing MXFP8 workspace")?;
+                        timed!("mxfp8_out", quant.project_f32(
+                            mx_plan.residual.ok_or("missing prepared MXFP8 attention output")?,
+                            li as u32, normed, out.k(), act384));
+                    } else if let Some(out) = out.fp16() {
+                        if splitk_on && (self.quantization_recipe_id.is_none()
+                            || (splitk_weight_supported(out) && matches!(self.layers.get(li + 1), Some(LayerBuf::RmsNorm { channels: 384, .. })))) {
+                            timed!(
+                                "outproj_splitk_partial",
+                                hgemm_splitk2_partial(rt, normed, out, c_partial, m)
+                            );
+                            pending_splitk_beta = Some(1.0);
                         } else {
-                            timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
+                            if batch == 14 && let Some(kernel) = &self.outproj_n128 {
+                                if (out.n,out.k,out.kp)!=(384,384,384) || out.nn_data.is_some() { return Err("outproj N128 requires original TN N384/K384 weights".into()); }
+                                timed!("outproj", kernel.launch(&stream, normed, &out.data, act384));
+                            } else {
+                                timed!("outproj", hgemm_residual(rt, normed, out, act384, m));
+                            }
+                            if !capturing() { crate::backends::cuda::outproj_n128::report(batch,self.outproj_n128.is_some()); }
                         }
-                        if !capturing() { crate::backends::cuda::outproj_n128::report(batch,self.outproj_n128.is_some()); }
                     }
                     false
                 }
                 LayerBuf::Int8Ffn { dual, down, .. } => {
+                    group_cost::role(Role::Dual);
                     let quant = int8.as_mut().ok_or("missing INT8 workspace")?;
                     timed!("int8_ffn_fused", quant.ffn(rt, &stream, normed, dual, down, act384, m));
                     false
@@ -1156,6 +1464,7 @@ impl CudaModel {
                     false
                 }
                 LayerBuf::Ffn { dual, down, hidden } => {
+                    group_cost::role(Role::Dual);
                     let hidden = *hidden;
                     if self.ffn_compact.is_some() {
                         if hidden >= 3 * mid || hidden % 16 != 0 { return Err("compact FFN hidden width mismatch".into()); }
@@ -1167,54 +1476,83 @@ impl CudaModel {
                     // 数值与两 kernel 路径逐位一致(中间 half 舍入在 epilogue
                     // 内复刻)。不可用/未启用时走现有路径。
                     let dual_done = timed!("up_swiglu_unfused", {
-                        #[cfg(katago_dualffn)]
-                        let dual_done = if let Some(compact) = &self.ffn_compact {
-                            compact.launch(&active_stream(rt), normed, &dual.data, act1152, m, hidden)?
-                        } else { match &self.dual_ffn {
-                            Some(st) => dual_ffn_run(st, rt, normed, dual, act1152, m)?,
-                            None => false,
-                        } };
-                        #[cfg(not(katago_dualffn))]
-                        let dual_done = false;
+                        let dual_done = if let Some(dual) = dual.fp16() {
+                            #[cfg(katago_dualffn)]
+                            let done = if let Some(compact) = &self.ffn_compact {
+                                compact.launch(&stream, normed, &dual.data, act1152, m, hidden)?
+                            } else if self.quantization_recipe_id.is_some() && !dual_ffn_weight_supported(dual) {
+                                false
+                            } else {
+                                match &self.dual_ffn {
+                                    Some(st) => dual_ffn_run(st, rt, normed, dual, act1152, m)?,
+                                    None => false,
+                                }
+                            };
+                            #[cfg(not(katago_dualffn))]
+                            let done = false;
+                            done
+                        } else { false };
                         if !dual_done {
                             DUAL_FFN_UNFUSED_REPORT.get_or_init(|| {
                                 eprintln!("[cuda-tactic] name=dual_ffn launch=unfused effective=0");
                             });
-                            // dual FFN:gate|up 单 GEMM(N=2304,f16 直出)→ dual SwiGLU
-                            hgemm_f16(rt, normed, dual, act2304, m)?;
-                            swiglu_dual(rt, act2304, act1152, m, hidden, down.kp)?;
+                            dual.project_half(rt, &stream, int8, mxfp8, mx_plan.input, li as u32, normed, act2304, m)?;
+                            swiglu_dual(rt, act2304, act1152, m, hidden, down.input_stride())?;
                         }
                         Ok::<bool, String>(dual_done)
                     });
                     if profiling && dual_done {
                         sub_times.last_mut().unwrap().0 = "up_swiglu_dualffn_fused";
                     }
+                    if dual_done {
+                        group_cost::launch("cutlass_dual_ffn_swiglu", "row-major-half", [2 * hidden, mid, mid, mid, hidden], Some(Role::Swiglu));
+                    }
+                    group_cost::role(Role::Down);
                     // 前瞻：后一层是 GateSilu(384) 时融合（down 残差 GEMM
                     // epilogue 直接算 silu(affine)，省独立 gate kernel）。
-                    if fuse_down
-                        && let Some(LayerBuf::GateSilu {
-                            scale,
-                            bias,
-                            channels,
-                        }) = self.layers.get(li + 1)
-                    {
-                        if *channels == mid {
-                            // down 残差 + GateSilu384 融合，epilogue 同时写
-                            // act384f16（供 up GEMM 直接读，省 f32_to_f16）
-                            timed!(
-                                "down_residual_gatesilu_fused",
-                                hgemm_residual_gatesilu_f32(
-                                    rt,
-                                    act1152,
-                                    down,
-                                    act384,
-                                    act384f16,
-                                    &scale.data,
-                                    &bias.data,
-                                    m,
-                                )
-                            );
-                            true
+                    if let ProjectionWeight::Int8(down) = down {
+                        let quant = int8.as_mut().ok_or("missing INT8 workspace")?;
+                        timed!("int8_down", quant.project_residual(rt, &stream, act1152, hidden, down, act384, m));
+                        false
+                    } else if let ProjectionWeight::Mxfp8(down) = down {
+                        let quant = mxfp8.as_mut().ok_or("missing MXFP8 workspace")?;
+                        timed!("mxfp8_down", quant.project_f32(
+                            mx_plan.residual.ok_or("missing prepared MXFP8 FFN down")?,
+                            li as u32, act1152, down.k(), act384));
+                        false
+                    } else if let Some(down) = down.fp16() {
+                        if fuse_down
+                            && let Some(LayerBuf::GateSilu {
+                                scale,
+                                bias,
+                                channels,
+                            }) = self.layers.get(li + 1)
+                        {
+                            if *channels == mid {
+                                // down 残差 + GateSilu384 融合，epilogue 同时写
+                                // act384f16（供 up GEMM 直接读，省 f32_to_f16）
+                                timed!(
+                                    "down_residual_gatesilu_fused",
+                                    hgemm_residual_gatesilu_f32(
+                                        rt,
+                                        act1152,
+                                        down,
+                                        act384,
+                                        act384f16,
+                                        &scale.data,
+                                        &bias.data,
+                                        m,
+                                    )
+                                );
+                                act384_half_ready = true;
+                                true
+                            } else {
+                                timed!(
+                                    "down_residual",
+                                    hgemm_residual(rt, act1152, down, act384, m)
+                                );
+                                false
+                            }
                         } else {
                             timed!(
                                 "down_residual",
@@ -1222,22 +1560,18 @@ impl CudaModel {
                             );
                             false
                         }
-                    } else {
-                        timed!(
-                            "down_residual",
-                            hgemm_residual(rt, act1152, down, act384, m)
-                        );
-                        false
-                    }
+                    } else { unreachable!("projection precision is exhaustive") }
                 }
                 LayerBuf::GateSilu {
                     scale,
                     bias,
                     channels,
                 } => {
+                    group_cost::role(Role::Gate);
                     // 384 维（块尾）与 768 维（块边界）两种门。
                     // 通常已被上一层的融合前瞻消费；独立路径保留兜底。
                     if *channels == mid {
+                        act384_half_ready = false;
                         gate_silu_f32(rt, act384, &scale.data, &bias.data, m * mid, *channels)?;
                     } else if *channels == trunk {
                         gate_silu_out(
@@ -1337,6 +1671,12 @@ impl CudaModel {
                     false
                 }
             };
+            if report_precision {
+                report_layer_precision(li, lb, batch, false);
+                if skip_next && matches!(lb, LayerBuf::RmsNorm { .. }) {
+                    report_layer_precision(li + 1, &self.layers[li + 1], batch, true);
+                }
+            }
             if let Some((start, end)) = &layer_events {
                 end.record(&stream)
                     .map_err(|e| format!("profile layer end: {e}"))?;
@@ -1348,11 +1688,13 @@ impl CudaModel {
                     layer_sub_times.push((li, layer_tag, sub_times));
                 }
             }
-            li += 1 + skip_next as usize;
+            let next_li = li + 1 + skip_next as usize;
+            if let Some(cost) = group_cost.as_deref_mut() { cost.after_layer(li, next_li)?; }
+            li = next_li;
             // --- 临时调试钩子：KATAGO_CUDA_DEBUG_LAYER=<i> 时 dump 两路流 ---
             // capture 模式下跳过（host 回拷不可重放）。
             if !capturing() {
-                if let Ok(spec) = std::env::var("KATAGO_CUDA_DEBUG_LAYER") {
+                if let Ok(spec) = crate::tactic_plan::execution_env_var("KATAGO_CUDA_DEBUG_LAYER") {
                     if spec == li.to_string() {
                         let tag = match lb {
                             LayerBuf::Int8Ffn { .. } => "Int8Ffn",
@@ -1450,6 +1792,10 @@ impl CudaModel {
             } // !capturing
         }
 
+        // Includes all FP16/FP32 trunk/head operations after the last MXFP8
+        // projection. Capture and nnbench status rings observe this same scan.
+        ws.enqueue_quantized_final_output_check()?;
+
         if profiling {
             // Print subsegments only after every layer end has been sampled.
             // Their event synchronizations remain diagnostic overhead inside
@@ -1478,6 +1824,177 @@ impl CudaModel {
 
         ACTIVE_STREAM.with(|s| *s.borrow_mut() = None);
         Ok(())
+    }
+}
+
+/// Validate before uploading any weights; unknown or inapplicable precision
+/// selections never silently degrade to another model identity.
+fn validate_recipe_execution(graph: &LayerGraph, recipe: &ResolvedRecipe) -> Result<(), String> {
+    crate::quantization_plan::validate_resolved_recipe(graph, recipe)?;
+    if crate::tactic_plan::installed_plan_id().is_some() {
+        return Err("quantization recipes cannot use an installed FP16 tactic plan".into());
+    }
+    let mut dual_eligible = false;
+    let mut qkv_eligible = false;
+    let mut out_eligible = false;
+    let mut quantized_ffn = false;
+    let mut quantized_qkv = false;
+    let mut splitk_eligible = false;
+    let mut fused_down_eligible = false;
+    let mut fused_up_eligible = false;
+    for (index, (layer, precision)) in graph.layers.iter().zip(&recipe.layers).enumerate() {
+        match layer {
+            Layer::Ffn(f) => {
+                if precision.attention_qkv != Precision::Fp16 || precision.attention_out != Precision::Fp16 {
+                    return Err(format!("layer {index}: attention precision assigned to an FFN"));
+                }
+                if f.hidden == 0 || f.hidden > 3 * graph.mid_channels || f.hidden % 8 != 0
+                    || f.up_weight.numel() != f.hidden * graph.mid_channels
+                    || f.gate_weight.numel() != f.up_weight.numel()
+                    || f.down_weight.numel() != f.up_weight.numel() {
+                    return Err(format!("layer {index}: unsupported FFN shape for quantized execution"));
+                }
+                quantized_ffn |= precision.ffn_dual != Precision::Fp16 || precision.ffn_down != Precision::Fp16;
+                dual_eligible |= precision.ffn_dual == Precision::Fp16 && graph.mid_channels == 384 && f.hidden == 1152;
+                fused_down_eligible |= precision.ffn_down == Precision::Fp16
+                    && matches!(graph.layers.get(index + 1), Some(Layer::GateSilu(g)) if g.channels == graph.mid_channels);
+            }
+            Layer::Attention(a) => {
+                if precision.ffn_dual != Precision::Fp16 || precision.ffn_down != Precision::Fp16 {
+                    return Err(format!("layer {index}: FFN precision assigned to attention"));
+                }
+                if (a.num_heads, a.head_dim, a.seq_len) != (graph.num_heads, graph.head_dim, graph.board_size * graph.board_size)
+                    || a.qkv_weight.numel() != 3 * graph.mid_channels * graph.mid_channels
+                    || a.out_weight.numel() != graph.mid_channels * graph.mid_channels {
+                    return Err(format!("layer {index}: unsupported attention shape for quantized execution"));
+                }
+                quantized_qkv |= precision.attention_qkv != Precision::Fp16;
+                qkv_eligible |= precision.attention_qkv == Precision::Fp16 && graph.mid_channels == 384;
+                out_eligible |= precision.attention_out == Precision::Fp16 && graph.mid_channels == 384;
+                splitk_eligible |= precision.attention_out == Precision::Fp16 && graph.mid_channels == 384
+                    && matches!(graph.layers.get(index + 1), Some(Layer::RmsNorm(_)));
+            }
+            Layer::Linear(l) => {
+                if precision.any_quantized() { return Err(format!("layer {index}: low precision is unsupported for Linear")); }
+                splitk_eligible |= l.n == 384 && matches!(l.k, 384 | 768)
+                    && matches!(graph.layers.get(index + 1), Some(Layer::RmsNorm(_)));
+                fused_up_eligible |= l.k == graph.mid_channels && l.n == graph.trunk_channels
+                    && matches!(graph.layers.get(index + 1), Some(Layer::GateSilu(g)) if g.channels == graph.trunk_channels);
+            }
+            _ if precision.any_quantized() => return Err(format!("layer {index}: low precision is unsupported for this operator")),
+            _ => {},
+        }
+    }
+    for (requested, eligible, name) in [
+        (crate::tactic_plan::tactic_enabled("KATAGO_CUDA_DUALFFN"), dual_eligible, "DUALFFN"),
+        (crate::tactic_plan::tactic_enabled("KATAGO_CUDA_SPLITK"), splitk_eligible, "SPLITK"),
+        (crate::tactic_plan::qkv_immutable_requested()?, qkv_eligible, "QKV immutable/classic N128"),
+        (crate::tactic_plan::outproj_n128_requested()?, out_eligible, "outproj N128"),
+    ] {
+        if requested && !eligible { return Err(format!("quantization recipe has no eligible FP16 projection for {name}")); }
+    }
+    let fusion = crate::tactic_plan::tactic_var("KATAGO_CUDA_FUSION").unwrap_or_else(|_| "none".into());
+    if ((fusion == "up" || fusion == "all") && !fused_up_eligible)
+        || ((fusion == "down" || fusion == "all") && !fused_down_eligible) {
+        return Err("quantization recipe has no eligible FP16 projection for requested fusion".into());
+    }
+    if !matches!(fusion.as_str(), "none" | "up" | "down" | "all") {
+        return Err(format!("invalid KATAGO_CUDA_FUSION {fusion}"));
+    }
+    if quantized_ffn && crate::tactic_plan::ffn_compact_requested()? {
+        return Err("quantized FFN recipes cannot reuse the model-specific FP16 compact weight artifact".into());
+    }
+    if quantized_qkv && crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN").as_deref() == Ok("v3") {
+        return Err("v3 attention requires FP16 QKV; use fa2 for quantized QKV recipes".into());
+    }
+    let tile = crate::tactic_plan::tactic_var("KATAGO_CUDA_ATTN_TILE").unwrap_or_else(|_| "q128".into());
+    let available = match tile.as_str() {
+        "q128" => true,
+        "q64" => crate::backends::cuda::attention_q64_available(),
+        "q64-serial" => crate::backends::cuda::attention_q64_serial_available(),
+        _ => return Err(format!("unsupported quantized attention tile {tile}")),
+    };
+    if !available {
+        return Err(format!("quantization recipe requests unavailable attention tile {tile}; rebuild with this kernel"));
+    }
+    Ok(())
+}
+
+fn report_layer_precision(index: usize, layer: &LayerBuf, batch: usize, rms_fused: bool) {
+    match layer {
+        LayerBuf::Int8Ffn { dual, down } => eprintln!(
+            "[cuda-precision] stage=launched layer={index} physical_batch={batch} op=ffn dual=int8 down=int8 hidden={} channels={} rms_fused={}",
+            down.k, dual.k, u8::from(rms_fused)),
+        LayerBuf::Ffn { dual, down, hidden } => eprintln!(
+            "[cuda-precision] stage=launched layer={index} physical_batch={batch} op=ffn dual={} down={} hidden={hidden} rms_fused=0",
+            dual.name(), down.name()),
+        LayerBuf::Attention { qkv, out, .. } => eprintln!(
+            "[cuda-precision] stage=launched layer={index} physical_batch={batch} op=attention qkv={} out={}",
+            qkv.name(), out.name()),
+        _ => {},
+    }
+}
+
+fn dual_ffn_weight_supported(weight: &WeightBuf) -> bool {
+    (weight.n, weight.k, weight.kp) == (2304, 384, 384)
+}
+
+fn splitk_weight_supported(weight: &WeightBuf) -> bool {
+    weight.n == 384 && weight.k == weight.kp && matches!(weight.k, 384 | 768)
+}
+
+fn upload_projection(rt: &CudaRuntime, stream: &StreamRef, weight: &Tensor, n: usize, k: usize, precision: Precision, mxfp8: Option<&Mxfp8Kernels>) -> Result<ProjectionWeight, String> {
+    match precision {
+        Precision::Fp16 => Ok(ProjectionWeight::Fp16(upload_weight(stream, weight, n, k)?)),
+        Precision::Int8 => Ok(ProjectionWeight::Int8(Int8Weight::upload(stream, weight.f32_data(), n, k)?)),
+        Precision::Mxfp8 => Ok(ProjectionWeight::Mxfp8(Mxfp8Weight::upload_from_f32(
+            rt, stream, mxfp8.ok_or("missing MXFP8 kernels at weight upload")?, weight.f32_data(), n, k, k)?)),
+    }
+}
+
+fn upload_quantized_layer(rt: &CudaRuntime, stream: &StreamRef, layer: &Layer, precision: &LayerPrecision, mxfp8: Option<&Mxfp8Kernels>) -> Result<LayerBuf, String> {
+    match layer {
+        Layer::Ffn(f) => {
+            if precision.ffn_dual == Precision::Int8 && precision.ffn_down == Precision::Int8 {
+                return upload_int8_layer(stream, layer);
+            }
+            let mid = f.up_weight.numel() / f.hidden;
+            let dual = match precision.ffn_dual {
+                Precision::Fp16 => ProjectionWeight::Fp16(upload_weight_concat2(stream, &f.gate_weight, &f.up_weight, f.hidden, mid)?),
+                Precision::Int8 | Precision::Mxfp8 => {
+                    // Concatenate the original FP32 tensors. MXFP8 must never
+                    // start from the independently rounded FP16 weight path.
+                    let mut weights = f.gate_weight.f32_data().to_vec();
+                    weights.extend_from_slice(f.up_weight.f32_data());
+                    if precision.ffn_dual == Precision::Int8 {
+                        ProjectionWeight::Int8(Int8Weight::upload(stream, &weights, 2 * f.hidden, mid)?)
+                    } else {
+                        ProjectionWeight::Mxfp8(Mxfp8Weight::upload_from_f32(rt, stream,
+                            mxfp8.ok_or("missing MXFP8 kernels at dual weight upload")?,
+                            &weights, 2 * f.hidden, mid, mid)?)
+                    }
+                }
+            };
+            Ok(LayerBuf::Ffn {
+                dual,
+                down: upload_projection(rt, stream, &f.down_weight, mid, f.hidden, precision.ffn_down, mxfp8)?,
+                hidden: f.hidden,
+            })
+        }
+        Layer::Attention(a) => {
+            let mid = a.num_heads * a.head_dim;
+            Ok(LayerBuf::Attention {
+                qkv: upload_projection(rt, stream, &a.qkv_weight, 3 * mid, mid, precision.attention_qkv, mxfp8)?,
+                out: upload_projection(rt, stream, &a.out_weight, mid, mid, precision.attention_out, mxfp8)?,
+                cos: upload_f32(stream, a.rope_cos.f32_data(), a.seq_len, mid / 2)?,
+                sin: upload_f32(stream, a.rope_sin.f32_data(), a.seq_len, mid / 2)?,
+                qk_scale: a.qk_scale,
+                h: a.num_heads,
+                d: a.head_dim,
+                s: a.seq_len,
+            })
+        }
+        _ => Err("quantization recipe only covers transformer weighted projections".into()),
     }
 }
 
@@ -1540,18 +2057,18 @@ fn upload_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
             channels: l.channels,
         },
         Layer::Attention(l) => LayerBuf::Attention {
-            qkv: upload_weight(
+            qkv: ProjectionWeight::Fp16(upload_weight(
                 stream,
                 &l.qkv_weight,
                 3 * l.num_heads * l.head_dim,
                 l.qkv_weight.numel() / (3 * l.num_heads * l.head_dim),
-            )?,
-            out: upload_weight(
+            )?),
+            out: ProjectionWeight::Fp16(upload_weight(
                 stream,
                 &l.out_weight,
                 l.num_heads * l.head_dim,
                 l.out_weight.numel() / (l.num_heads * l.head_dim),
-            )?,
+            )?),
             cos: upload_f32(
                 stream,
                 l.rope_cos.f32_data(),
@@ -1572,19 +2089,19 @@ fn upload_layer(stream: &StreamRef, layer: &Layer) -> Result<LayerBuf, String> {
         Layer::Ffn(l) => LayerBuf::Ffn {
             // dual FFN：gate/up 合并为 [2H, K] 单 GEMM（前 H 行 gate、后 H 行 up），
             // N=2304 的 grid 更大，SM 占用更好（fork G1 dual_ffn 认证路径）。
-            dual: upload_weight_concat2(
+            dual: ProjectionWeight::Fp16(upload_weight_concat2(
                 stream,
                 &l.gate_weight,
                 &l.up_weight,
                 l.hidden,
                 l.up_weight.numel() / l.hidden,
-            )?,
-            down: upload_weight(
+            )?),
+            down: ProjectionWeight::Fp16(upload_weight(
                 stream,
                 &l.down_weight,
                 l.down_weight.numel() / l.hidden,
                 l.hidden,
-            )?,
+            )?),
             hidden: l.hidden,
         },
         Layer::GateSilu(l) => LayerBuf::GateSilu {
@@ -1900,6 +2417,8 @@ fn hgemm_f16(
         let stream0 = active_stream(rt);
         let (weights, layout) = b.cublaslt_weights(m);
         if rt.cublaslt_gemm_f16out_with_layout(&stream0, a, weights, c, m, b.n, b.k, layout)? {
+            group_cost::launch("cublaslt_f16out", match layout { CublasLtWeightLayout::Tn => "tn", CublasLtWeightLayout::Nn => "nn" },
+                [b.n, b.k, b.kp, b.k, b.n], None);
             report_gemm_layout(b, m, layout);
             report_tactic_once(
                 &GEMM_LT_F16OUT_REPORT,
@@ -1949,6 +2468,7 @@ fn hgemm_f16(
         &GEMM_HAND_F16OUT_REPORT,
         &format!("name=gemm kind=f16out engine=handwritten tile={kname}"),
     );
+    group_cost::launch(kname, "tn-row-major-half", [b.n, b.k, b.kp, b.kp, b.n], None);
     Ok(())
 }
 
@@ -1978,6 +2498,8 @@ fn hgemm_residual(
     if crate::tactic_plan::tactic_var("KATAGO_CUDA_CUBLASLT").as_deref() != Ok("0") && b.kp == b.k {
         let (weights, layout) = b.cublaslt_weights(m);
         if rt.cublaslt_gemm_with_layout(&stream, a, weights, c, m, b.n, b.k, 1.0, layout)? {
+            group_cost::launch("cublaslt_f32_residual", match layout { CublasLtWeightLayout::Tn => "tn", CublasLtWeightLayout::Nn => "nn" },
+                [b.n, b.k, b.kp, b.k, b.n], None);
             report_gemm_layout(b, m, layout);
             report_tactic_once(
                 &GEMM_LT_RESIDUAL_REPORT,
@@ -2016,6 +2538,7 @@ fn hgemm_residual(
             .launch(cfg)
     }
     .map_err(|e| format!("{kname} residual launch failed: {e}"))?;
+    group_cost::launch(kname, "tn-half-input-f32-residual", [b.n, b.k, b.kp, b.kp, b.n], None);
     report_tactic_once(
         &GEMM_HAND_RESIDUAL_REPORT,
         &format!("name=gemm kind=residual engine=handwritten tile={kname}"),
@@ -2097,6 +2620,11 @@ fn hgemm_residual_gatesilu_f32(
             .launch(cfg)
     }
     .map_err(|e| format!("hgemm gatesilu f32 launch failed: {e}"))?;
+    group_cost::launch("hgemm_v2_residual_gatesilu_f32_and_half", "tn-half-input", [b.n, b.k, b.kp, b.kp, b.n], Some(Role::Gate));
+    if !capturing() {
+        static REPORT: OnceLock<()> = OnceLock::new();
+        REPORT.get_or_init(|| eprintln!("[cuda-tactic] name=fusion launch=down"));
+    }
     Ok(())
 }
 
@@ -2140,6 +2668,10 @@ fn hgemm_residual_gatesilu_f16(
             .launch(cfg)
     }
     .map_err(|e| format!("hgemm gatesilu f16 launch failed: {e}"))?;
+    if !capturing() {
+        static REPORT: OnceLock<()> = OnceLock::new();
+        REPORT.get_or_init(|| eprintln!("[cuda-tactic] name=fusion launch=up"));
+    }
     Ok(())
 }
 
@@ -2736,6 +3268,8 @@ fn rms_norm_f32(
         }
         .map_err(|e| format!("rms_norm_f32 launch failed: {e}"))?;
     }
+    group_cost::launch(if use_v1 { "rms_norm_f32_v1" } else if ncols == 384 { "rms_norm_f32_w4" } else { "rms_norm_f32_w4_generic" },
+        "f32-to-half-row-major", [ncols, ncols, ncols, ncols, ncols], None);
     Ok(())
 }
 
@@ -2761,6 +3295,7 @@ fn gate_silu_f32(
             .launch(LaunchConfig::for_num_elems(n as u32))
     }
     .map_err(|e| format!("gate_silu_f32 launch failed: {e}"))?;
+    group_cost::launch("gate_silu_f32", "f32-row-major", [c, c, c, c, c], None);
     Ok(())
 }
 
@@ -2773,6 +3308,7 @@ fn swiglu_dual(
     hidden: usize,
     padded_hidden: usize,
 ) -> Result<(), String> {
+    group_cost::role(Role::Swiglu);
     if hidden != padded_hidden {
         let f = rt.get_func("swiglu_dual_padded_kernel")?;
         let stream = active_stream(rt);
@@ -2781,6 +3317,7 @@ fn swiglu_dual(
                 .arg(&(hidden as i32)).arg(&(padded_hidden as i32))
                 .launch(LaunchConfig::for_num_elems((m * padded_hidden) as u32))
         }.map_err(|e| format!("padded SwiGLU launch failed: {e}"))?;
+        group_cost::launch("swiglu_dual_padded", "half-row-major-zero-padding", [hidden, 2 * hidden, padded_hidden, 2 * hidden, padded_hidden], None);
         return Ok(());
     }
     let f = rt.get_func("swiglu_dual_kernel")?;
@@ -2796,6 +3333,7 @@ fn swiglu_dual(
             .launch(LaunchConfig::for_num_elems(n as u32))
     }
     .map_err(|e| format!("swiglu_dual launch failed: {e}"))?;
+    group_cost::launch("swiglu_dual", "half-row-major", [hidden, 2 * hidden, hidden, 2 * hidden, hidden], None);
     Ok(())
 }
 
@@ -3144,7 +3682,12 @@ fn policy_concat(
 /// 消除每次 apply 的 20+ 次设备内存分配（WDDM 下 malloc 虽为
 /// stream-ordered，但配合 CUDA Graph capture 需预分配固定地址）。
 pub struct CudaWorkspace {
+    // None in every ordinary workspace. Set only by prepare_group_cost.
+    group_cost_slot: Option<u64>,
     int8: Option<Int8Workspace>,
+    mxfp8: Option<Mxfp8Workspace>,
+    mxfp8_plans: Vec<Mxfp8LayerPlans>,
+    model_instance_id: u64,
     pub cols: CudaSlice<u16>,   // im2col [M,208]
     pub act768: CudaSlice<f32>, // raw 768 流（f32 残差累积）
     pub gated768: CudaSlice<u16>,
@@ -3187,18 +3730,80 @@ pub struct CudaWorkspace {
     batch: usize,
 }
 
+/// Model-layer indices remain unchanged by runtime fusions. Prepared IDs are
+/// workspace/physical-batch specific and never stored in shared model weights.
+#[derive(Clone, Copy, Default)]
+struct Mxfp8LayerPlans {
+    input: Option<PreparedProjectionId>,
+    residual: Option<PreparedProjectionId>,
+}
+
 impl CudaWorkspace {
     /// 按模型形状与 batch 一次性预分配全部工作区。
     pub fn new(stream: &Arc<CudaStream>, model: &CudaModel, batch: usize) -> Result<Self, String> {
+        if model.has_mxfp8() {
+            return Err("MXFP8 models require CudaWorkspace::new_with_runtime".into());
+        }
+        Self::new_inner(None, stream, model, batch)
+    }
+
+    /// MXFP8 descriptors and the runtime's Lt workspace must outlive every
+    /// captured Graph. Existing FP16/INT8 callers may keep using `new`.
+    pub fn new_with_runtime(rt: Arc<CudaRuntime>, stream: &Arc<CudaStream>, model: &CudaModel, batch: usize) -> Result<Self, String> {
+        Self::new_inner(Some(rt), stream, model, batch)
+    }
+
+    fn new_inner(rt: Option<Arc<CudaRuntime>>, stream: &Arc<CudaStream>, model: &CudaModel, batch: usize) -> Result<Self, String> {
+        if !Arc::ptr_eq(&model.owner_context, stream.context())
+            || rt.as_ref().is_some_and(|runtime| !Arc::ptr_eq(&model.owner_context, &runtime.device)) {
+            return Err("CUDA workspace must use its model upload context".into());
+        }
         let s = model.seq_len;
-        let m = batch * s;
+        let m = batch.checked_mul(s).ok_or("CUDA workspace batch size overflow")?;
         let trunk = model.trunk;
         let mid = model.mid;
         let h = model.num_heads;
         let d = model.head_dim;
         let qkv_elts = batch * h * s * d;
+        let mut mxfp8_plans = Vec::new();
+        let mxfp8 = if let Some(kernels) = &model.mxfp8_kernels {
+            if model.layers.len() > u32::MAX as usize {
+                return Err("MXFP8 model layer indices exceed u32".into());
+            }
+            let rt = rt.ok_or("MXFP8 workspace requires an owned CUDA runtime")?;
+            // Allocate only the largest K actually assigned to MXFP8. N is
+            // retained in each prepared output layout; no full-width padding.
+            let max_k = model.layers.iter().filter_map(|layer| match layer {
+                LayerBuf::Ffn { dual, down, .. } => Some((dual, down)),
+                LayerBuf::Attention { qkv, out, .. } => Some((qkv, out)),
+                _ => None,
+            }).flat_map(|(a, b)| [a, b]).filter_map(|weight| match weight {
+                ProjectionWeight::Mxfp8(weight) => Some(weight.k()),
+                _ => None,
+            }).max().ok_or("MXFP8 kernels loaded without an MXFP8 projection")?;
+            let mut quant = Mxfp8Workspace::new(rt, stream.clone(), kernels.clone(), m, max_k)?;
+            mxfp8_plans.resize(model.layers.len(), Mxfp8LayerPlans::default());
+            for (index, layer) in model.layers.iter().enumerate() {
+                let (input, residual) = match layer {
+                    LayerBuf::Ffn { dual, down, .. } => (dual, down),
+                    LayerBuf::Attention { qkv, out, .. } => (qkv, out),
+                    _ => continue,
+                };
+                if let ProjectionWeight::Mxfp8(weight) = input {
+                    mxfp8_plans[index].input = Some(quant.prepare_projection(weight.clone(), Mxfp8Output::Half)?);
+                }
+                if let ProjectionWeight::Mxfp8(weight) = residual {
+                    mxfp8_plans[index].residual = Some(quant.prepare_projection(weight.clone(), Mxfp8Output::FloatResidual)?);
+                }
+            }
+            Some(quant)
+        } else { None };
         Ok(Self {
             int8: model.int8_kernels.as_ref().map(|kernels| Int8Workspace::from_kernels(kernels, stream, m, 3 * mid, 6 * mid)).transpose()?,
+            group_cost_slot: None,
+            mxfp8,
+            mxfp8_plans,
+            model_instance_id: model.model_instance_id,
             cols: zeros16(stream, m * 208)?,
             act768: zeros32(stream, m * trunk)?,
             gated768: zeros16(stream, m * trunk)?,
@@ -3231,8 +3836,60 @@ impl CudaWorkspace {
         })
     }
 
+    fn int8_algorithm_forward_entry(&mut self, rt: &CudaRuntime, stream: &Arc<CudaStream>) -> Result<(), String> {
+        if let Some(quant) = &mut self.int8 { quant.algorithm_forward_entry(rt, stream)?; }
+        Ok(())
+    }
+
+    fn int8_algorithm_forward_exit<T>(&mut self, result: Result<T, String>) -> Result<T, String> {
+        if let Some(quant) = &mut self.int8 { quant.complete_algorithm_operation(result) } else { result }
+    }
+
     pub fn batch(&self) -> usize {
         self.batch
+    }
+
+    pub fn has_mxfp8(&self) -> bool { self.mxfp8.is_some() }
+
+    /// The model calls this after producing all five raw heads. Call again if
+    /// an external consumer deliberately modifies those buffers before reading.
+    pub fn enqueue_quantized_final_output_check(&self) -> Result<(), String> {
+        if let Some(quant) = &self.mxfp8 {
+            quant.check_final_outputs([&self.out_policy, &self.out_value, &self.out_misc,
+                &self.out_moremisc, &self.out_ownership])?;
+        }
+        Ok(())
+    }
+
+    /// Preparation-only synchronization and validation, before Graph capture.
+    /// FP16/INT8 workspaces retain their original warmup behavior.
+    pub fn complete_quantized_warmup(&mut self) -> Result<(), String> {
+        if let Some(quant) = self.mxfp8.as_mut() { quant.complete_warmup()?; }
+        Ok(())
+    }
+
+    /// Keep this token until after the corresponding captured Graph is dropped.
+    pub fn quantized_graph_resources(&self) -> Result<Option<Mxfp8GraphResources>, String> {
+        self.mxfp8.as_ref().map(Mxfp8Workspace::graph_resources).transpose()
+    }
+
+    /// Per-submission snapshot: call on the owner stream before recording the
+    /// slot completion event, and never reuse a pinned slot while it is pending.
+    pub fn enqueue_quantized_status_copy(&self, destination: &mut PinnedHostSlice<u32>) -> Result<(), String> {
+        if let Some(quant) = &self.mxfp8 { quant.enqueue_status_copy(destination)?; }
+        Ok(())
+    }
+
+    /// For same-stream D2D snapshots in direct kernel benchmarks. Copy both
+    /// words before the next apply resets them; validate each completed copy.
+    pub fn quantized_status(&self) -> Option<&CudaSlice<u32>> {
+        self.mxfp8.as_ref().map(Mxfp8Workspace::status)
+    }
+
+    /// Validate a completed pinned/device-ring snapshot, never a later forward's
+    /// shared status. Call before decoding, tracing, caching or publishing NN output.
+    pub fn validate_quantized_status(status: &[u32]) -> Result<(), String> {
+        crate::backends::mxfp8::validate_completed_status(status)
     }
 }
 
@@ -3248,6 +3905,12 @@ pub struct CudaOutputsHost {
 
 impl CudaWorkspace {
     pub fn to_host(&self, stream: &Arc<CudaStream>) -> Result<CudaOutputsHost, String> {
+        if let Some(quant) = &self.mxfp8 {
+            quant.validate_owner_stream(stream)?;
+            for output in [&self.out_policy, &self.out_value, &self.out_misc, &self.out_moremisc, &self.out_ownership] {
+                quant.validate_owner_stream(output.stream())?;
+            }
+        }
         let stream = stream.clone();
         let get = |d: &CudaSlice<f32>| -> Result<Vec<f32>, String> {
             let mut v = vec![0.0f32; d.len()];
@@ -3256,12 +3919,21 @@ impl CudaWorkspace {
                 .map_err(|e| format!("memcpy_dtoh failed: {e}"))?;
             Ok(v)
         };
-        Ok(CudaOutputsHost {
+        let outputs = CudaOutputsHost {
             policy: get(&self.out_policy)?,
             value: get(&self.out_value)?,
             misc: get(&self.out_misc)?,
             moremisc: get(&self.out_moremisc)?,
             ownership: get(&self.out_ownership)?,
-        })
+        };
+        if let Some(device_status) = self.quantized_status() {
+            // Direct callers consume the outputs now. Production pipelined
+            // slots instead use their own asynchronous pinned status snapshot.
+            let mut status = [0u32; crate::backends::mxfp8::STATUS_WORDS];
+            stream.memcpy_dtoh(device_status, &mut status).map_err(|e| format!("quantized status readback: {e}"))?;
+            stream.synchronize().map_err(|e| format!("quantized output completion: {e}"))?;
+            Self::validate_quantized_status(&status)?;
+        }
+        Ok(outputs)
     }
 }

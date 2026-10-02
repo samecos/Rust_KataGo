@@ -17,7 +17,7 @@ use crate::wire::server_message::Payload as ServerPayload;
 use crate::wire::worker_message::Payload as WorkerPayload;
 use crate::wire::worker_service_client::WorkerServiceClient;
 use crate::wire::{self, EvalRequest, EvalResult, WorkerHeartbeat, WorkerMessage};
-use crate::{Evaluator, INPUT_PROFILE, PROTOCOL_VERSION};
+use crate::{Evaluator, Metadata, INPUT_PROFILE, PROTOCOL_VERSION};
 
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
@@ -198,14 +198,9 @@ async fn connect_and_serve(
         }
     };
     match welcome.payload {
-        Some(ServerPayload::Welcome(welcome)) if welcome.protocol_version == PROTOCOL_VERSION => {
-            log::info!("NN worker connected: {}", welcome.connection_id);
-        }
         Some(ServerPayload::Welcome(welcome)) => {
-            bail!(
-                "unsupported worker protocol version {} (expected {PROTOCOL_VERSION})",
-                welcome.protocol_version
-            );
+            validate_welcome(&welcome, evaluator.metadata())?;
+            log::info!("NN worker connected: {}", welcome.connection_id);
         }
         _ => bail!("first server message must be Welcome"),
     }
@@ -253,12 +248,17 @@ async fn connect_and_serve(
                             // Never send a second completion that retires that lease.
                             let key = TaskKey::from(&request);
                             if active.contains_key(&key) {
+                                // Never emit a second result retiring an active lease.
+                                // A duplicate for another model terminates this stream.
+                                if identity_rejection(&request, evaluator.metadata()).is_some() {
+                                    bail!("active duplicate changed model");
+                                }
                                 continue;
                             }
-                            let rejected = if draining {
+                            let rejected = if let Some(error) = identity_rejection(&request, evaluator.metadata()) {
+                                Some(error)
+                            } else if draining {
                                 Some(("DRAINING", "Worker is draining"))
-                            } else if !request.model_sha256.eq_ignore_ascii_case(&evaluator.metadata().model_sha256) {
-                                Some(("MODEL_MISMATCH", "Requested model hash differs from loaded model"))
                             } else if request.task_id == 0 || request.session_id.is_empty()
                                 || request.input_hash.is_empty() || request.lease_ms == 0
                                 || request.lease_ms > MAX_LEASE_MS {
@@ -269,7 +269,7 @@ async fn connect_and_serve(
                                 None
                             };
                             if let Some((code, message)) = rejected {
-                                let mut result = result_identity(&request, &evaluator.metadata().model_sha256);
+                                let mut result = result_identity(&request, evaluator.metadata());
                                 set_error(&mut result, code, message);
                                 result.elapsed_us = micros(received.elapsed());
                                 counters.record(&result);
@@ -356,7 +356,7 @@ fn compute(
 ) -> Completed {
     let started = Instant::now();
     let lease = Duration::from_millis(request.lease_ms);
-    let mut result = result_identity(&request, &evaluator.metadata().model_sha256);
+    let mut result = result_identity(&request, evaluator.metadata());
     result.queue_us = Some(micros(started.saturating_duration_since(enqueued)));
     if cancelled.load(Ordering::Acquire) {
         set_error(&mut result, "CANCELLED", "Evaluation cancelled");
@@ -422,16 +422,35 @@ fn finalize(mut completed: Completed) -> Completed {
     completed
 }
 
-fn result_identity(request: &EvalRequest, model_sha256: &str) -> EvalResult {
+fn validate_welcome(welcome: &wire::Welcome, _metadata: &Metadata) -> Result<()> {
+    if welcome.protocol_version != PROTOCOL_VERSION {
+        bail!("unsupported worker protocol version {} (expected {PROTOCOL_VERSION})", welcome.protocol_version);
+    }
+    Ok(())
+}
+
+fn identity_rejection(request: &EvalRequest, metadata: &Metadata) -> Option<(&'static str, &'static str)> {
+    if !request.model_sha256.eq_ignore_ascii_case(&metadata.model_sha256) {
+        Some(("MODEL_MISMATCH", "Requested model hash differs from loaded model"))
+    } else {
+        None
+    }
+}
+
+fn result_identity(request: &EvalRequest, metadata: &Metadata) -> EvalResult {
     EvalResult {
         task_id: request.task_id,
         generation: request.generation,
         session_id: request.session_id.clone(),
         input_hash: request.input_hash.clone(),
-        model_sha256: model_sha256.to_owned(),
+        model_sha256: metadata.model_sha256.clone(),
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+#[path = "original_protocol_tests.rs"]
+mod original_protocol_tests;
 
 fn set_error(result: &mut EvalResult, code: &str, message: &str) {
     result.output = None;

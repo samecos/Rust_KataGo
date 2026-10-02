@@ -33,6 +33,7 @@ impl FakeEvaluator {
     fn new(blocked: &[u64], panics: &[u64]) -> Arc<Self> {
         Arc::new(Self {
             metadata: Metadata {
+                execution_profile_id: String::new(),
                 model_sha256: MODEL_HASH.into(),
                 model_version: 15,
                 engine_commit: "test-engine-provenance".into(),

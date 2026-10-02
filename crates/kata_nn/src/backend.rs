@@ -73,6 +73,20 @@ pub trait LoadedModel: Send {
     /// Returns the model descriptor.
     fn model_desc(&self) -> &ModelDesc;
 
+    /// Identity of the actual inference recipe resolved for this loaded model.
+    /// This is separate from the source model SHA256. Legacy backends do not
+    /// expose a recipe identity, and must not infer one from configuration.
+    fn inference_profile_id(&self) -> Option<String> {
+        None
+    }
+
+    /// Actual loaded execution identity for typed Worker routing. Quantized
+    /// backends retain their existing profile verbatim. Unsupported/unloaded
+    /// backends return None; configuration or diagnostic names are not identity.
+    fn execution_profile_id(&self) -> Option<String> {
+        self.inference_profile_id()
+    }
+
     /// Enable downcasting to the concrete implementor.
     fn as_any(&self) -> &dyn Any;
 }
@@ -617,6 +631,7 @@ mod tests {
             .load_model_file("dummy.bin", "")
             .expect("load_model_file should succeed");
         assert_eq!(model.model_desc().get_num_parameters(), 0);
+        assert_eq!(model.inference_profile_id(), None);
 
         let logger = Logger::new(kata_core::logger::LoggerOptions::default(), None);
         let ctx = backend

@@ -2399,6 +2399,7 @@ name = "kata_worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cudarc",
  "hex",
  "kata_core",
  "kata_game",
@@ -2407,6 +2408,7 @@ dependencies = [
  "log",
  "prost 0.14.4",
  "protoc-bin-vendored",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",

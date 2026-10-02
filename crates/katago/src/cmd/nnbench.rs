@@ -7,6 +7,8 @@
 //!   报告真实后端 rows/batches；C++ benchmarknn 则跳过特征编码与请求调度。
 //! - `direct`:直连 `CudaModel::apply`(无 graph/无调度),kernel 下界对照。
 //! - `kernel`:设备输入常驻,计时纯前向(无 graph/拷贝/调度)。
+//!   MXFP8 additionally snapshots each forward's status on-device: wall time
+//!   includes these copies, while each CUDA end event precedes its snapshot.
 //!
 //! 用法:
 //!   katago-rs nnbench --model D:/code/b11fix.onnx --batch 12
@@ -81,6 +83,118 @@ pub fn nnbench(args: &[String]) -> i32 {
             }
         }
     }
+}
+
+#[cfg(any(feature = "cuda", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BenchCudaBackend {
+    Fp16,
+    Int8,
+    Quantized,
+}
+
+/// Reject incompatible precision options before reading a model or touching
+/// CUDA. In particular, direct/kernel cannot authenticate an evaluator profile.
+#[cfg(any(feature = "cuda", test))]
+fn benchmark_backend(
+    cfg: &kata_core::config::ConfigParser,
+    direct: bool,
+) -> Result<BenchCudaBackend, String> {
+    let key = if cfg.contains("nnBackend0") {
+        "nnBackend0"
+    } else {
+        "nnBackend"
+    };
+    let name = if cfg.contains(key) {
+        cfg.get_string(key).map_err(|e| e.to_string())?
+    } else if !direct {
+        return Err("eval mode requires an explicitly configured CUDA backend".into());
+    } else {
+        "cudabackend".into()
+    };
+    let backend = match name.as_str() {
+        "cuda" | "cudabackend" => BenchCudaBackend::Fp16,
+        "cudaint8" | "cudaint8backend" => BenchCudaBackend::Int8,
+        "cudaquant" | "cudaquantbackend" => BenchCudaBackend::Quantized,
+        _ => {
+            return Err("nnbench requires cudabackend, cudaint8backend or cudaquantbackend".into());
+        }
+    };
+    if backend != BenchCudaBackend::Int8
+        && (cfg.contains("cudaInt8Scope") || cfg.contains("cudaInt8MinFfnWidth"))
+    {
+        return Err("cudaInt8Scope/cudaInt8MinFfnWidth requires nnBackend=cudaint8backend; cudaquantbackend selects layers in cudaQuantPlan".into());
+    }
+    if backend != BenchCudaBackend::Quantized
+        && (cfg.contains("cudaQuantPlan") || cfg.contains("cudaQuantExpectedProfile"))
+    {
+        return Err(
+            "cudaQuantPlan/cudaQuantExpectedProfile requires nnBackend=cudaquantbackend".into(),
+        );
+    }
+    if direct && cfg.contains("cudaTacticPlan") {
+        return Err(
+            "direct/kernel modes do not install cudaTacticPlan; use eval for plan benchmarks"
+                .into(),
+        );
+    }
+    if backend == BenchCudaBackend::Quantized {
+        if cfg.contains("cudaTacticPlan") {
+            return Err(
+                "cudaquantbackend uses cudaQuantPlan and cannot reuse cudaTacticPlan".into(),
+            );
+        }
+        if cfg.contains("cudaQuantPlan")
+            && cfg
+                .get_string("cudaQuantPlan")
+                .map_err(|e| e.to_string())?
+                .trim()
+                .is_empty()
+        {
+            return Err("cudaQuantPlan must not be empty; omit it for the FP16 base recipe".into());
+        }
+        if direct && cfg.contains("cudaQuantExpectedProfile") {
+            return Err("direct/kernel modes cannot verify cudaQuantExpectedProfile; use --mode eval for evaluator execution-profile verification".into());
+        }
+    }
+    Ok(backend)
+}
+
+#[cfg(any(feature = "cuda", test))]
+const QUANTIZED_STATUS_WORDS: usize = 2;
+
+#[cfg(any(feature = "cuda", test))]
+fn quantized_status_ring_words(iterations: usize) -> Result<usize, String> {
+    iterations
+        .checked_mul(QUANTIZED_STATUS_WORDS)
+        .filter(|&words| words.checked_mul(std::mem::size_of::<u32>()).is_some())
+        .ok_or_else(|| "quantized benchmark status ring size overflow".to_string())
+}
+
+/// Validate every saved forward, not only the last workspace status after its
+/// predecessors have been reset. This helper is also testable without CUDA.
+#[cfg(any(feature = "cuda", test))]
+fn validate_quantized_status_ring(
+    statuses: &[u32],
+    iterations: usize,
+    mut validate: impl FnMut(&[u32]) -> Result<(), String>,
+) -> Result<(), String> {
+    let expected = quantized_status_ring_words(iterations)?;
+    if statuses.len() != expected {
+        return Err(format!(
+            "quantized benchmark status ring has {} words, expected {expected}",
+            statuses.len()
+        ));
+    }
+    for (iteration, status) in statuses.chunks_exact(QUANTIZED_STATUS_WORDS).enumerate() {
+        validate(status).map_err(|error| {
+            format!(
+                "quantized benchmark timed iteration {}: {error}",
+                iteration + 1
+            )
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "cuda")]
@@ -174,10 +288,7 @@ fn eval_sweep(parsed: &NnBenchArgs, batches: &[usize]) -> Result<(), String> {
             .get_config("gtp_example.cfg")
             .map_err(|e| e.to_string())?
     };
-    let backend_key = if cfg.contains("nnBackend0") { "nnBackend0" } else { "nnBackend" };
-    if !matches!(cfg.get_string(backend_key).unwrap_or_default().as_str(), "cuda" | "cudabackend" | "cudaint8" | "cudaint8backend") {
-        return Err("eval mode requires cudabackend or cudaint8backend".into());
-    }
+    benchmark_backend(&cfg, false)?;
 
     let logger: &'static Logger = Box::leak(Box::new(Logger::new(
         LoggerOptions {
@@ -221,6 +332,9 @@ fn eval_sweep(parsed: &NnBenchArgs, batches: &[usize]) -> Result<(), String> {
         parsed.iterations,
         parsed.warmup
     );
+    if let Some(profile) = nn_eval.inference_profile_id() {
+        println!("[cuda-quant] inference_profile={profile} validation=unverified");
+    }
     println!("batch | perBatchMs | nnEvals/s | rows | batches | avgBatch");
 
     let params = MiscNNInputParams::default();
@@ -342,42 +456,94 @@ fn direct_sweep(
 
     let model_file = parsed.common.get_model_file().map_err(|e| e.to_string())?;
     let cfg = if parsed.common.config.is_empty() {
-        let mut cfg = kata_core::config::ConfigParser::from_str("nnBackend=cudabackend\n", false, false).map_err(|e| e.to_string())?;
-        parsed.common.maybe_apply_override_config_arg(&mut cfg).map_err(|e| e.to_string())?;
+        let mut cfg =
+            kata_core::config::ConfigParser::from_str("nnBackend=cudabackend\n", false, false)
+                .map_err(|e| e.to_string())?;
+        parsed
+            .common
+            .maybe_apply_override_config_arg(&mut cfg)
+            .map_err(|e| e.to_string())?;
         cfg
-    } else { parsed.common.get_config("gtp_example.cfg").map_err(|e| e.to_string())? };
-    if cfg.contains("cudaTacticPlan") {
-        return Err("direct/kernel modes do not install cudaTacticPlan; use eval for plan benchmarks".into());
-    }
-    let backend_key = if cfg.contains("nnBackend0") { "nnBackend0" } else { "nnBackend" };
-    let backend = if cfg.contains(backend_key) {
-        cfg.get_string(backend_key).map_err(|e| e.to_string())?
-    } else { "cudabackend".into() };
-    let int8_scope = match backend.as_str() {
-        "cudaint8" | "cudaint8backend" => Some(kata_nn::backends::int8::Int8Scope::parse(&if cfg.contains("cudaInt8Scope") { cfg.get_string("cudaInt8Scope").map_err(|e| e.to_string())? } else { "ffn".into() })?),
-        "cuda" | "cudabackend" if !cfg.contains("cudaInt8Scope") && !cfg.contains("cudaInt8MinFfnWidth") => None,
-        _ => return Err("direct/kernel mode requires a CUDA backend; cudaInt8Scope requires cudaint8backend".into()),
+    } else {
+        parsed
+            .common
+            .get_config("gtp_example.cfg")
+            .map_err(|e| e.to_string())?
+    };
+    let backend = benchmark_backend(&cfg, true)?;
+    let int8_scope = if backend == BenchCudaBackend::Int8 {
+        Some(kata_nn::backends::int8::Int8Scope::parse(
+            &if cfg.contains("cudaInt8Scope") {
+                cfg.get_string("cudaInt8Scope").map_err(|e| e.to_string())?
+            } else {
+                "ffn".into()
+            },
+        )?)
+    } else {
+        None
     };
     let int8_min_ffn_width = if cfg.contains("cudaInt8MinFfnWidth") {
-        kata_nn::backends::int8::parse_min_ffn_width(&cfg.get_string("cudaInt8MinFfnWidth").map_err(|e| e.to_string())?)?
-    } else { 0 };
+        kata_nn::backends::int8::parse_min_ffn_width(
+            &cfg.get_string("cudaInt8MinFfnWidth")
+                .map_err(|e| e.to_string())?,
+        )?
+    } else {
+        0
+    };
     let bytes = std::fs::read(&model_file).map_err(|e| format!("read model: {e}"))?;
     let model_sha256 = kata_core::hash::sha2::sha256_hex(&bytes);
-    kata_nn::tactic_plan::validate_outproj_model_sha(&model_sha256)?;
+    if backend != BenchCudaBackend::Quantized {
+        kata_nn::tactic_plan::validate_outproj_model_sha(&model_sha256)?;
+    }
     let graph = direct_layer_graph(&model_file, &bytes)?;
     let rt = CudaRuntime::new().map_err(|e| format!("CUDA runtime: {e}"))?;
+    if backend == BenchCudaBackend::Quantized {
+        kata_nn::backends::cuda::validate_quantized_runtime(&rt)?;
+        kata_nn::backends::cuda::validate_quantized_model_source(&model_sha256)?;
+    }
     rt.validate_residual_algo_request()
         .map_err(|e| format!("CUDA residual tactic: {e}"))?;
+    let recipe = if backend == BenchCudaBackend::Quantized {
+        Some(if cfg.contains("cudaQuantPlan") {
+            let path = cfg.get_string("cudaQuantPlan").map_err(|e| e.to_string())?;
+            kata_nn::quantization_plan::load_and_resolve(
+                std::path::Path::new(&path),
+                &graph,
+                &model_sha256,
+            )?
+        } else {
+            kata_nn::quantization_plan::fp16_recipe(&graph, &model_sha256)?
+        })
+    } else {
+        None
+    };
     let stream = rt.device.default_stream();
     let model = Arc::new(
-        match int8_scope {
-            Some(scope) => CudaModel::load_int8_selective(&graph, &rt, &stream, scope, int8_min_ffn_width),
-            None => CudaModel::load(&graph, &rt, &stream),
-        }.map_err(|e| format!("load CudaModel: {e}"))?,
+        if let Some(recipe) = &recipe {
+            CudaModel::load_quantized(&graph, &rt, &stream, recipe)
+        } else {
+            match int8_scope {
+                Some(scope) => {
+                    CudaModel::load_int8_selective(&graph, &rt, &stream, scope, int8_min_ffn_width)
+                }
+                None => CudaModel::load(&graph, &rt, &stream),
+            }
+        }
+        .map_err(|e| format!("load CudaModel: {e}"))?,
     );
     rt.device.synchronize().map_err(|e| format!("sync: {e}"))?;
+    if recipe.is_some() {
+        kata_nn::backends::cuda::ensure_requested_cuda_capabilities(&model)?;
+    }
     let rt_shared = Arc::new(rt);
 
+    #[derive(Debug, Serialize)]
+    struct QuantizedStatusValidation {
+        warmup_forwards: usize,
+        timed_forwards: usize,
+        device_snapshot_words: usize,
+        timing_boundary: &'static str,
+    }
     #[derive(Debug, Serialize)]
     struct HandleSample {
         handle: usize,
@@ -388,6 +554,8 @@ fn direct_sweep(
         cuda_event_ms: Option<Vec<f32>>,
         cuda_event_median_ms: Option<f64>,
         cuda_event_median_nn_evals_per_s: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quantized_status_validation: Option<QuantizedStatusValidation>,
     }
     #[derive(Debug, Serialize)]
     struct BatchResult {
@@ -407,6 +575,18 @@ fn direct_sweep(
         int8_min_ffn_width: usize,
         int8_ffn_layers: usize,
         quantization_version: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mxfp8_quantization_version: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recipe_sha256: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        graph_sha256: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quantization_semantics_version: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        identity_scope: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        validation: Option<&'static str>,
         command: &'static str,
         mode: String,
         kernel_only: bool,
@@ -427,6 +607,12 @@ fn direct_sweep(
     }
 
     if !parsed.json {
+        if let Some(recipe) = &recipe {
+            println!(
+                "[cuda-quant] model_sha256={} graph_sha256={} recipe_sha256={} identity_scope=precision-recipe-only validation=unverified",
+                model_sha256, recipe.graph_sha256, recipe.recipe_sha256
+            );
+        }
         println!(
             "nnbench({}): model={} handles={} iterations={} warmup={} input={}",
             if kernel_only { "kernel" } else { "direct" },
@@ -481,7 +667,9 @@ fn direct_sweep(
                                     })?;
                                 let mut d_global = unsafe { stream.alloc(global.len()) }
                                     .map_err(|e| format!("handle {handle_id} alloc global: {e}"))?;
-                                let mut ws = CudaWorkspace::new(&stream, &model, b)
+                                let mut ws = CudaWorkspace::new_with_runtime(
+                                    rt.clone(), &stream, &model, b,
+                                )
                                     .map_err(|e| format!("handle {handle_id} workspace: {e}"))?;
                                 if kernel_only {
                                     // Kernel-only mode excludes transfers from the timed
@@ -493,7 +681,7 @@ fn direct_sweep(
                                         format!("handle {handle_id} init global: {e}")
                                     })?;
                                 }
-                                let mut run_once = || -> Result<(), String> {
+                                let mut run_once = |ws: &mut CudaWorkspace| -> Result<(), String> {
                                     if !kernel_only {
                                         stream.memcpy_htod(&spatial, &mut d_spatial).map_err(
                                             |e| format!("handle {handle_id} htod spatial: {e}"),
@@ -503,7 +691,7 @@ fn direct_sweep(
                                         )?;
                                     }
                                     model
-                                        .apply(&rt, &stream, &mut ws, &d_spatial, &d_global)
+                                        .apply(&rt, &stream, ws, &d_spatial, &d_global)
                                         .map_err(|e| format!("handle {handle_id} apply: {e}"))?;
                                     if !kernel_only {
                                         ws.to_host(&stream)
@@ -511,12 +699,26 @@ fn direct_sweep(
                                     }
                                     Ok(())
                                 };
-                                for _ in 0..parsed.warmup {
-                                    run_once()?;
+                                for iteration in 0..parsed.warmup {
+                                    run_once(&mut ws)?;
+                                    // Preparation may synchronize. Check this forward
+                                    // before the next apply clears its sticky status.
+                                    // Non-MXFP8 workspaces make this a no-op.
+                                    ws.complete_quantized_warmup().map_err(|error| {
+                                        format!("handle {handle_id} warmup iteration {}: {error}", iteration + 1)
+                                    })?;
                                 }
                                 stream
                                     .synchronize()
                                     .map_err(|e| format!("handle {handle_id} warmup sync: {e}"))?;
+                                let status_ring = if kernel_only && ws.has_mxfp8() {
+                                    let words = quantized_status_ring_words(parsed.iterations)?;
+                                    Some(stream.alloc_zeros::<u32>(words).map_err(|error| {
+                                        format!("handle {handle_id} allocate quantized status ring: {error}")
+                                    })?)
+                                } else {
+                                    None
+                                };
                                 // Match Fork's per-iteration CUDA events: allocate all
                                 // pairs before timing, enqueue the full loop, then sync
                                 // once. Never turn this into a sync after every apply.
@@ -539,11 +741,11 @@ fn direct_sweep(
                                 } else {
                                     None
                                 };
-                                Ok((stream, d_spatial, d_global, ws, events))
+                                Ok((stream, d_spatial, d_global, ws, events, status_ring))
                             },
                         );
 
-                        let (stream, mut d_spatial, mut d_global, mut ws, events) =
+                        let (stream, mut d_spatial, mut d_global, mut ws, events, mut status_ring) =
                             match setup_result {
                                 Ok(value) => value,
                                 Err(error) => {
@@ -551,7 +753,8 @@ fn direct_sweep(
                                     return Err(error);
                                 }
                             };
-                        let mut run_once = || -> Result<(), String> {
+                        let has_mxfp8 = ws.has_mxfp8();
+                        let mut run_once = |ws: &mut CudaWorkspace| -> Result<(), String> {
                             if !kernel_only {
                                 stream
                                     .memcpy_htod(&spatial, &mut d_spatial)
@@ -561,7 +764,7 @@ fn direct_sweep(
                                     .map_err(|e| format!("handle {handle_id} htod global: {e}"))?;
                             }
                             model
-                                .apply(&rt, &stream, &mut ws, &d_spatial, &d_global)
+                                .apply(&rt, &stream, ws, &d_spatial, &d_global)
                                 .map_err(|e| format!("handle {handle_id} apply: {e}"))?;
                             if !kernel_only {
                                 ws.to_host(&stream)
@@ -582,12 +785,28 @@ fn direct_sweep(
                                             .record(&stream)
                                             .map_err(|e| format!("record begin event: {e}"))?;
                                     }
-                                    run_once()?;
+                                    run_once(&mut ws)?;
                                     if let Some(pairs) = &events {
                                         pairs[i]
                                             .1
                                             .record(&stream)
                                             .map_err(|e| format!("record end event: {e}"))?;
+                                    }
+                                    if let Some(ring) = status_ring.as_mut() {
+                                        let status = ws.quantized_status().ok_or_else(|| {
+                                            format!("handle {handle_id} MXFP8 forward has no status buffer")
+                                        })?;
+                                        if status.len() != QUANTIZED_STATUS_WORDS {
+                                            return Err(format!("handle {handle_id} MXFP8 status word count changed"));
+                                        }
+                                        let start = i * QUANTIZED_STATUS_WORDS;
+                                        let mut snapshot = ring.slice_mut(start..start + QUANTIZED_STATUS_WORDS);
+                                        // The event excludes this D2D snapshot, but
+                                        // wall time includes it. The same stream
+                                        // copies before the next forward reset.
+                                        stream.memcpy_dtod(status, &mut snapshot).map_err(|error| {
+                                            format!("handle {handle_id} snapshot timed iteration {}: {error}", i + 1)
+                                        })?;
                                     }
                                 }
                                 stream
@@ -601,6 +820,17 @@ fn direct_sweep(
                         // runtime again. Event reads/destruction happen only after
                         // the measured endpoints were captured and all peers stop.
                         let (started, ended) = timed_result?;
+                        if let Some(ring) = status_ring.as_ref() {
+                            // The complete stream (including snapshots) has ended.
+                            // One readback here leaves the timed kernel loop free
+                            // of host synchronization, allocation and validation.
+                            let statuses = stream.clone_dtoh(ring).map_err(|error| {
+                                format!("handle {handle_id} read quantized status ring: {error}")
+                            })?;
+                            validate_quantized_status_ring(
+                                &statuses, parsed.iterations, CudaWorkspace::validate_quantized_status,
+                            ).map_err(|error| format!("handle {handle_id}: {error}"))?;
+                        }
                         let elapsed_ms = ended.duration_since(started).as_secs_f64() * 1000.0;
                         let per_batch_ms = elapsed_ms / parsed.iterations as f64;
                         let cuda_event_ms = events
@@ -637,6 +867,16 @@ fn direct_sweep(
                                 cuda_event_median_ms,
                                 cuda_event_median_nn_evals_per_s: cuda_event_median_ms
                                     .map(|ms| b as f64 * 1000.0 / ms),
+                                quantized_status_validation: has_mxfp8.then(|| QuantizedStatusValidation {
+                                    warmup_forwards: parsed.warmup,
+                                    timed_forwards: parsed.iterations,
+                                    device_snapshot_words: status_ring.as_ref().map_or(0, |ring| ring.len()),
+                                    timing_boundary: if kernel_only {
+                                        "each CUDA end event precedes its D2D status snapshot; wall includes snapshots and final sync; complete ring DTOH/validation follows measured endpoints"
+                                    } else {
+                                        "each direct to_host validates that forward's status inside measured wall time"
+                                    },
+                                }),
                             },
                             started,
                             ended,
@@ -698,6 +938,19 @@ fn direct_sweep(
                     "      CUDA event median-rate sum: {rate:.1} nnEvals/s (separate from wall throughput)"
                 );
             }
+            if samples
+                .iter()
+                .any(|sample| sample.quantized_status_validation.is_some())
+            {
+                println!(
+                    "      MXFP8 status: every warmup/timed forward verified; {}",
+                    if kernel_only {
+                        "wall includes D2D snapshots; CUDA events exclude snapshots; ring readback follows timing"
+                    } else {
+                        "direct to_host status validation is included in wall time"
+                    }
+                );
+            }
         }
         results.push(BatchResult {
             batch: b,
@@ -712,16 +965,46 @@ fn direct_sweep(
 
     if parsed.json {
         let mut tactics = BTreeMap::new();
-        for &key in kata_nn::tactic_plan::ALLOWED_TACTIC_KEYS {
+        for key in kata_nn::tactic_plan::ALLOWED_TACTIC_KEYS
+            .iter()
+            .copied()
+            .chain(["KATAGO_CUDA_INT8_GEMM_TUNE", "KATAGO_CUDA_INT8_RMS_FUSION"])
+        {
             tactics.insert(key.to_string(), kata_nn::tactic_plan::tactic_var(key).ok());
         }
+        let uses_int8 = int8_scope.is_some()
+            || recipe
+                .as_ref()
+                .is_some_and(|recipe| recipe.layers.iter().any(|layer| layer.any_int8()));
         let report = JsonReport {
             schema: 1,
-            precision: if int8_scope.is_some() { "W8A8-mixed" } else { "FP16-mixed" },
+            precision: if recipe.is_some() {
+                "per-projection-recipe"
+            } else if uses_int8 {
+                "W8A8-mixed"
+            } else {
+                "FP16-mixed"
+            },
             int8_scope: int8_scope.map(|s| s.name()),
             int8_min_ffn_width,
             int8_ffn_layers: model.int8_ffn_count(),
-            quantization_version: int8_scope.map(|_| kata_nn::backends::int8::QUANTIZATION_VERSION),
+            quantization_version: uses_int8
+                .then_some(kata_nn::backends::int8::QUANTIZATION_VERSION),
+            mxfp8_quantization_version: model.has_mxfp8()
+                .then_some(kata_nn::backends::mxfp8::QUANTIZATION_VERSION),
+            recipe_sha256: recipe.as_ref().map(|recipe| recipe.recipe_sha256.clone()),
+            graph_sha256: recipe.as_ref().map(|recipe| recipe.graph_sha256.clone()),
+            quantization_semantics_version: recipe
+                .as_ref()
+                .map(|_| if model.has_mxfp8() {
+                    kata_nn::quantization_plan::MXFP8_QUANTIZATION_SEMANTICS_VERSION
+                } else {
+                    kata_nn::quantization_plan::QUANTIZATION_SEMANTICS_VERSION
+                }),
+            identity_scope: recipe
+                .as_ref()
+                .map(|_| "precision recipe only; not an evaluator inference profile"),
+            validation: recipe.as_ref().map(|_| "unverified"),
             command: "nnbench",
             mode: parsed.mode.clone(),
             kernel_only,
@@ -933,6 +1216,148 @@ mod benchmark_phase_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::Duration;
+
+    #[test]
+    fn quantized_status_history_keeps_early_failure_after_a_valid_last_forward() {
+        let statuses = [1, 7, 0, u32::MAX, 0, u32::MAX];
+        let error = super::validate_quantized_status_ring(&statuses, 3, |status| {
+            if status[0] == 0 && status[1] == u32::MAX {
+                Ok(())
+            } else {
+                Err(format!("flags={} layer={}", status[0], status[1]))
+            }
+        })
+        .unwrap_err();
+        assert!(error.contains("timed iteration 1"), "{error}");
+        assert!(error.contains("flags=1 layer=7"), "{error}");
+        // A bad later projection/forward must also be attributed correctly.
+        let statuses = [0, u32::MAX, 4, 11, 0, u32::MAX];
+        let error = super::validate_quantized_status_ring(&statuses, 3, |status| {
+            if status[0] == 0 {
+                Ok(())
+            } else {
+                Err("nonfinite output".into())
+            }
+        })
+        .unwrap_err();
+        assert!(error.contains("timed iteration 2"), "{error}");
+    }
+
+    #[test]
+    fn quantized_status_history_requires_every_snapshot_and_checked_allocation_size() {
+        let statuses = [0, u32::MAX, 0, u32::MAX, 0, u32::MAX];
+        let mut checked = 0;
+        super::validate_quantized_status_ring(&statuses, 3, |status| {
+            assert_eq!(status, &[0, u32::MAX]);
+            checked += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(checked, 3);
+        for invalid in [&statuses[..4], &statuses[..5], &statuses[..]] {
+            let iterations = if invalid.len() == 6 { 2 } else { 3 };
+            assert!(
+                super::validate_quantized_status_ring(invalid, iterations, |_| {
+                    panic!("incomplete or oversized rings must fail before checking any snapshot")
+                })
+                .is_err()
+            );
+        }
+        assert_eq!(super::quantized_status_ring_words(400).unwrap(), 800);
+        assert!(super::quantized_status_ring_words(usize::MAX).is_err());
+        assert!(super::quantized_status_ring_words(usize::MAX / 2).is_err());
+    }
+
+    #[test]
+    fn precision_options_cannot_silently_select_a_different_benchmark_backend() {
+        use super::{BenchCudaBackend, benchmark_backend};
+        use kata_core::config::ConfigParser;
+        let config = |body: &str| ConfigParser::from_str(body, false, false).unwrap();
+        // Setup defaults to dummybackend when a user-supplied config omits the
+        // backend; eval must reject that rather than label it a CUDA result.
+        assert!(benchmark_backend(&config("numSearchThreads=1\n"), false).is_err());
+        assert_eq!(
+            benchmark_backend(&config("numSearchThreads=1\n"), true).unwrap(),
+            BenchCudaBackend::Fp16
+        );
+        // Both aliases and model-zero precedence must agree with evaluator
+        // setup. No model is read and no runtime is initialized by admission.
+        for name in ["cudaquant", "cudaquantbackend"] {
+            let cfg = config(&format!(
+                "nnBackend=cudabackend\nnnBackend0={name}\ncudaQuantPlan=not-opened-by-admission.json\n"
+            ));
+            assert_eq!(
+                benchmark_backend(&cfg, false).unwrap(),
+                BenchCudaBackend::Quantized
+            );
+            assert_eq!(
+                benchmark_backend(&cfg, true).unwrap(),
+                BenchCudaBackend::Quantized
+            );
+        }
+        for name in ["cuda", "cudabackend", "cudaint8", "cudaint8backend"] {
+            let cfg = config(&format!("nnBackend={name}\ncudaQuantPlan=recipe.json\n"));
+            for direct in [false, true] {
+                assert!(
+                    benchmark_backend(&cfg, direct)
+                        .unwrap_err()
+                        .contains("requires nnBackend=cudaquantbackend")
+                );
+            }
+        }
+        for option in [
+            "cudaInt8Scope=ffn",
+            "cudaInt8MinFfnWidth=384",
+            "cudaTacticPlan=fp16.json",
+        ] {
+            let cfg = config(&format!("nnBackend=cudaquantbackend\n{option}\n"));
+            assert!(benchmark_backend(&cfg, false).is_err(), "{option}");
+            assert!(benchmark_backend(&cfg, true).is_err(), "{option}");
+        }
+        let cfg = config("nnBackend=cudaquantbackend\ncudaQuantPlan=\"  \"\n");
+        assert!(
+            benchmark_backend(&cfg, true)
+                .unwrap_err()
+                .contains("must not be empty")
+        );
+        let cfg = config(
+            "nnBackend=cudaquantbackend\nnnBackend0=cudabackend\ncudaQuantPlan=recipe.json\n",
+        );
+        assert!(benchmark_backend(&cfg, true).is_err());
+    }
+
+    #[test]
+    fn evaluator_identity_cannot_be_claimed_by_a_direct_benchmark() {
+        use super::{BenchCudaBackend, benchmark_backend};
+        use kata_core::config::ConfigParser;
+        let cfg = ConfigParser::from_str(
+            "nnBackend=cudaquantbackend\ncudaQuantExpectedProfile=expected-execution\n",
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            benchmark_backend(&cfg, false).unwrap(),
+            BenchCudaBackend::Quantized
+        );
+        let err = benchmark_backend(&cfg, true).unwrap_err();
+        assert!(
+            err.contains("cannot verify cudaQuantExpectedProfile"),
+            "{err}"
+        );
+        assert!(err.contains("--mode eval"), "{err}");
+        // Existing explicitly selected INT8 options remain admitted.
+        let cfg = ConfigParser::from_str(
+            "nnBackend=cudaint8backend\ncudaInt8Scope=transformer\ncudaInt8MinFfnWidth=384\n",
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            benchmark_backend(&cfg, true).unwrap(),
+            BenchCudaBackend::Int8
+        );
+    }
 
     #[cfg(feature = "cuda")]
     #[test]

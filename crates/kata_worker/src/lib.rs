@@ -15,6 +15,8 @@ pub const INPUT_PROFILE: &str = "katago-eval-v1";
 #[derive(Clone, Debug)]
 pub struct Metadata {
     pub model_sha256: String,
+    /// Immutable actual loaded identity; empty only for explicit legacy/test evaluators.
+    pub execution_profile_id: String,
     pub model_version: u32,
     pub engine_commit: String,
     pub backend_info: String,

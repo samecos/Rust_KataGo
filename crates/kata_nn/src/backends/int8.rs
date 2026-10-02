@@ -4,6 +4,10 @@
 //! scratch buffer. No floating point GEMM fallback can masquerade as INT8.
 
 use super::cuda::CudaRuntime;
+use super::int8_algorithm_plan as algorithm_plan;
+#[path = "int8_algorithm_native.rs"]
+mod algorithm_native;
+use super::group_cost::{self, Role};
 use cudarc::cublaslt::sys;
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, LaunchConfig, PushKernelArg,
@@ -12,6 +16,21 @@ use cudarc::driver::{result as driver_result, sys as driver_sys};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 pub const QUANTIZATION_VERSION: &str = "w8a8-row-out-rne-v1";
+
+/// Canonical device fields used by the partial INT8 algorithm-cache binding.
+/// DeviceFingerprint itself is not a serialized artifact and need not implement
+/// Serialize. Keep this encoding shared by callers and runtime validation.
+pub fn algorithm_device_fingerprint_sha256(rt: &CudaRuntime) -> Result<String, String> {
+    let device = super::cuda::device_fingerprint(&rt.device)?;
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "gpu_name": device.gpu_name,
+        "compute_capability": device.compute_capability,
+        "sm_count": device.sm_count,
+        "l2_cache_bytes": device.l2_cache_bytes,
+    })).map_err(|e| e.to_string())?;
+    Ok(algorithm_plan::sha256(&bytes))
+}
+
 const WARP_MIN_ROWS: usize = 1024;
 const WARP_MAX_HIDDEN: usize = 512;
 const GEMM_TUNE_CANDIDATES: usize = 16;
@@ -223,6 +242,7 @@ struct LtPlan {
     b: sys::cublasLtMatrixLayout_t,
     c: sys::cublasLtMatrixLayout_t,
     algo: sys::cublasLtMatmulAlgo_t,
+    persisted_algorithm: Option<algorithm_plan::Implementation>,
 }
 
 struct LtPreference(sys::cublasLtMatmulPreference_t);
@@ -361,13 +381,14 @@ fn check(status: sys::cublasStatus_t, operation: &str) -> Result<(), String> {
 }
 
 impl LtPlan {
-    fn new(rt: &CudaRuntime, m: usize, n: usize, k: usize) -> Result<Self, String> {
+    fn descriptors(m: usize, n: usize, k: usize) -> Result<Self, String> {
         let mut p = Self {
             desc: std::ptr::null_mut(),
             a: std::ptr::null_mut(),
             b: std::ptr::null_mut(),
             c: std::ptr::null_mut(),
             algo: unsafe { std::mem::zeroed() },
+            persisted_algorithm: None,
         };
         unsafe {
             // INT32 output requires INT32 alpha/beta. FP32 scale + INT32
@@ -432,6 +453,13 @@ impl LtPlan {
                 ),
                 "output layout",
             )?;
+        }
+        Ok(p)
+    }
+
+    fn new(rt: &CudaRuntime, m: usize, n: usize, k: usize) -> Result<Self, String> {
+        let mut p = Self::descriptors(m, n, k)?;
+        unsafe {
             // A count=1 request is the original production algorithm. A
             // count=16 request can return a different first algorithm.
             let production = p.heuristics(rt, 1)?;
@@ -525,10 +553,25 @@ impl LtPlan {
         if workspace == 0 {
             return Err("INT8 cuBLASLt workspace allocation failed".into());
         }
+        if let Some(implementation) = &self.persisted_algorithm {
+            algorithm_plan::require_same_context(stream.context(), &rt.device)?;
+            for actual in [weight.context(), input.context(), output.context()] {
+                algorithm_plan::require_same_context(stream.context(), actual)?;
+            }
+            let layouts = &implementation.descriptors.layouts;
+            if (weight.len() as u64) < layouts[0].rows * layouts[0].columns
+                || (input.len() as u64) < layouts[1].rows * layouts[1].columns
+                || (output.len() as u64) < layouts[2].rows * layouts[2].columns {
+                return Err("INT8 persisted launch buffer is too small".into());
+            }
+        }
         unsafe {
             let (a, _a) = weight.device_ptr(stream);
             let (b, _b) = input.device_ptr(stream);
             let (c, _c) = output.device_ptr_mut(stream);
+            if let Some(implementation) = &self.persisted_algorithm {
+                implementation.check_addresses([a, b, c, c], workspace, workspace_len)?;
+            }
             let alpha = 1i32;
             let beta = 0i32;
             check(
@@ -765,11 +808,21 @@ pub struct Int8Workspace {
     pub scales: CudaSlice<f32>,
     pub dots: CudaSlice<i32>,
     plans: HashMap<(usize, usize, usize), LtPlan>,
+    algorithm_session: Option<algorithm_plan::Session>,
     kernels: Int8Kernels,
     stream_id: usize,
+    algorithm_owner_stream: Arc<CudaStream>,
 }
 
 impl Int8Workspace {
+    pub(crate) fn group_cost_admission(&self) -> Result<(), String> {
+        // This checks the actual workspace's loaded setting, not a later env
+        // value that might disagree with the kernels prepared at load time.
+        if self.kernels.gemm_tune {
+            return Err("group cost requires an INT8 workspace without runtime GEMM tuning".into());
+        }
+        Ok(())
+    }
     pub fn new(
         rt: &CudaRuntime,
         stream: &Arc<CudaStream>,
@@ -808,8 +861,10 @@ impl Int8Workspace {
             scales: stream.alloc_zeros(rows).map_err(|e| e.to_string())?,
             dots: stream.alloc_zeros(n_count).map_err(|e| e.to_string())?,
             plans: HashMap::new(),
+            algorithm_session: None,
             kernels: kernels.clone(),
             stream_id: stream.cu_stream() as usize,
+            algorithm_owner_stream: stream.clone(),
         })
     }
 
@@ -862,6 +917,8 @@ impl Int8Workspace {
                 })
                 .map_err(|e| e.to_string())?;
         }
+        group_cost::launch(if warp { "int8_quantize_warp4" } else { "int8_quantize_cta256" },
+            "half-to-i8-row-major-zero-padding", [weight.n, weight.k, weight.kp, stride, weight.kp], None);
         self.integer_gemm(rt, stream, weight, rows)
     }
 
@@ -872,21 +929,67 @@ impl Int8Workspace {
         weight: &Int8Weight,
         rows: usize,
     ) -> Result<(), String> {
+        let result = self.integer_gemm_inner(rt, stream, weight, rows);
+        self.complete_algorithm_operation(result)
+    }
+
+    fn integer_gemm_inner(
+        &mut self,
+        rt: &CudaRuntime,
+        stream: &Arc<CudaStream>,
+        weight: &Int8Weight,
+        rows: usize,
+    ) -> Result<(), String> {
         let key = (rows, weight.n, weight.kp);
+        let problem = if self.algorithm_session.is_some() {
+            self.validate_algorithm_owner(stream)?;
+            algorithm_plan::require_same_context(self.algorithm_owner_stream.context(), &rt.device)?;
+            Some(algorithm_plan::ProblemKey::new(rows, weight.n, weight.k, weight.kp)?)
+        } else { None };
+        // Check inventory before any cache lookup or heuristic call. An expected
+        // shape is never treated as permission to silently select a new algo.
+        let expected = match (&self.algorithm_session, problem) {
+            (Some(session), Some(problem)) => {
+                let expected = session.expected(problem)?;
+                if !session.has_observed(problem) && (super::cuda_exec::capturing()
+                    || stream.capture_status().map_err(|e| e.to_string())?
+                        != driver_sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE) {
+                    return Err("INT8 persisted shape must execute outside capture before first observation".into());
+                }
+                expected
+            }
+            _ => None,
+        };
         if !self.plans.contains_key(&key) {
+            group_cost::setup_observed();
             if super::cuda_exec::capturing()
                 || stream.capture_status().map_err(|e| e.to_string())?
                     != driver_sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
             {
                 return Err("INT8 GEMM must be warmed before graph capture".into());
             }
-            let mut plan = LtPlan::new(rt, rows, weight.n, weight.kp)?;
+            let mut plan = match (expected, problem) {
+                (Some(expected), Some(problem)) => LtPlan::restore_algorithm(rt, problem, expected)?,
+                _ => LtPlan::new(rt, rows, weight.n, weight.kp)?,
+            };
             if self.kernels.gemm_tune {
+                // Persistence installation rejects this option; legacy keeps
+                // its original pool size and final selection unchanged.
                 plan.tune(rt, stream, weight, &self.quantized, rows)?;
+            }
+            if let Some(problem) = problem {
+                if plan.persisted_algorithm.is_none() {
+                    plan.persisted_algorithm = Some(plan.snapshot_algorithm(rt, problem)?);
+                }
             }
             self.plans.insert(key, plan);
         }
         let plan = &self.plans[&key];
+        if let Some(expected) = expected {
+            if plan.persisted_algorithm.as_ref() != Some(expected) {
+                return Err("INT8 cached algorithm conflicts with expected entry; no fallback".into());
+            }
+        }
         let (workspace, _) = rt.cublaslt_workspace_ptr(stream);
         plan.run(
             rt,
@@ -897,7 +1000,13 @@ impl Int8Workspace {
             &plan.algo,
             workspace,
             rt.cublaslt_workspace_len(),
-        )
+        )?;
+        group_cost::launch("cublaslt_i8_i32", "tn-row-major-i8-to-i32", [weight.n, weight.k, weight.kp, weight.kp, weight.n], None);
+        if let (Some(session), Some(problem)) = (&mut self.algorithm_session, problem) {
+            session.observe(problem, plan.persisted_algorithm.as_ref()
+                .ok_or("INT8 persistence cache entry was not inspected")?)?;
+        }
+        Ok(())
     }
 
     pub fn project_half(
@@ -910,27 +1019,34 @@ impl Int8Workspace {
         output: &mut CudaSlice<u16>,
         rows: usize,
     ) -> Result<(), String> {
-        let count = rows
-            .checked_mul(weight.n)
-            .filter(|&n| n <= u32::MAX as usize)
-            .ok_or("INT8 output size overflow")?;
-        if output.len() < count {
-            return Err("INT8 half output too small".into());
-        }
-        self.multiply(rt, stream, input, stride, weight, rows)?;
-        unsafe {
-            stream
-                .launch_builder(&self.kernels.half)
-                .arg(&self.dots)
-                .arg(&self.scales)
-                .arg(&weight.scales)
-                .arg(output)
-                .arg(&(rows as i32))
-                .arg(&(weight.n as i32))
-                .launch(LaunchConfig::for_num_elems(count as u32))
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(())
+        self.algorithm_operation(rt, stream, |this| {
+            this.validate_algorithm_buffer_context(input)?;
+            this.validate_algorithm_buffer_context(&weight.data)?;
+            this.validate_algorithm_buffer_context(&weight.scales)?;
+            this.validate_algorithm_buffer_context(&*output)?;
+            let count = rows
+                .checked_mul(weight.n)
+                .filter(|&n| n <= u32::MAX as usize)
+                .ok_or("INT8 output size overflow")?;
+            if output.len() < count {
+                return Err("INT8 half output too small".into());
+            }
+            this.multiply(rt, stream, input, stride, weight, rows)?;
+            unsafe {
+                stream
+                    .launch_builder(&this.kernels.half)
+                    .arg(&this.dots)
+                    .arg(&this.scales)
+                    .arg(&weight.scales)
+                    .arg(output)
+                    .arg(&(rows as i32))
+                    .arg(&(weight.n as i32))
+                    .launch(LaunchConfig::for_num_elems(count as u32))
+                    .map_err(|e| e.to_string())?;
+            }
+            group_cost::launch("int8_dequant_to_half", "i32-to-half-row-major", [weight.n, weight.k, weight.kp, weight.n, weight.n], None);
+            Ok(())
+        })
     }
 
     pub fn project_residual(
@@ -943,15 +1059,21 @@ impl Int8Workspace {
         output: &mut CudaSlice<f32>,
         rows: usize,
     ) -> Result<(), String> {
-        let count = rows
-            .checked_mul(weight.n)
-            .filter(|&n| n <= u32::MAX as usize)
-            .ok_or("INT8 output size overflow")?;
-        if output.len() < count {
-            return Err("INT8 residual output too small".into());
-        }
-        self.multiply(rt, stream, input, stride, weight, rows)?;
-        self.write_residual(stream, weight, output, rows, count)
+        self.algorithm_operation(rt, stream, |this| {
+            this.validate_algorithm_buffer_context(input)?;
+            this.validate_algorithm_buffer_context(&weight.data)?;
+            this.validate_algorithm_buffer_context(&weight.scales)?;
+            this.validate_algorithm_buffer_context(&*output)?;
+            let count = rows
+                .checked_mul(weight.n)
+                .filter(|&n| n <= u32::MAX as usize)
+                .ok_or("INT8 output size overflow")?;
+            if output.len() < count {
+                return Err("INT8 residual output too small".into());
+            }
+            this.multiply(rt, stream, input, stride, weight, rows)?;
+            this.write_residual(stream, weight, output, rows, count)
+        })
     }
 
     fn write_residual(
@@ -974,6 +1096,7 @@ impl Int8Workspace {
                 .launch(LaunchConfig::for_num_elems(count as u32))
                 .map_err(|e| e.to_string())?;
         }
+        group_cost::launch("int8_dequant_fp32_residual", "i32-to-f32-row-major", [weight.n, weight.k, weight.kp, weight.n, weight.n], None);
         Ok(())
     }
 
@@ -988,9 +1111,18 @@ impl Int8Workspace {
         output: &mut CudaSlice<f32>,
         rows: usize,
     ) -> Result<(), String> {
-        self.validate_ffn(stream, dual, down, output, rows)?;
-        self.multiply(rt, stream, input, dual.k, dual, rows)?;
-        self.finish_ffn(rt, stream, dual, down, output, rows)
+        self.algorithm_operation(rt, stream, |this| {
+            this.validate_algorithm_buffer_context(input)?;
+            this.validate_algorithm_buffer_context(&dual.data)?;
+            this.validate_algorithm_buffer_context(&dual.scales)?;
+            this.validate_algorithm_buffer_context(&down.data)?;
+            this.validate_algorithm_buffer_context(&down.scales)?;
+            this.validate_algorithm_buffer_context(&*output)?;
+            this.validate_ffn(stream, dual, down, output, rows)?;
+            group_cost::role(Role::Dual);
+            this.multiply(rt, stream, input, dual.k, dual, rows)?;
+            this.finish_ffn(rt, stream, dual, down, output, rows)
+        })
     }
 
     pub fn rms_fusion_enabled(&self, width: usize, min_ffn_width: usize) -> bool {
@@ -1011,36 +1143,48 @@ impl Int8Workspace {
         residual: &mut CudaSlice<f32>,
         rows: usize,
     ) -> Result<(), String> {
-        self.validate_ffn(stream, dual, down, residual, rows)?;
-        if !matches!(dual.k, 384 | 512) || gamma.len() < dual.k || !eps.is_finite() || eps <= 0.0 {
-            return Err("INT8 RMS shape/epsilon mismatch".into());
-        }
-        if !super::cuda_exec::capturing() {
-            static REPORTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-            REPORTED.get_or_init(|| eprintln!("[cuda-tactic] name=int8_rms_quantize launch=warp4 width={} rows={rows} half_boundary=preserved", dual.k));
-        }
-        unsafe {
-            stream
-                .launch_builder(if dual.k == 384 {
-                    &self.kernels.rms384
-                } else {
-                    &self.kernels.rms512
-                })
-                .arg(&*residual)
-                .arg(gamma)
-                .arg(&mut self.quantized)
-                .arg(&mut self.scales)
-                .arg(&eps)
-                .arg(&(rows as i32))
-                .launch(LaunchConfig {
-                    grid_dim: (rows.div_ceil(4) as u32, 1, 1),
-                    block_dim: (128, 1, 1),
-                    shared_mem_bytes: 0,
-                })
-                .map_err(|e| e.to_string())?;
-        }
-        self.integer_gemm(rt, stream, dual, rows)?;
-        self.finish_ffn(rt, stream, dual, down, residual, rows)
+        self.algorithm_operation(rt, stream, |this| {
+            this.validate_algorithm_buffer_context(gamma)?;
+            this.validate_algorithm_buffer_context(&dual.data)?;
+            this.validate_algorithm_buffer_context(&dual.scales)?;
+            this.validate_algorithm_buffer_context(&down.data)?;
+            this.validate_algorithm_buffer_context(&down.scales)?;
+            this.validate_algorithm_buffer_context(&*residual)?;
+            group_cost::role(Role::Rms);
+            this.validate_ffn(stream, dual, down, residual, rows)?;
+            if !matches!(dual.k, 384 | 512) || gamma.len() < dual.k || !eps.is_finite() || eps <= 0.0 {
+                return Err("INT8 RMS shape/epsilon mismatch".into());
+            }
+            if !super::cuda_exec::capturing() {
+                static REPORTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+                REPORTED.get_or_init(|| eprintln!("[cuda-tactic] name=int8_rms_quantize launch=warp4 width={} rows={rows} half_boundary=preserved", dual.k));
+            }
+            unsafe {
+                stream
+                    .launch_builder(if dual.k == 384 {
+                        &this.kernels.rms384
+                    } else {
+                        &this.kernels.rms512
+                    })
+                    .arg(&*residual)
+                    .arg(gamma)
+                    .arg(&mut this.quantized)
+                    .arg(&mut this.scales)
+                    .arg(&eps)
+                    .arg(&(rows as i32))
+                    .launch(LaunchConfig {
+                        grid_dim: (rows.div_ceil(4) as u32, 1, 1),
+                        block_dim: (128, 1, 1),
+                        shared_mem_bytes: 0,
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
+            group_cost::launch(if dual.k == 384 { "int8_rms_quantize384_warp4" } else { "int8_rms_quantize512_warp4" },
+                "f32-register-half-to-i8-row-major", [dual.n, dual.k, dual.kp, dual.k, dual.kp], None);
+            group_cost::role(Role::Dual);
+            this.integer_gemm(rt, stream, dual, rows)?;
+            this.finish_ffn(rt, stream, dual, down, residual, rows)
+        })
     }
 
     fn validate_ffn(
@@ -1081,6 +1225,7 @@ impl Int8Workspace {
         output: &mut CudaSlice<f32>,
         rows: usize,
     ) -> Result<(), String> {
+        group_cost::role(Role::Swiglu);
         let count = rows * down.n; // checked before submission
         // Wide FFNs regress with one warp per row (register/latency pressure).
         let warp = down.k <= WARP_MAX_HIDDEN && rows >= WARP_MIN_ROWS;
@@ -1106,6 +1251,9 @@ impl Int8Workspace {
                 })
                 .map_err(|e| e.to_string())?;
         }
+        group_cost::launch(if warp { "int8_dequant_swiglu_quantize_warp4" } else { "int8_dequant_swiglu_quantize_cta256" },
+            "i32-register-half-to-i8-row-major-zero-padding", [down.k, dual.n, down.kp, dual.n, down.kp], None);
+        group_cost::role(Role::Down);
         self.integer_gemm(rt, stream, down, rows)?;
         self.write_residual(stream, down, output, rows, count)
     }

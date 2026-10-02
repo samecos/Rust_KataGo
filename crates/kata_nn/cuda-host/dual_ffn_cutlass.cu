@@ -147,6 +147,18 @@ extern "C" void katago_dual_ffn_destroy(void* opaque) {
   delete static_cast<Handle*>(opaque);
 }
 
+// Read-only diagnostic query. This does not insert a token entry, initialize
+// CUTLASS, submit work, or alter the regular launch selection. The Rust caller
+// uses it only inside an explicit whole-FFN cost diagnostic, on the same owned
+// stream/handle immediately before exec. 1=prepared, 0=missing, -1=bad input.
+extern "C" int katago_dual_ffn_is_prepared(const void* opaque, int tokens) {
+  if (opaque == nullptr || tokens <= 0)
+    return -1;
+  const auto* handle = static_cast<const Handle*>(opaque);
+  const auto it = handle->byTokens.find(tokens);
+  return it != handle->byTokens.end() && it->second && it->second->initialized ? 1 : 0;
+}
+
 extern "C" int katago_dual_ffn_exec(
   void* opaque,
   const void* input,

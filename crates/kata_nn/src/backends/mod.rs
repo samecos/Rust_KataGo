@@ -16,5 +16,14 @@ pub mod cuda_exec;
 #[cfg(feature = "cuda")]
 pub mod int8;
 
+// Pure CPU artifact validation is available without loading CUDA.
+pub mod int8_algorithm_plan;
+
+#[cfg(feature = "cuda")]
+pub mod group_cost;
+
+#[cfg(feature = "cuda")]
+pub mod mxfp8;
+
 #[cfg(feature = "trt")]
 pub mod trt_ffi;
