@@ -1,0 +1,1071 @@
+{
+  "schema": "go_student_inference_speed_v1",
+  "generated_utc": "2026-09-26T23:59:55.638120+00:00",
+  "scope": "PyTorch student inference only; no Rust/CUDA engine backend, search, or Go playing-strength measurement",
+  "environment": {
+    "python": "3.14.7",
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "torch": "2.14.0",
+    "numpy": "2.5.3",
+    "requested_device": "mps",
+    "selected_device": "mps",
+    "cuda_available": false,
+    "mps_available": true,
+    "cuda_name": null
+  },
+  "protocol": {
+    "batches": [
+      1,
+      8,
+      32
+    ],
+    "rounds": 5,
+    "iterations_per_block": 30,
+    "warmup_iterations_per_model_mode_batch": 10,
+    "round_orders": [
+      [
+        "dense",
+        "compact",
+        "compact",
+        "dense"
+      ],
+      [
+        "compact",
+        "dense",
+        "dense",
+        "compact"
+      ],
+      [
+        "dense",
+        "compact",
+        "compact",
+        "dense"
+      ],
+      [
+        "compact",
+        "dense",
+        "dense",
+        "compact"
+      ],
+      [
+        "dense",
+        "compact",
+        "compact",
+        "dense"
+      ]
+    ],
+    "forward_only": "device-resident inputs, four-head model forward, wall time with per-invocation device sync",
+    "packed_to_cpu_outputs": "cached packed input, CPU bit unpack, CPU-to-device, four-head model forward, all outputs to CPU, wall time with per-invocation device sync; excludes NPZ decompression"
+  },
+  "input": {
+    "data_dir": null,
+    "input_pack": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/runs/2026-09-27-multitask-m5/benchmark-inputs.npz",
+    "rows": 32,
+    "shape_packed": [
+      32,
+      22,
+      46
+    ],
+    "shape_global": [
+      32,
+      19
+    ],
+    "sources": [
+      {
+        "path": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/runs/2026-09-27-multitask-m5/benchmark-inputs.npz",
+        "sha256": "5b0b0a639273a386e944df31a7b93e3212863a87f7cbeb7a9f9c46e0cb1d342e",
+        "selected_rows": 32,
+        "kind": "portable_real_input_pack"
+      }
+    ]
+  },
+  "models": {
+    "dense": {
+      "path": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/runs/2026-09-27-multitask-m5/dense.pt",
+      "sha256": "c554a1b7bb1842607b55e9ab663491bb52a1b0a8532174bceb091e5beeff3658",
+      "parameters": 463002,
+      "variant": "dense",
+      "checkpoint_epoch": 5,
+      "training_manifest": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/runs/2026-09-27-multitask-m5/manifest.json",
+      "score_scale_points": 20.0
+    },
+    "compact": {
+      "path": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/runs/2026-09-27-multitask-m5/compact.pt",
+      "sha256": "52e5e3bfc67d16cf64f59faf366d2c79187817da7d737ea118fc5c41f4dc543f",
+      "parameters": 181562,
+      "variant": "compact",
+      "checkpoint_epoch": 5,
+      "training_manifest": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/runs/2026-09-27-multitask-m5/manifest.json",
+      "score_scale_points": 20.0
+    }
+  },
+  "measurements": {
+    "batch_1/forward_only": {
+      "batch": 1,
+      "mode": "forward_only",
+      "blocks": [
+        {
+          "round": 1,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 0.8319430666666666
+        },
+        {
+          "round": 1,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 0.6419916666666666
+        },
+        {
+          "round": 1,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 0.6404152666666667
+        },
+        {
+          "round": 1,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 0.8163291666666667
+        },
+        {
+          "round": 2,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 0.6290736333333334
+        },
+        {
+          "round": 2,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 0.7795375
+        },
+        {
+          "round": 2,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 0.7919847333333333
+        },
+        {
+          "round": 2,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 0.6291389
+        },
+        {
+          "round": 3,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 0.7715930333333334
+        },
+        {
+          "round": 3,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 0.6372791666666667
+        },
+        {
+          "round": 3,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 0.6175527666666666
+        },
+        {
+          "round": 3,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 0.778325
+        },
+        {
+          "round": 4,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 0.6590041666666667
+        },
+        {
+          "round": 4,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 0.8165458333333333
+        },
+        {
+          "round": 4,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 0.8273194666666667
+        },
+        {
+          "round": 4,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 0.6563916666666666
+        },
+        {
+          "round": 5,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 0.8134361
+        },
+        {
+          "round": 5,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 0.6335555666666667
+        },
+        {
+          "round": 5,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 0.6397777666666666
+        },
+        {
+          "round": 5,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 0.8223763666666667
+        }
+      ],
+      "summary": {
+        "dense": {
+          "per_block_ms_per_batch": [
+            0.8319430666666666,
+            0.8163291666666667,
+            0.7795375,
+            0.7919847333333333,
+            0.7715930333333334,
+            0.778325,
+            0.8165458333333333,
+            0.8273194666666667,
+            0.8134361,
+            0.8223763666666667
+          ],
+          "median_ms_per_batch": 0.8148826333333333,
+          "positions_per_second": 1227.1705876334993
+        },
+        "compact": {
+          "per_block_ms_per_batch": [
+            0.6419916666666666,
+            0.6404152666666667,
+            0.6290736333333334,
+            0.6291389,
+            0.6372791666666667,
+            0.6175527666666666,
+            0.6590041666666667,
+            0.6563916666666666,
+            0.6335555666666667,
+            0.6397777666666666
+          ],
+          "median_ms_per_batch": 0.6385284666666666,
+          "positions_per_second": 1566.1008900986612
+        },
+        "compact_speedup_vs_dense": 1.2761884173892744
+      }
+    },
+    "batch_1/packed_to_cpu_outputs": {
+      "batch": 1,
+      "mode": "packed_to_cpu_outputs",
+      "blocks": [
+        {
+          "round": 1,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 1.5265583333333335
+        },
+        {
+          "round": 1,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 1.3823097
+        },
+        {
+          "round": 1,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 1.3952916666666666
+        },
+        {
+          "round": 1,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 1.5425597000000002
+        },
+        {
+          "round": 2,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 1.3676388666666666
+        },
+        {
+          "round": 2,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 1.532525
+        },
+        {
+          "round": 2,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 1.5219528
+        },
+        {
+          "round": 2,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 1.3804875
+        },
+        {
+          "round": 3,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 1.5172375
+        },
+        {
+          "round": 3,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 1.3927527666666668
+        },
+        {
+          "round": 3,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 1.3583333333333334
+        },
+        {
+          "round": 3,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 1.5098972000000002
+        },
+        {
+          "round": 4,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 1.3843708333333333
+        },
+        {
+          "round": 4,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 1.5187347333333332
+        },
+        {
+          "round": 4,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 1.4495861
+        },
+        {
+          "round": 4,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 1.3227125000000002
+        },
+        {
+          "round": 5,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 1.4749972333333334
+        },
+        {
+          "round": 5,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 1.3232930666666667
+        },
+        {
+          "round": 5,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 1.372775
+        },
+        {
+          "round": 5,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 1.5121694333333333
+        }
+      ],
+      "summary": {
+        "dense": {
+          "per_block_ms_per_batch": [
+            1.5265583333333335,
+            1.5425597000000002,
+            1.532525,
+            1.5219528,
+            1.5172375,
+            1.5098972000000002,
+            1.5187347333333332,
+            1.4495861,
+            1.4749972333333334,
+            1.5121694333333333
+          ],
+          "median_ms_per_batch": 1.5179861166666666,
+          "positions_per_second": 658.7675532869114
+        },
+        "compact": {
+          "per_block_ms_per_batch": [
+            1.3823097,
+            1.3952916666666666,
+            1.3676388666666666,
+            1.3804875,
+            1.3927527666666668,
+            1.3583333333333334,
+            1.3843708333333333,
+            1.3227125000000002,
+            1.3232930666666667,
+            1.372775
+          ],
+          "median_ms_per_batch": 1.37663125,
+          "positions_per_second": 726.4109397487526
+        },
+        "compact_speedup_vs_dense": 1.1026817215333928
+      }
+    },
+    "batch_8/forward_only": {
+      "batch": 8,
+      "mode": "forward_only",
+      "blocks": [
+        {
+          "round": 1,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 1.1955305333333333
+        },
+        {
+          "round": 1,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 0.8427055666666666
+        },
+        {
+          "round": 1,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 0.8355583333333333
+        },
+        {
+          "round": 1,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 1.1721333333333335
+        },
+        {
+          "round": 2,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 0.8522444333333333
+        },
+        {
+          "round": 2,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 1.2046875
+        },
+        {
+          "round": 2,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 1.1639625
+        },
+        {
+          "round": 2,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 0.8266611
+        },
+        {
+          "round": 3,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 1.1870291666666666
+        },
+        {
+          "round": 3,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 0.8374694333333333
+        },
+        {
+          "round": 3,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 0.8401194333333333
+        },
+        {
+          "round": 3,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 1.166725
+        },
+        {
+          "round": 4,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 0.8288458333333334
+        },
+        {
+          "round": 4,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 1.2120972333333335
+        },
+        {
+          "round": 4,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 1.1824125
+        },
+        {
+          "round": 4,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 0.8484444666666667
+        },
+        {
+          "round": 5,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 1.1718305333333334
+        },
+        {
+          "round": 5,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 0.8288347333333334
+        },
+        {
+          "round": 5,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 0.8278208333333333
+        },
+        {
+          "round": 5,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 1.1991458333333334
+        }
+      ],
+      "summary": {
+        "dense": {
+          "per_block_ms_per_batch": [
+            1.1955305333333333,
+            1.1721333333333335,
+            1.2046875,
+            1.1639625,
+            1.1870291666666666,
+            1.166725,
+            1.2120972333333335,
+            1.1824125,
+            1.1718305333333334,
+            1.1991458333333334
+          ],
+          "median_ms_per_batch": 1.1847208333333334,
+          "positions_per_second": 6752.645665469713
+        },
+        "compact": {
+          "per_block_ms_per_batch": [
+            0.8427055666666666,
+            0.8355583333333333,
+            0.8522444333333333,
+            0.8266611,
+            0.8374694333333333,
+            0.8401194333333333,
+            0.8288458333333334,
+            0.8484444666666667,
+            0.8288347333333334,
+            0.8278208333333333
+          ],
+          "median_ms_per_batch": 0.8365138833333333,
+          "positions_per_second": 9563.499374477407
+        },
+        "compact_speedup_vs_dense": 1.416259618564211
+      }
+    },
+    "batch_8/packed_to_cpu_outputs": {
+      "batch": 8,
+      "mode": "packed_to_cpu_outputs",
+      "blocks": [
+        {
+          "round": 1,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 1.9486153
+        },
+        {
+          "round": 1,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 1.5535194333333335
+        },
+        {
+          "round": 1,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 1.5344222
+        },
+        {
+          "round": 1,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 1.8872263999999999
+        },
+        {
+          "round": 2,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 1.5537222333333331
+        },
+        {
+          "round": 2,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 1.9550597333333333
+        },
+        {
+          "round": 2,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 1.9645875
+        },
+        {
+          "round": 2,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 1.6013610999999999
+        },
+        {
+          "round": 3,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 1.9586402666666667
+        },
+        {
+          "round": 3,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 1.6544764
+        },
+        {
+          "round": 3,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 1.5982708333333333
+        },
+        {
+          "round": 3,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 1.9418652666666667
+        },
+        {
+          "round": 4,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 1.6453625
+        },
+        {
+          "round": 4,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 1.9517680666666666
+        },
+        {
+          "round": 4,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 2.007434733333333
+        },
+        {
+          "round": 4,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 1.5969875
+        },
+        {
+          "round": 5,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 1.9494486
+        },
+        {
+          "round": 5,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 1.6089860999999999
+        },
+        {
+          "round": 5,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 1.6274125
+        },
+        {
+          "round": 5,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 1.9304708333333334
+        }
+      ],
+      "summary": {
+        "dense": {
+          "per_block_ms_per_batch": [
+            1.9486153,
+            1.8872263999999999,
+            1.9550597333333333,
+            1.9645875,
+            1.9586402666666667,
+            1.9418652666666667,
+            1.9517680666666666,
+            2.007434733333333,
+            1.9494486,
+            1.9304708333333334
+          ],
+          "median_ms_per_batch": 1.9506083333333333,
+          "positions_per_second": 4101.2846419706675
+        },
+        "compact": {
+          "per_block_ms_per_batch": [
+            1.5535194333333335,
+            1.5344222,
+            1.5537222333333331,
+            1.6013610999999999,
+            1.6544764,
+            1.5982708333333333,
+            1.6453625,
+            1.5969875,
+            1.6089860999999999,
+            1.6274125
+          ],
+          "median_ms_per_batch": 1.5998159666666667,
+          "positions_per_second": 5000.575170323236
+        },
+        "compact_speedup_vs_dense": 1.219270449836532
+      }
+    },
+    "batch_32/forward_only": {
+      "batch": 32,
+      "mode": "forward_only",
+      "blocks": [
+        {
+          "round": 1,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 2.3523722
+        },
+        {
+          "round": 1,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 1.5289875
+        },
+        {
+          "round": 1,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 1.5414111333333333
+        },
+        {
+          "round": 1,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 2.4550319666666667
+        },
+        {
+          "round": 2,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 1.5488888666666665
+        },
+        {
+          "round": 2,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 2.3950514
+        },
+        {
+          "round": 2,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 2.4401180666666664
+        },
+        {
+          "round": 2,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 1.5174791666666667
+        },
+        {
+          "round": 3,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 2.425556966666667
+        },
+        {
+          "round": 3,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 1.5391153
+        },
+        {
+          "round": 3,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 1.5040458333333333
+        },
+        {
+          "round": 3,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 2.3812277666666666
+        },
+        {
+          "round": 4,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 1.5021236
+        },
+        {
+          "round": 4,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 2.4283541666666664
+        },
+        {
+          "round": 4,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 2.4045833333333335
+        },
+        {
+          "round": 4,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 1.456575
+        },
+        {
+          "round": 5,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 2.3612763666666665
+        },
+        {
+          "round": 5,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 1.4612083333333332
+        },
+        {
+          "round": 5,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 1.5292041666666667
+        },
+        {
+          "round": 5,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 2.4813722
+        }
+      ],
+      "summary": {
+        "dense": {
+          "per_block_ms_per_batch": [
+            2.3523722,
+            2.4550319666666667,
+            2.3950514,
+            2.4401180666666664,
+            2.425556966666667,
+            2.3812277666666666,
+            2.4283541666666664,
+            2.4045833333333335,
+            2.3612763666666665,
+            2.4813722
+          ],
+          "median_ms_per_batch": 2.41507015,
+          "positions_per_second": 13250.132713536292
+        },
+        "compact": {
+          "per_block_ms_per_batch": [
+            1.5289875,
+            1.5414111333333333,
+            1.5488888666666665,
+            1.5174791666666667,
+            1.5391153,
+            1.5040458333333333,
+            1.5021236,
+            1.456575,
+            1.4612083333333332,
+            1.5292041666666667
+          ],
+          "median_ms_per_batch": 1.5232333333333332,
+          "positions_per_second": 21007.9436286846
+        },
+        "compact_speedup_vs_dense": 1.5854892990787144
+      }
+    },
+    "batch_32/packed_to_cpu_outputs": {
+      "batch": 32,
+      "mode": "packed_to_cpu_outputs",
+      "blocks": [
+        {
+          "round": 1,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 3.282561133333333
+        },
+        {
+          "round": 1,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 2.3608194333333334
+        },
+        {
+          "round": 1,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 2.3683305666666663
+        },
+        {
+          "round": 1,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 3.3249763999999997
+        },
+        {
+          "round": 2,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 2.377297233333333
+        },
+        {
+          "round": 2,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 3.2905514
+        },
+        {
+          "round": 2,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 3.2919680666666666
+        },
+        {
+          "round": 2,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 2.3030458333333335
+        },
+        {
+          "round": 3,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 3.1879472333333334
+        },
+        {
+          "round": 3,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 2.3118111333333333
+        },
+        {
+          "round": 3,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 2.3692986
+        },
+        {
+          "round": 3,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 3.3146597
+        },
+        {
+          "round": 4,
+          "slot": 1,
+          "variant": "compact",
+          "ms_per_batch": 2.3714736000000003
+        },
+        {
+          "round": 4,
+          "slot": 2,
+          "variant": "dense",
+          "ms_per_batch": 3.2804374999999997
+        },
+        {
+          "round": 4,
+          "slot": 3,
+          "variant": "dense",
+          "ms_per_batch": 3.2879527666666664
+        },
+        {
+          "round": 4,
+          "slot": 4,
+          "variant": "compact",
+          "ms_per_batch": 2.386597233333333
+        },
+        {
+          "round": 5,
+          "slot": 1,
+          "variant": "dense",
+          "ms_per_batch": 3.2816486
+        },
+        {
+          "round": 5,
+          "slot": 2,
+          "variant": "compact",
+          "ms_per_batch": 2.3686528
+        },
+        {
+          "round": 5,
+          "slot": 3,
+          "variant": "compact",
+          "ms_per_batch": 2.3643541666666668
+        },
+        {
+          "round": 5,
+          "slot": 4,
+          "variant": "dense",
+          "ms_per_batch": 3.177930566666667
+        }
+      ],
+      "summary": {
+        "dense": {
+          "per_block_ms_per_batch": [
+            3.282561133333333,
+            3.3249763999999997,
+            3.2905514,
+            3.2919680666666666,
+            3.1879472333333334,
+            3.3146597,
+            3.2804374999999997,
+            3.2879527666666664,
+            3.2816486,
+            3.177930566666667
+          ],
+          "median_ms_per_batch": 3.28525695,
+          "positions_per_second": 9740.486204587438
+        },
+        "compact": {
+          "per_block_ms_per_batch": [
+            2.3608194333333334,
+            2.3683305666666663,
+            2.377297233333333,
+            2.3030458333333335,
+            2.3118111333333333,
+            2.3692986,
+            2.3714736000000003,
+            2.386597233333333,
+            2.3686528,
+            2.3643541666666668
+          ],
+          "median_ms_per_batch": 2.368491683333333,
+          "positions_per_second": 13510.708196772854
+        },
+        "compact_speedup_vs_dense": 1.387067125089687
+      }
+    }
+  },
+  "rtx_5070_ti_rerun": "python benchmark_student.py --dense-checkpoint <dense.pt> --compact-checkpoint <compact.pt> --input-pack <benchmark-inputs.npz> --output <rtx-result.json> --device cuda --batches 1,8,32 --rounds 5 --iterations 30 --warmup 10"
+}

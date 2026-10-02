@@ -1,0 +1,28 @@
+{
+  "schema": "go_student_supervision_coverage_v1",
+  "selection_seed": 20260927,
+  "cache_manifest_sha256": "b5be9f568f2bda53a9968e1acfa45ae77938d969654bc2769de38176a15fbc0a",
+  "splits": {
+    "train": {
+      "rows": 200000,
+      "value_positive_weight_rows": 178577,
+      "score_positive_weight_rows": 178419,
+      "ownership_positive_weight_rows": 178419,
+      "row_weight_sum": 199981.39999997988
+    },
+    "val": {
+      "rows": 20000,
+      "value_positive_weight_rows": 17858,
+      "score_positive_weight_rows": 17840,
+      "ownership_positive_weight_rows": 17840,
+      "row_weight_sum": 20000.0
+    },
+    "test": {
+      "rows": 20000,
+      "value_positive_weight_rows": 17894,
+      "score_positive_weight_rows": 17840,
+      "ownership_positive_weight_rows": 17840,
+      "row_weight_sum": 19999.05999999866
+    }
+  }
+}

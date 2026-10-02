@@ -1,0 +1,287 @@
+{
+  "schema": "rust_katago_student_training_v1",
+  "status": "completed",
+  "created_utc": "2026-09-26T23:51:48.536078+00:00",
+  "environment": {
+    "device": "mps",
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "python": "3.14.7",
+    "torch": "2.14.0",
+    "numpy": "2.5.3"
+  },
+  "config": {
+    "epochs": 5,
+    "batch_size": 256,
+    "lr": 0.001,
+    "training_seed": 29,
+    "score_scale_points": 20.0,
+    "loss": "policy_ce + 0.5*value_ce + 0.1*score_smooth_l1(score/20) + 0.2*ownership_mse(tanh)",
+    "selection_metric": "validation total_loss; test evaluated once after best epoch",
+    "variants": [
+      "dense",
+      "compact"
+    ]
+  },
+  "data": {
+    "cache_manifest": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/data/2026-09-27-multitask-full/manifest.json",
+    "cache_manifest_sha256": "b5be9f568f2bda53a9968e1acfa45ae77938d969654bc2769de38176a15fbc0a",
+    "rows_available": {
+      "train": 1130029,
+      "val": 144866,
+      "test": 143129
+    },
+    "rows_selected": {
+      "train": 200000,
+      "val": 20000,
+      "test": 20000
+    },
+    "selection_seed": 20260927,
+    "selection": "uniform without replacement by split code, before reading model targets",
+    "shards": 173
+  },
+  "models": {
+    "dense": {
+      "parameters": 463002,
+      "epochs": [
+        {
+          "epoch": 1,
+          "train": {
+            "total_loss": 4.197949636383057,
+            "rows": 200000
+          },
+          "validation": {
+            "total_loss": 3.8932417490595146,
+            "policy_ce": 3.4095428718566896,
+            "policy_top1": 0.2634,
+            "value_ce": 0.6969485567970898,
+            "value_brier": 0.4660728136660578,
+            "score_loss": 0.14530264529161524,
+            "score_mae_points": 6.703253979466421,
+            "ownership_loss": 0.6034716713755922,
+            "ownership_mae": 0.5844528226875136,
+            "rows": 20000
+          }
+        },
+        {
+          "epoch": 2,
+          "train": {
+            "total_loss": 3.787494753875732,
+            "rows": 200000
+          },
+          "validation": {
+            "total_loss": 3.7561957580324346,
+            "policy_ce": 3.2806904014587404,
+            "policy_top1": 0.27395,
+            "value_ce": 0.6963124049846022,
+            "value_brier": 0.46543349079835294,
+            "score_loss": 0.1461275583914598,
+            "score_mae_points": 6.832286584203553,
+            "ownership_loss": 0.5636819912112347,
+            "ownership_mae": 0.5676328856614941,
+            "rows": 20000
+          }
+        },
+        {
+          "epoch": 3,
+          "train": {
+            "total_loss": 3.6673258573150633,
+            "rows": 200000
+          },
+          "validation": {
+            "total_loss": 3.648754766907952,
+            "policy_ce": 3.17618871383667,
+            "policy_top1": 0.2862,
+            "value_ce": 0.6950363458164169,
+            "value_brier": 0.46416546440742656,
+            "score_loss": 0.14406055805227413,
+            "score_mae_points": 6.598313098477676,
+            "ownership_loss": 0.553209121789232,
+            "ownership_mae": 0.5587183990553356,
+            "rows": 20000
+          }
+        },
+        {
+          "epoch": 4,
+          "train": {
+            "total_loss": 3.590657900695801,
+            "rows": 200000
+          },
+          "validation": {
+            "total_loss": 3.615636076925316,
+            "policy_ce": 3.142875256729126,
+            "policy_top1": 0.2918,
+            "value_ce": 0.6958481496132586,
+            "value_brier": 0.4647960321895752,
+            "score_loss": 0.14502617704547366,
+            "score_mae_points": 6.7242065168816945,
+            "ownership_loss": 0.5516706384250669,
+            "ownership_mae": 0.560724522681247,
+            "rows": 20000
+          }
+        },
+        {
+          "epoch": 5,
+          "train": {
+            "total_loss": 3.531490774002075,
+            "rows": 200000
+          },
+          "validation": {
+            "total_loss": 3.5963952472436227,
+            "policy_ce": 3.1258079299926758,
+            "policy_top1": 0.2957,
+            "value_ce": 0.6940800985873166,
+            "value_brier": 0.4635383505171845,
+            "score_loss": 0.14410409592963846,
+            "score_mae_points": 6.594526320535506,
+            "ownership_loss": 0.5456842918216247,
+            "ownership_mae": 0.5425226741023529,
+            "rows": 20000
+          }
+        }
+      ],
+      "best_epoch": 5,
+      "best_validation_total_loss": 3.5963952472436227,
+      "test": {
+        "total_loss": 3.6117027158589834,
+        "policy_ce": 3.138641135655389,
+        "policy_top1": 0.2926137529189666,
+        "value_ce": 0.702070948157455,
+        "value_brier": 0.46739754307612474,
+        "score_loss": 0.13691659772908524,
+        "score_mae_points": 6.347941506082702,
+        "ownership_loss": 0.5416722317597925,
+        "ownership_mae": 0.5404187462422078,
+        "rows": 20000
+      },
+      "checkpoint": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/runs/2026-09-27-multitask-m5/dense.pt",
+      "checkpoint_sha256": "c554a1b7bb1842607b55e9ab663491bb52a1b0a8532174bceb091e5beeff3658",
+      "training_seconds": 281.8941580410001
+    },
+    "compact": {
+      "parameters": 181562,
+      "epochs": [
+        {
+          "epoch": 1,
+          "train": {
+            "total_loss": 4.254200559768677,
+            "rows": 200000
+          },
+          "validation": {
+            "total_loss": 3.908293290789654,
+            "policy_ce": 3.427341667175293,
+            "policy_top1": 0.2606,
+            "value_ce": 0.6967857587923594,
+            "value_brier": 0.46587224075042305,
+            "score_loss": 0.1447632320779647,
+            "score_mae_points": 6.607540580897588,
+            "ownership_loss": 0.5904121050519259,
+            "ownership_mae": 0.5902317688670928,
+            "rows": 20000
+          }
+        },
+        {
+          "epoch": 2,
+          "train": {
+            "total_loss": 3.8437548862457276,
+            "rows": 200000
+          },
+          "validation": {
+            "total_loss": 3.7921510558779756,
+            "policy_ce": 3.3154368789672852,
+            "policy_top1": 0.27135,
+            "value_ce": 0.6964550350645325,
+            "value_brier": 0.46564108558205236,
+            "score_loss": 0.1445344726160908,
+            "score_mae_points": 6.614516647313742,
+            "ownership_loss": 0.5701660605840753,
+            "ownership_mae": 0.5765339124830849,
+            "rows": 20000
+          }
+        },
+        {
+          "epoch": 3,
+          "train": {
+            "total_loss": 3.7441433516693117,
+            "rows": 200000
+          },
+          "validation": {
+            "total_loss": 3.7426108832334424,
+            "policy_ce": 3.266203579711914,
+            "policy_top1": 0.2775,
+            "value_ce": 0.6959291921075534,
+            "value_brier": 0.46486389694068075,
+            "score_loss": 0.1443089157347348,
+            "score_mae_points": 6.611542614559422,
+            "ownership_loss": 0.5700590794713909,
+            "ownership_mae": 0.5786160137721509,
+            "rows": 20000
+          }
+        },
+        {
+          "epoch": 4,
+          "train": {
+            "total_loss": 3.6827620803070067,
+            "rows": 200000
+          },
+          "validation": {
+            "total_loss": 3.7294142727186608,
+            "policy_ce": 3.251078754425049,
+            "policy_top1": 0.28245,
+            "value_ce": 0.6986427080432329,
+            "value_brier": 0.46728113322018217,
+            "score_loss": 0.14654540866096566,
+            "score_mae_points": 6.869789411187707,
+            "ownership_loss": 0.5717981170294931,
+            "ownership_mae": 0.5727410474499779,
+            "rows": 20000
+          }
+        },
+        {
+          "epoch": 5,
+          "train": {
+            "total_loss": 3.6321457255554197,
+            "rows": 200000
+          },
+          "validation": {
+            "total_loss": 3.6696197565544924,
+            "policy_ce": 3.197108692932129,
+            "policy_top1": 0.2902,
+            "value_ce": 0.6937678278306922,
+            "value_brier": 0.4631065722892447,
+            "score_loss": 0.14393627118053554,
+            "score_mae_points": 6.591909694070239,
+            "ownership_loss": 0.5561676129448173,
+            "ownership_mae": 0.5367684603021418,
+            "rows": 20000
+          }
+        }
+      ],
+      "best_epoch": 5,
+      "best_validation_total_loss": 3.6696197565544924,
+      "test": {
+        "total_loss": 3.688590544093255,
+        "policy_ce": 3.2145418464557522,
+        "policy_top1": 0.28566342616918816,
+        "value_ce": 0.70022141614999,
+        "value_brier": 0.466225638844067,
+        "score_loss": 0.13647372328672108,
+        "score_mae_points": 6.3322363942193345,
+        "ownership_loss": 0.5514530861691777,
+        "ownership_mae": 0.5343319571689774,
+        "rows": 20000
+      },
+      "checkpoint": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/runs/2026-09-27-multitask-m5/compact.pt",
+      "checkpoint_sha256": "52e5e3bfc67d16cf64f59faf366d2c79187817da7d737ea118fc5c41f4dc543f",
+      "training_seconds": 186.22332433300016
+    }
+  },
+  "scope": "standalone PyTorch research models; not TF3-compatible or engine-certified",
+  "duration_seconds": 469.50533545800045,
+  "metric_notes": {
+    "train_total_loss": "Mean of per-batch normalized loss weighted by batch row count; unlike validation/test, not globally recombined per head. Do not subtract train from val as the same estimator.",
+    "policy_top1": "Argmax of MCTS visit counts is used as teacher; tied top visit counts resolve to the smallest action index.",
+    "score_units": "Model raw score output is multiplied by 20 to obtain mover-perspective points.",
+    "mask_coverage": "See supervision-coverage.json; all four evaluation heads have positive coverage in this run."
+  }
+}

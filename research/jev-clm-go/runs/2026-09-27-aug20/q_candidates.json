@@ -1,0 +1,76 @@
+{
+  "schema": "rust_katago_q_candidate_coverage_v1",
+  "generated_utc": "2026-09-26T23:41:29.113206+00:00",
+  "status": "ok",
+  "source": {
+    "data_dir": "research/jev-clm-go/data/2026-08-20npzs",
+    "reference_audit": "research/jev-clm-go/runs/2026-09-27-aug20/audit.json",
+    "reference_audit_sha256": "4fabd95baf76c4e2ce652b59f773fb7123979e57c75079091b61f5a3b168f0b2",
+    "per_file_sha256": "verified against reference_audit.files[].sha256",
+    "scope": "counts only NPZ files present in data_dir; do not extrapolate to the parent tgz"
+  },
+  "definition": {
+    "eligible_row": "on-board plane has all 361 positions, globalTargetsNC[26]=1, globalTargetsNC[25]>0, policy target0 has positive mass",
+    "candidate": "qValueTargetsNCMove[:,2,move] >= min_visits; 362 moves include pass",
+    "winloss_gap": "max minus min of qValueTargetsNCMove[:,0,move] among accepted candidates >= 3200 (0.1 after /32000)",
+    "source_writer": "https://github.com/lightvector/KataGo/blob/352de42b663862251343d863cb6d6edb11c122cc/cpp/dataio/trainingwrite.cpp#L363-L383",
+    "official_q_loss": "https://github.com/lightvector/KataGo/blob/352de42b663862251343d863cb6d6edb11c122cc/python/katago/train/metrics_pytorch.py#L81-L105",
+    "note": "KataGo masks zero visits and weights positive visits by sqrt(visits); cutoffs 8/16/32 here are exploratory coverage filters, not certified confidence thresholds."
+  },
+  "totals": {
+    "files": 1800,
+    "rows": 106717,
+    "full_19x19_rows": 75726,
+    "eligible_rows": 75726,
+    "eligible_top_policy_with_positive_q_visits": 75726,
+    "eligible_rows_with_any_positive_q_visits": 75726,
+    "eligible_reanalyzed_rows": 0
+  },
+  "by_target_version": {
+    "2": {
+      "files": 770,
+      "rows": 45849,
+      "eligible_rows": 32929
+    },
+    "3": {
+      "files": 1030,
+      "rows": 60868,
+      "eligible_rows": 42797
+    }
+  },
+  "q_sanity": {
+    "negative_visits": 0,
+    "visits_above_32000": 0,
+    "winloss_outside_scaled_range": 0,
+    "zero_visit_nonzero_winloss": 0,
+    "zero_visit_nonzero_score": 0,
+    "checked_on": "all source rows and all 362 moves; any nonzero count aborts"
+  },
+  "coverage_by_min_visits": {
+    "1": {
+      "at_least_2_candidates": 75724,
+      "at_least_4_candidates": 75583,
+      "at_least_2_and_wl_gap_ge_0p1": 64411,
+      "at_least_4_and_wl_gap_ge_0p1": 64316
+    },
+    "8": {
+      "at_least_2_candidates": 74976,
+      "at_least_4_candidates": 65093,
+      "at_least_2_and_wl_gap_ge_0p1": 58147,
+      "at_least_4_and_wl_gap_ge_0p1": 50313
+    },
+    "16": {
+      "at_least_2_candidates": 64382,
+      "at_least_4_candidates": 31988,
+      "at_least_2_and_wl_gap_ge_0p1": 31484,
+      "at_least_4_and_wl_gap_ge_0p1": 13180
+    },
+    "32": {
+      "at_least_2_candidates": 53215,
+      "at_least_4_candidates": 16549,
+      "at_least_2_and_wl_gap_ge_0p1": 15181,
+      "at_least_4_and_wl_gap_ge_0p1": 3176
+    }
+  },
+  "interpretation_limit": "candidate coverage only; Q search estimates are correlated/noisy and this report does not establish hard-negative label reliability or playing strength"
+}

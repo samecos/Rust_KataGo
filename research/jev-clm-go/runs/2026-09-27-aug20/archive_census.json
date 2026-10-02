@@ -1,0 +1,80 @@
+{
+  "schema": "rust_katago_tar_census_v2",
+  "generated_utc": "2026-09-26T23:34:27.233226+00:00",
+  "status": "ok",
+  "source": {
+    "path": "/Users/zhengwei/samecos/Rust_KataGo/research/jev-clm-go/2026-08-20npzs.tgz",
+    "bytes": 954362446,
+    "sha256": "b541cb0e499b03a9d4aaf180eab000f3855cede5281047d796ab6bf604a857dc"
+  },
+  "tar": {
+    "members": 36254,
+    "directories": 2,
+    "regular_npz_files": 36252,
+    "npz_bytes": 977371776,
+    "npz_parent_directories": {
+      "2026-08-20npzs/kata1-zhizi-b40c768nbt-s11472M-d5982M": 36252
+    }
+  },
+  "npz": {
+    "files_inspected": 36252,
+    "total_rows": 2126234,
+    "full_19x19_rows": 1493750,
+    "other_board_rows": 632484,
+    "full_19x19_fraction": 0.7025332113022367,
+    "min_rows_per_file": 1,
+    "max_rows_per_file": 219,
+    "files_missing_qValueTargetsNCMove": 0,
+    "keysets": [
+      {
+        "members": [
+          "binaryInputNCHWPacked",
+          "globalInputNC",
+          "globalTargetsNC",
+          "policyTargetsNCMove",
+          "qValueTargetsNCMove",
+          "scoreDistrN",
+          "valueTargetsNCHW"
+        ],
+        "file_count": 36252
+      }
+    ],
+    "schema_groups": [
+      {
+        "global_target_width": 64,
+        "target_schema_version": "2",
+        "members": [
+          "binaryInputNCHWPacked",
+          "globalInputNC",
+          "globalTargetsNC",
+          "policyTargetsNCMove",
+          "qValueTargetsNCMove",
+          "scoreDistrN",
+          "valueTargetsNCHW"
+        ],
+        "files_with_rows": 15336,
+        "rows": 900318,
+        "full_19x19_rows": 637328
+      },
+      {
+        "global_target_width": 80,
+        "target_schema_version": "3",
+        "members": [
+          "binaryInputNCHWPacked",
+          "globalInputNC",
+          "globalTargetsNC",
+          "policyTargetsNCMove",
+          "qValueTargetsNCMove",
+          "scoreDistrN",
+          "valueTargetsNCHW"
+        ],
+        "files_with_rows": 20916,
+        "rows": 1225916,
+        "full_19x19_rows": 856422
+      }
+    ]
+  },
+  "error_count": 0,
+  "errors": [],
+  "note": "Only exact 19x19 packed board-mask rows are counted; no files were extracted."
+}
