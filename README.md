@@ -1,5 +1,9 @@
 # Rust_KataGo
 
+**学生模型 Worker 调优（2026-10-04）**：已修复同步模型的批量调度和 CUDA 资源复用；RTX 5070 Ti 的试玩 dense 模型使用 batch 32 / capacity 64。独立 Worker 评估链复测为 429 → 11,958 请求/秒，约 27.88 倍；启动 `scripts/run_student_worker.ps1` 即可连接现有 Server。见 [配置、命令与测量范围](docs/学生模型Worker调优.md)。
+
+**研究学生模型 CUDA 支持（2026-10-03）**：已接入远端 JEV/CLM 研究中的 `compact` / `dense` 四头网络。CUDA 后端按权重文件内容自动识别，无需增加模型类型参数；CUDA 训练会自动导出可直接加载的 `.rgmodel`。现已下载三份新官方数据，以 200 万条训练行完成 20 轮 CUDA 训练，并交付可在 Sabaki 中使用的 19 路 dense 原型。见 [试玩说明](docs/学生模型试玩.md)、[推理与兼容性说明](docs/学生模型CUDA支持.md) 和 [CUDA 训练、数据准备与恢复](research/jev-clm-go/09-CUDA训练与原型权重.md)。已验证标签指标与合法执行，棋力等级和 Elo 尚未测定。
+
 **跨机器 FULL AUTOTUNE（原生 TF3）**：[完整使用方法](docs/RustGo-FULL-AUTOTUNE.md)。`./scripts/full_autotune.ps1 -Model <模型.bin.gz> -Mode worker -Capacity 32` 从基础 tactic 开始，经 FP32 数值门、实际路径检查和 ABBA，生成该机 `plan.json` + CFG。当前常用 TF3 内置可携带金标，无需生产 Server/C++ Worker；不支持 ONNX FULL 调优。
 
 **剪枝 TF3 模型**：[支持范围与运行命令](docs/RustGo剪枝模型支持.md)。`b15-ffn-pruned-a8.bin.gz` 使用独立新二进制 `target/pruned-support/release/katago-rs.exe` 和该模型自己的 FP32 参考；旧正式版与旧 PLAN 保留。
@@ -12,7 +16,7 @@ KataGo 围棋引擎的 Rust 移植，基于 KataGo-Lite/`katago-rs`，并包含�
 
 项目的实现边界很明确：棋盘、规则、搜索、GTP、分析协议和模型推理链路已经在 workspace 中组织完成；CUDA/TensorRT 是可选后端，默认构建不依赖 GPU，方便先跑协议和回归测试。
 
-> 当前推理执行器针对 KataGo 导出的 19 路 b11 Transformer 模型开发。CUDA 后端要求 19x19 输入和 NCHW 布局；模型文件不随仓库提交。
+> CUDA 后端要求 19x19 输入和 NCHW 布局，支持已适配的原生 TF3 / ONNX 与研究学生网络的 `.rgmodel` 导出。正式 TF3 模型文件不随仓库提交；学生网络的历史研究 checkpoint 位于研究目录。
 
 ## 能做什么
 

@@ -2631,6 +2631,12 @@ mod backend_impl {
                     )));
                 }
             }
+            if crate::student_model::is_student_model(&bytes) {
+                if self.int8 || self.quantized {
+                    return Err(NeuralNetError("student models require the existing nnBackend=cudabackend FP32 path".into()));
+                }
+                return crate::backends::student_backend::load(&bytes, source_model_sha256);
+            }
             let lower_file = file.to_ascii_lowercase();
             let (model_desc, graph) = if lower_file.ends_with(".onnx") {
                 let parsed = crate::onnx_model::parse_onnx_model(&bytes)
@@ -2647,7 +2653,7 @@ mod backend_impl {
                     false
                 } else {
                     return Err(NeuralNetError(
-                        "CUDA model must be .onnx, .bin[.gz], or .txt[.gz]".into(),
+                        "CUDA model must be a RustGo student export, .onnx, .bin[.gz], or .txt[.gz]".into(),
                     ));
                 };
                 // Parse the exact bytes that were verified above. The worker
@@ -2689,6 +2695,12 @@ mod backend_impl {
             loaded_model: &dyn LoadedModel,
             cfg: &Config,
         ) -> Result<Box<dyn ComputeContext>, NeuralNetError> {
+            if let Some(model) = loaded_model.as_any().downcast_ref::<crate::backends::student_backend::StudentLoadedModel>() {
+                if self.int8 || self.quantized {
+                    return Err(NeuralNetError("student model/backend precision mismatch".into()));
+                }
+                return crate::backends::student_backend::context(model, _gpu_idxs, logger, nn_x_len, nn_y_len, cfg);
+            }
             let model = loaded_model
                 .as_any()
                 .downcast_ref::<CudaLoadedModel>()
@@ -2922,6 +2934,9 @@ mod backend_impl {
             _gpu_idx_for_this_thread: i32,
             _server_thread_idx: i32,
         ) -> Result<Box<dyn ComputeHandle>, NeuralNetError> {
+            if let Some(c) = ctx.as_any().downcast_ref::<crate::backends::student_backend::StudentContext>() {
+                return crate::backends::student_backend::handle(c, _loaded_model, max_batch_size, inputs_use_nhwc, _gpu_idx_for_this_thread);
+            }
             let c = ctx
                 .as_any()
                 .downcast_ref::<CudaComputeContext>()
@@ -2998,6 +3013,9 @@ mod backend_impl {
             input_bufs: &mut [&mut NNResultBuf],
             outputs: &mut [&mut NNOutput],
         ) -> Result<(), NeuralNetError> {
+            if let Some(h) = handle.as_any().downcast_ref::<crate::backends::student_backend::StudentHandle>() {
+                return crate::backends::student_backend::get_output(h, num_batch_elts, input_bufs, outputs);
+            }
             let h = handle
                 .as_any()
                 .downcast_ref::<CudaComputeHandle>()
@@ -3023,6 +3041,15 @@ mod backend_impl {
             !crate::tactic_plan::tactic_enabled("KATAGO_CUDA_NOPIPELINE")
         }
 
+        fn supports_async_pipeline_for_handle(&self, handle: &dyn ComputeHandle) -> bool {
+            // Student submissions synchronously finish GPU work before returning
+            // a token. Use the ordinary queued batch aggregator for these handles.
+            if handle.as_any().is::<crate::backends::student_backend::StudentHandle>() {
+                return false;
+            }
+            self.supports_async_pipeline()
+        }
+
         fn submit_output(
             &self,
             handle: &dyn ComputeHandle,
@@ -3030,6 +3057,9 @@ mod backend_impl {
             num_batch_elts: i32,
             input_bufs: &mut [&mut NNResultBuf],
         ) -> Result<usize, NeuralNetError> {
+            if let Some(h) = handle.as_any().downcast_ref::<crate::backends::student_backend::StudentHandle>() {
+                return crate::backends::student_backend::submit(h, num_batch_elts, input_bufs);
+            }
             let h = handle
                 .as_any()
                 .downcast_ref::<CudaComputeHandle>()
@@ -3063,6 +3093,9 @@ mod backend_impl {
             input_bufs: &mut [&mut NNResultBuf],
             outputs: &mut [&mut NNOutput],
         ) -> Result<(), NeuralNetError> {
+            if let Some(h) = handle.as_any().downcast_ref::<crate::backends::student_backend::StudentHandle>() {
+                return crate::backends::student_backend::finish(h, token, num_batch_elts, input_bufs, outputs);
+            }
             let h = handle
                 .as_any()
                 .downcast_ref::<CudaComputeHandle>()

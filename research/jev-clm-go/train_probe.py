@@ -19,6 +19,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import platform
 import sys
@@ -29,6 +30,7 @@ import zipfile
 import numpy as np
 
 import audit_npz
+from cuda_environment import isolate_windows_cudnn
 
 try:
     import torch
@@ -407,8 +409,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto",
-                        help="training device; auto prefers CUDA, then Apple MPS, then CPU")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="cuda",
+                        help="default CUDA; unavailable CUDA is an error; auto explicitly allows fallback")
     parser.add_argument("--max-entry-mib", type=int, default=512)
     parser.add_argument("--allow-missing-qvalue", action="store_true",
                         help="allow NPZ without Q labels for this policy-only probe")
@@ -429,6 +431,8 @@ def resolve_device(requested: str) -> "torch.device":
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is false")
     if requested == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("MPS device requested but torch.backends.mps.is_available() is false")
+    if requested == "cuda":
+        isolate_windows_cudnn(torch)
     return torch.device(requested)
 
 
@@ -492,6 +496,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "torch": torch.__version__,
         "numpy": np.__version__,
         "machine": platform.machine(),
+        "cuda_runtime": torch.version.cuda,
+        "cuda_device": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+        "cuda_capability": list(torch.cuda.get_device_capability(device)) if device.type == "cuda" else None,
+        "isolated_system_cudnn_directories": [part for part in os.environ.get("RUST_KATAGO_SYSTEM_CUDNN_PATHS", "").split(";") if part],
     }
     results: list[dict[str, Any]] = []
     for seed in args.seeds:

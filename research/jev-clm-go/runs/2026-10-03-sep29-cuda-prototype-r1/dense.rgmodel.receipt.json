@@ -1,0 +1,24 @@
+{
+  "schema": "rust_go_student_export_receipt_v1",
+  "status": "validated",
+  "model": "D:\\code\\Rust_KataGo\\research\\jev-clm-go\\runs\\2026-10-03-sep29-cuda-prototype-r1\\dense.rgmodel",
+  "sha256": "a86c7108975626646f9494554e177056dfbe8ed6949ea4a3acb33516fb862755",
+  "bytes": 1855154,
+  "magic_bytes": 16,
+  "header_bytes": 3126,
+  "payload_bytes": 1852008,
+  "tensor_count": 40,
+  "parameters": 463002,
+  "format_version": 1,
+  "input_version": 7,
+  "variant": "dense",
+  "width": 64,
+  "blocks": 6,
+  "score_scale": 20.0,
+  "source": {
+    "kind": "training checkpoint",
+    "path": "D:\\code\\Rust_KataGo\\research\\jev-clm-go\\runs\\2026-10-03-sep29-cuda-prototype-r1\\dense.pt",
+    "sha256": "fad69aa19b10ac705320256ee6be2bc609693471b6bff49b09f3d4af739fec51"
+  },
+  "validation": "exact parameter names/shapes, finite FP32 weights, contiguous payload, exact readback"
+}

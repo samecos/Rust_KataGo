@@ -1,5 +1,7 @@
 # Jev / CLM 与 Rust_KataGo：研究入口
 
+**2026-10-03 新阶段**：远端研究已合并到 Windows CUDA 工程，`compact` / `dense` 学生网络已有原生 Rust CUDA 推理、按文件 magic 自动识别和 CUDA 训练后自动导出。三份新官方数据的 dense 模型已完成 200 万训练行、20 轮 CUDA 训练及实际 GTP 验收，见 [试玩说明](../../docs/学生模型试玩.md)。训练入口见 [CUDA 训练与原型权重](09-CUDA训练与原型权重.md) / [引擎兼容说明](../../docs/学生模型CUDA支持.md)。下面的 2026-09-27 记录说明先前研究的范围；“不改引擎”和“不能加载”属于那个历史阶段，已由本次工程接入取代。Mac 的 `requirements.txt` 保留作历史记录，Windows CUDA 使用 `requirements-cuda.txt`。
+
 状态：**两份归档的 CLM 固定着法头探针已完成；八月归档的新四头轻量模型与 M5 Pro 推理测速已完成；尚无棋力或部署认证，RTX 5070 Ti 待后续复测。**日期：2026-09-27。
 
 本目录是本次工作的唯一新增位置。本轮不改 Rust/C++ 引擎、CUDA kernel、模型格式、Server/Worker 协议、正式二进制或认证 plan。原有 Fork 性能优化已结项；这里建立的是一项新的模型研究，不继续旧性能实验。
@@ -46,7 +48,7 @@ research/jev-clm-go/.venv/bin/python research/jev-clm-go/train_probe.py \
   /path/to/selfplay-data --out-dir research/jev-clm-go/runs/p1 --device mps
 ```
 
-本机 macOS arm64 的隔离环境位于 `research/jev-clm-go/.venv/`，依赖版本记录在 [`requirements.txt`](requirements.txt)；重建命令：`/opt/homebrew/bin/python3 -m venv research/jev-clm-go/.venv && research/jev-clm-go/.venv/bin/python -m pip install -r research/jev-clm-go/requirements.txt`。`--device auto`（默认）会优先选 CUDA、再选 Apple MPS、最后选 CPU；显式 `--device mps` 会在 MPS 不可用时报错。默认以棋局哈希 80/10/10 切分、3 个种子分别训练两种精确等参数量的头，验证集选 epoch，测试集只在选定后评一次；结果写入 `manifest.json`。若只核查可用训练行与切分，可加 `--inspect-only`。该脚本用小 CNN 和 362 全槽访问目标，**没有合法手重放、B11 权重共享或棋力认证**。
+历史 macOS arm64 的隔离环境位于 `research/jev-clm-go/.venv/`，依赖版本记录在 [`requirements.txt`](requirements.txt)；历史重建命令：`/opt/homebrew/bin/python3 -m venv research/jev-clm-go/.venv && research/jev-clm-go/.venv/bin/python -m pip install -r research/jev-clm-go/requirements.txt`。新 CUDA 入口默认使用 CUDA，不可用时报错；显式 `--device auto` 会优先选 CUDA、再选 Apple MPS、最后选 CPU，显式 `--device mps` 会在 MPS 不可用时报错。默认以棋局哈希 80/10/10 切分、3 个种子分别训练两种精确等参数量的头，验证集选 epoch，测试集只在选定后评一次；结果写入 `manifest.json`。若只核查可用训练行与切分，可加 `--inspect-only`。该脚本用小 CNN 和 362 全槽访问目标，**没有合法手重放、B11 权重共享或棋力认证**。
 
 第一份归档的 24 文件子集有 73,359 行可用 19 路数据；相似度头的测试交叉熵比等参数线性头平均低 `0.04228` nats（3 种子）。新 `.tgz` 的 1,800 文件子集有 75,726 行可用 19 路数据，同口径平均只低 `0.00378` nats，且 1 个种子更差。固定着法头的初始信号**未稳定复现**，不能以此推动 CLM 模型接入；详情见 [两次试验](05-真实数据试验.md)与[新数据复验](06-八月归档复验.md)。
 

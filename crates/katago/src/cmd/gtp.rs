@@ -1013,7 +1013,9 @@ impl GtpEngine {
         }
 
         let move_history = compact.moves[..idx as usize].to_vec();
-        self.set_position_and_rules(pla, board.clone(), hist, board, pla, move_history);
+        let initial_board = hist.initial_board.clone();
+        let initial_pla = hist.initial_pla;
+        self.set_position_and_rules(pla, board, hist, initial_board, initial_pla, move_history);
         "= ".to_string()
     }
 
@@ -1060,11 +1062,9 @@ impl GtpEngine {
         let old_hist = self.bot.get_root_hist().clone();
         let hist = self.bot.get_root_hist();
 
-        let (winner, score) = if hist.is_game_finished
-            && ((hist.rules.scoring_rule == kata_game::rules::ScoringRule::Area
-                && !hist.rules.friendly_pass_ok)
-                || hist.rules.scoring_rule == kata_game::rules::ScoringRule::Territory)
-        {
+        // Once the history has scored the game, that result is authoritative,
+        // including area rules that allow friendly passes (for example Chinese).
+        let (winner, score) = if hist.is_game_finished && hist.is_scored {
             (hist.winner, f64::from(hist.final_white_minus_black_score))
         } else {
             let lead = 0.0f32;
@@ -2148,12 +2148,20 @@ impl GtpEngine {
                     }
                 }
                 "loadsgf" => {
-                    response = self.handle_loadsgf(&pieces);
-                    response_is_error = response.starts_with('?');
+                    let handled = self.handle_loadsgf(&pieces);
+                    response_is_error = handled.starts_with('?');
+                    response = handled
+                        .strip_prefix(if response_is_error { "? " } else { "= " })
+                        .unwrap_or(&handled)
+                        .to_string();
                 }
                 "printsgf" => {
-                    response = self.handle_printsgf(&pieces);
-                    response_is_error = response.starts_with('?');
+                    let handled = self.handle_printsgf(&pieces);
+                    response_is_error = handled.starts_with('?');
+                    response = handled
+                        .strip_prefix(if response_is_error { "? " } else { "= " })
+                        .unwrap_or(&handled)
+                        .to_string();
                 }
                 "kata-raw-nn" => {
                     response = self.handle_raw_nn(&pieces, false);
@@ -2242,14 +2250,14 @@ impl GtpEngine {
     ) -> io::Result<()> {
         let mut out = output.lock().unwrap();
         if is_error {
-            write!(out, "? ")?;
+            write!(out, "?")?;
         } else {
-            write!(out, "= ")?;
+            write!(out, "=")?;
         }
         if has_id {
-            write!(out, "{} ", id)?;
+            write!(out, "{}", id)?;
         }
-        writeln!(out, "{}", response)?;
+        writeln!(out, " {}", response)?;
         writeln!(out)?;
         Ok(())
     }
@@ -3386,6 +3394,32 @@ mod tests {
     }
 
     #[test]
+    fn test_finished_chinese_score_matches_sgf() {
+        for (komi, moves, score, sgf_result) in [
+            (7.5, "play B pass\nplay W pass\n", "W+7.5", "RE[W+7.5]"),
+            (7.5, "play B C3\nplay W pass\nplay B pass\n", "B+17.5", "RE[B+17.5]"),
+            (0.0, "play B pass\nplay W pass\n", "0", "RE[0]"),
+        ] {
+            let out = run_session(&format!(
+                "boardsize 5\nclear_board\nkata-set-rules chinese\nkomi {komi}\n{moves}101 final_score\n102 printsgf\n"
+            ));
+            assert!(!out.contains('?'), "{out}");
+            assert!(out.contains(&format!("=101 {score}\n")), "{out}");
+            assert!(out.contains(sgf_result), "{out}");
+        }
+    }
+
+    #[test]
+    fn test_numbered_responses_and_sgf_have_one_protocol_prefix() {
+        let out = run_session("17 protocol_version\n18 invalid_command\n19 printsgf\n20 printsgf one two\n");
+        assert!(out.starts_with("=17 2\n\n"), "{out}");
+        assert!(out.contains("?18 unknown command"), "{out}");
+        assert!(out.contains("=19 (;FF[4]"), "{out}");
+        assert!(out.contains("?20 syntax: printsgf [filename]"), "{out}");
+        assert!(!out.contains("=19 = ") && !out.contains("?20 ? "), "{out}");
+    }
+
+    #[test]
     fn test_time_settings() {
         let out = run_session("time_settings 60 15 1\nkgs-time_settings byoyomi 60 10 5\n");
         assert!(!out.contains('?'));
@@ -3437,5 +3471,27 @@ mod tests {
         ));
         assert!(!out.contains('?'), "output: {}", out);
         assert!(out.contains('X') && out.contains('O'), "output: {}", out);
+    }
+
+    #[test]
+    fn test_loaded_sgf_undo_replays_from_setup_position() {
+        for (sgf, initial_stones, remaining_moves) in [
+            ("(;FF[4]GM[1]SZ[3];B[aa];W[bb])", 0, 1),
+            ("(;FF[4]GM[1]SZ[3]AB[aa]PL[W];W[bb];B[cc])", 1, 1),
+        ] {
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), sgf).unwrap();
+            let mut engine = GtpEngine::new_for_tests(3, 3);
+            let result = engine.handle_loadsgf(&[tmp.path().to_str().unwrap().to_string()]);
+            assert_eq!(result, "= ");
+            assert_eq!(engine.initial_board.num_stones_on_board(), initial_stones);
+            assert!(engine.undo());
+            assert_eq!(engine.move_history.len(), remaining_moves);
+            assert_eq!(engine.bot.get_root_board().num_stones_on_board(), initial_stones + 1);
+            assert!(engine.undo());
+            assert_eq!(engine.bot.get_root_board().num_stones_on_board(), initial_stones);
+            assert_eq!(engine.bot.get_root_pla(), engine.initial_pla);
+            assert!(!engine.undo());
+        }
     }
 }

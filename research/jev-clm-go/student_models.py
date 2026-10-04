@@ -16,7 +16,9 @@ float32 [B, 19]. Both variants return the same four *raw* outputs:
 
 No softmax, sigmoid, legal-move mask, or engine-specific postprocessing is
 applied. These deliberately small research models do not reproduce the full
-TF3/KataGo inference-output contract and cannot be loaded by the engine.
+TF3/KataGo training-output contract. ``export_student.py`` writes a frozen
+``.rgmodel`` artifact that RustGo recognizes internally for native CUDA
+inference; the engine adapts these four outputs to its search contract.
 """
 
 from __future__ import annotations

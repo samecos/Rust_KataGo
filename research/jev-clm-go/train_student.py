@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Train two standalone, multi-output Go models from audited self-play shards.
 
-This is a research artifact, not a KataGo TF3 weight or an engine backend. The
+This produces PyTorch student checkpoints for the student weight exporter. The
 same selected game-disjoint examples, optimizer, and epoch budget are used for
 both variants. The held-out test split is evaluated once, after validation
 checkpoint selection. No target array is passed to the model as an input.
@@ -10,9 +10,12 @@ checkpoint selection. No target array is passed to the model as an input.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
+import os
 from pathlib import Path
 import platform
 import sys
@@ -24,9 +27,12 @@ import torch
 from torch.nn import functional as F
 
 from student_models import count_parameters, make_model
+from export_student import export_checkpoint
+from cuda_environment import isolate_windows_cudnn
 
 
 SCHEMA = "rust_katago_student_training_v1"
+RESUME_SCHEMA = "rust_katago_student_resume_v1"
 SPLIT = {"train": 0, "val": 1, "test": 2}
 SCORE_SCALE = 20.0  # Network predicts score in units of 20 points.
 FIELDS = (
@@ -66,6 +72,22 @@ def resolve_device(requested: str) -> torch.device:
     if requested == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("MPS requested but unavailable")
     return torch.device(requested)
+
+
+def resolve_precision(requested: str, device: torch.device) -> str:
+    precision = "fp16" if requested == "auto" and device.type == "cuda" else (
+        "fp32" if requested == "auto" else requested)
+    if precision != "fp32" and device.type != "cuda":
+        raise ValueError("fp16/bf16 training requires CUDA; use --precision fp32 for CPU/MPS")
+    if precision == "bf16" and not torch.cuda.is_bf16_supported():
+        raise RuntimeError("CUDA device does not support bfloat16")
+    return precision
+
+
+def autocast_context(device: torch.device, precision: str) -> Any:
+    if precision == "fp32":
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=(torch.float16 if precision == "fp16" else torch.bfloat16))
 
 
 def _validate_field(name: str, array: np.ndarray, rows: int) -> None:
@@ -159,7 +181,13 @@ def load_selected(cache_dir: Path, limits: dict[str, int], selection_seed: int) 
         "selection_seed": selection_seed,
         "selection": "uniform without replacement by split code, before reading model targets",
         "shards": len(shards),
+        "cache_shards": [{"name": path.name, "sha256": sha256_file(path)} for path in shards],
     }
+    selected_digest = hashlib.sha256()
+    for name in FIELDS:
+        selected_digest.update(name.encode("ascii"))
+        selected_digest.update(arrays[name].tobytes(order="C"))
+    info["selected_data_sha256"] = selected_digest.hexdigest()
     return arrays, info
 
 
@@ -226,13 +254,15 @@ def loss_and_metrics(outputs: Any, batch: dict[str, torch.Tensor]) -> dict[str, 
 
 @torch.no_grad()
 def evaluate(model: torch.nn.Module, data: dict[str, np.ndarray], indices: np.ndarray,
-             batch_size: int, device: torch.device) -> dict[str, Any]:
+             batch_size: int, device: torch.device, precision: str = "fp32") -> dict[str, Any]:
     model.eval()
     sums: dict[str, float] = {}
     weights: dict[str, float] = {}
     for start in range(0, len(indices), batch_size):
         batch = batch_tensors(data, indices[start:start + batch_size], device)
-        values = loss_and_metrics(model(batch["spatial"], batch["global_input"]), batch)
+        with autocast_context(device, precision):
+            outputs = model(batch["spatial"], batch["global_input"])
+        values = loss_and_metrics(outputs, batch)
         # Each head has a different target coverage. Aggregate by its own weight.
         head_weight = {
             "policy": float(batch["row_weight"].sum().item()),
@@ -267,24 +297,47 @@ def evaluate(model: torch.nn.Module, data: dict[str, np.ndarray], indices: np.nd
 
 def train_epoch(model: torch.nn.Module, data: dict[str, np.ndarray], indices: np.ndarray,
                 batch_size: int, optimizer: torch.optim.Optimizer, device: torch.device,
-                order_rng: np.random.Generator) -> dict[str, float]:
+                order_rng: np.random.Generator, precision: str = "fp32",
+                scaler: Any = None, max_grad_norm: float = 10.0) -> dict[str, float]:
     model.train()
     shuffled = order_rng.permutation(indices)
     running_loss = 0.0
     rows = 0
+    optimizer_steps = 0
+    overflow_steps = 0
     for start in range(0, len(shuffled), batch_size):
         current = shuffled[start:start + batch_size]
         batch = batch_tensors(data, current, device)
         optimizer.zero_grad(set_to_none=True)
-        outputs = model(batch["spatial"], batch["global_input"])
+        with autocast_context(device, precision):
+            outputs = model(batch["spatial"], batch["global_input"])
         loss = loss_and_metrics(outputs, batch)["total_loss"]
         if not torch.isfinite(loss):
             raise FloatingPointError("non-finite training loss")
-        loss.backward()
-        optimizer.step()
+        if scaler is not None and scaler.is_enabled():
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+        else:
+            loss.backward()
+        if scaler is not None and scaler.is_enabled():
+            # GradScaler must see overflow and lower its scale. A finite FP32
+            # loss may still overflow while backpropagating scaled FP16 values.
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, error_if_nonfinite=False)
+            previous_scale = scaler.get_scale()
+            scaler.step(optimizer)
+            scaler.update()
+            if scaler.get_scale() < previous_scale:
+                overflow_steps += 1
+            else:
+                optimizer_steps += 1
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm, error_if_nonfinite=True)
+            optimizer.step()
+            optimizer_steps += 1
         running_loss += float(loss.item()) * len(current)
         rows += len(current)
-    return {"total_loss": running_loss / rows, "rows": rows}
+    return {"total_loss": running_loss / rows, "rows": rows,
+            "optimizer_steps": optimizer_steps, "scaled_overflow_steps": overflow_steps}
 
 
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -293,17 +346,46 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def atomic_checkpoint(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(path)
+
+
+def cpu_model_state(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
+
+def learning_rate_for_epoch(args: argparse.Namespace, epoch: int) -> float:
+    """Deterministic epoch schedule; resuming needs no separate scheduler state."""
+    if args.lr_schedule == "constant" or args.epochs == 1:
+        return args.lr
+    fraction = (epoch - 1) / (args.epochs - 1)
+    return args.min_lr + 0.5 * (args.lr - args.min_lr) * (1.0 + math.cos(math.pi * fraction))
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    if args.epochs <= 0 or args.batch_size <= 0 or args.lr <= 0:
-        raise ValueError("epochs, batch-size and lr must be positive")
+    if args.epochs <= 0 or args.batch_size <= 0 or args.lr <= 0 or args.max_grad_norm <= 0:
+        raise ValueError("epochs, batch-size, lr and max-grad-norm must be positive")
     if any(value < 0 for value in (args.train_rows, args.val_rows, args.test_rows)):
         raise ValueError("row caps must be nonnegative (0 means all)")
+    if not args.variants or len(args.variants) != len(set(args.variants)):
+        raise ValueError("variants must be nonempty and distinct")
+    if args.lr_schedule == "cosine" and not 0 < args.min_lr <= args.lr:
+        raise ValueError("cosine min-lr must be positive and no greater than lr")
     started = time.perf_counter()
     device = resolve_device(args.device)
+    if device.type == "cuda":
+        isolate_windows_cudnn(torch)
+    precision = resolve_precision(args.precision, device)
     data, data_info = load_selected(args.cache_dir, {
         "train": args.train_rows, "val": args.val_rows, "test": args.test_rows,
     }, args.selection_seed)
     indices = {name: np.flatnonzero(data["split_code"] == code) for name, code in SPLIT.items()}
+    if args.out_dir.exists() and any(args.out_dir.iterdir()) and not args.resume:
+        raise FileExistsError("output directory is not empty; use a new directory or --resume")
+    if args.resume and not (args.out_dir / "manifest.json").is_file():
+        raise ValueError("--resume requires an existing training manifest and last checkpoints")
     args.out_dir.mkdir(parents=True, exist_ok=True)
     result: dict[str, Any] = {
         "schema": SCHEMA,
@@ -312,61 +394,187 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "environment": {
             "device": str(device), "platform": platform.platform(), "machine": platform.machine(),
             "python": platform.python_version(), "torch": torch.__version__, "numpy": np.__version__,
+            "cuda_runtime": torch.version.cuda,
+            "cuda_device": (torch.cuda.get_device_name(device) if device.type == "cuda" else None),
+            "cuda_capability": (list(torch.cuda.get_device_capability(device)) if device.type == "cuda" else None),
+            "isolated_system_cudnn_directories": os.environ.get("RUST_KATAGO_SYSTEM_CUDNN_PATHS", "").split(";") if os.environ.get("RUST_KATAGO_SYSTEM_CUDNN_PATHS") else [],
         },
         "config": {
             "epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
             "training_seed": args.seed, "score_scale_points": SCORE_SCALE,
             "loss": "policy_ce + 0.5*value_ce + 0.1*score_smooth_l1(score/20) + 0.2*ownership_mse(tanh)",
             "train_loss_aggregation": "mean of per-batch normalized total loss, weighted by batch row count; validation and test aggregate each head by its effective row weight",
-            "selection_metric": "validation total_loss; test evaluated once after best epoch",
-            "variants": ["dense", "compact"],
+            "selection_metric": "validation total_loss; test evaluated after final checkpoint selection for this invocation; resume performs a new test evaluation",
+            "variants": args.variants, "precision": precision,
+            "max_grad_norm": args.max_grad_norm,
+            "lr_schedule": args.lr_schedule,
+            "minimum_lr": args.min_lr if args.lr_schedule == "cosine" else args.lr,
         },
         "data": data_info,
         "models": {},
-        "scope": "standalone PyTorch research models; not TF3-compatible or engine-certified",
+        "scope": "four-head student training with automatic native CUDA .rgmodel export; no playing-strength certification",
     }
     manifest_path = args.out_dir / "manifest.json"
+    # The epoch target may be extended; all data, optimizer and numerical choices
+    # stay bound to the saved run. Resume is an epoch-boundary operation.
+    resume_identity = {
+        "data": data_info, "seed": args.seed, "batch_size": args.batch_size,
+        "lr": args.lr, "precision": precision, "max_grad_norm": args.max_grad_norm,
+        "variants": args.variants, "score_scale_points": SCORE_SCALE,
+    }
+    # Preserve historical constant-LR identities. A cosine run fixes its whole
+    # horizon before test evaluation, so changing the epoch budget changes its
+    # identity rather than silently restarting or stretching the schedule.
+    if args.lr_schedule == "cosine":
+        resume_identity["learning_rate_schedule"] = {
+            "kind": "cosine", "total_epochs": args.epochs,
+            "initial_lr": args.lr, "minimum_lr": args.min_lr,
+        }
+    result["resume_identity"] = resume_identity
+    resumed: dict[str, Any] = {}
+    previous: dict[str, Any] = {}
+    best_recoveries: dict[str, str | None] = {}
+    if args.resume:
+        previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if previous.get("schema") != SCHEMA or previous.get("resume_identity") != resume_identity:
+            raise ValueError("resume manifest configuration or data identity mismatch")
+        for variant in args.variants:
+            path = args.out_dir / f"{variant}.last.pt"
+            if not path.is_file():
+                if previous.get("models", {}).get(variant, {}).get("epochs"):
+                    raise ValueError(f"{variant}: last checkpoint is missing after a completed epoch")
+                continue  # No epoch committed yet; restart that variant from its seed.
+            saved = torch.load(path, map_location="cpu", weights_only=True)
+            if saved.get("schema") != RESUME_SCHEMA or saved.get("identity") != resume_identity or saved.get("variant") != variant:
+                raise ValueError(f"{variant}: resume checkpoint configuration or data identity mismatch")
+            if saved["epoch"] > args.epochs:
+                raise ValueError(f"{variant}: --epochs must not precede the saved epoch {saved['epoch']}")
+            selected_path = args.out_dir / f"{variant}.pt"
+            actual_sha = sha256_file(selected_path) if selected_path.is_file() else None
+            if actual_sha != saved["best_checkpoint_sha256"]:
+                # The last epoch is authoritative: an interrupted write can
+                # publish a newer best file before the last checkpoint commits.
+                # Preserve that file, then restore the embedded best checkpoint.
+                best_payload = saved.get("best_checkpoint")
+                if not isinstance(best_payload, dict) or best_payload.get("variant") != variant or best_payload.get("epoch") != saved["best_epoch"]:
+                    raise ValueError(f"{variant}: changed best checkpoint cannot be recovered from last epoch")
+                best_recoveries[variant] = actual_sha
+            resumed[variant] = saved
+        if previous.get("status") == "completed" and len(resumed) == len(args.variants) and all(
+            saved["epoch"] == args.epochs for saved in resumed.values()
+        ):
+            raise ValueError("--epochs must exceed the saved epoch when the whole run is already completed")
+        # All resume identities are checked before recovering any files.
+        for variant, actual_sha in best_recoveries.items():
+            selected_path = args.out_dir / f"{variant}.pt"
+            if actual_sha is not None:
+                preserved = args.out_dir / f"{variant}.best-before-resume.{actual_sha}.pt"
+                original = selected_path.read_bytes()
+                if hashlib.sha256(original).hexdigest() != actual_sha:
+                    raise ValueError(f"{variant}: best checkpoint changed during resume recovery")
+                if preserved.exists() and preserved.read_bytes() != original:
+                    raise ValueError(f"{variant}: recovery preservation file already differs")
+                preserved.write_bytes(original)
+            atomic_checkpoint(selected_path, resumed[variant]["best_checkpoint"])
     atomic_json(manifest_path, result)
-    for variant in ("dense", "compact"):
+    for variant in args.variants:
+        previous_info = previous.get("models", {}).get(variant, {})
+        if variant in resumed and resumed[variant]["epoch"] == args.epochs and "test" in previous_info:
+            exported = args.out_dir / f"{variant}.rgmodel"
+            if exported.is_file() and sha256_file(exported) == previous_info.get("engine_model_sha256"):
+                model_info = dict(previous_info)
+                model_info["resumed_skipped_completed"] = True
+                result["models"][variant] = model_info
+                atomic_json(manifest_path, result)
+                continue
         torch.manual_seed(args.seed)
         model = make_model(variant).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+        scaler = torch.amp.GradScaler("cuda", enabled=(precision == "fp16"))
         order_rng = np.random.default_rng(args.seed)
         model_info: dict[str, Any] = {"parameters": count_parameters(model), "epochs": []}
         best_loss = float("inf")
         best_epoch = None
         checkpoint_path = args.out_dir / f"{variant}.pt"
+        last_path = args.out_dir / f"{variant}.last.pt"
+        start_epoch = 1
+        if variant in resumed:
+            saved = resumed[variant]
+            model.load_state_dict(saved["model_state"], strict=True)
+            optimizer.load_state_dict(saved["optimizer_state"])
+            scaler.load_state_dict(saved["scaler_state"])
+            order_rng.bit_generator.state = saved["order_rng_state"]
+            torch.set_rng_state(saved["torch_rng_state"])
+            if device.type == "cuda":
+                torch.cuda.set_rng_state_all(saved["cuda_rng_state"])
+            model_info = saved["model_info"]
+            # Test evaluation belongs to the old stopping point, not the new one.
+            for key in ("test", "checkpoint", "checkpoint_sha256", "training_seconds"):
+                model_info.pop(key, None)
+            best_loss = saved["best_validation_total_loss"]
+            best_epoch = saved["best_epoch"]
+            start_epoch = saved["epoch"] + 1
+            model_info["resumed_from_epoch"] = saved["epoch"]
+            if variant in best_recoveries:
+                model_info["recovered_best_from_last_epoch"] = True
+                model_info["best_before_resume_sha256"] = best_recoveries[variant]
         model_started = time.perf_counter()
-        for epoch in range(1, args.epochs + 1):
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+        for epoch in range(start_epoch, args.epochs + 1):
+            current_lr = learning_rate_for_epoch(args, epoch)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = current_lr
             train = train_epoch(model, data, indices["train"], args.batch_size,
-                                optimizer, device, order_rng)
-            validation = evaluate(model, data, indices["val"], args.batch_size, device)
+                                optimizer, device, order_rng, precision, scaler, args.max_grad_norm)
+            validation = evaluate(model, data, indices["val"], args.batch_size, device, precision)
             if not np.isfinite(train["total_loss"]) or not np.isfinite(validation["total_loss"]):
                 raise FloatingPointError(f"{variant}: non-finite loss")
-            model_info["epochs"].append({"epoch": epoch, "train": train, "validation": validation})
+            model_info["epochs"].append({"epoch": epoch, "learning_rate": current_lr,
+                                         "train": train, "validation": validation})
             print(f"[student] {variant} epoch={epoch}/{args.epochs} "
                   f"train={train['total_loss']:.4f} val={validation['total_loss']:.4f} "
-                  f"policy_ce={validation['policy_ce']:.4f}", file=sys.stderr, flush=True)
+                  f"policy_ce={validation['policy_ce']:.4f} lr={current_lr:.8g}", file=sys.stderr, flush=True)
             if validation["total_loss"] < best_loss:
                 best_loss, best_epoch = validation["total_loss"], epoch
-                state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-                temp_path = checkpoint_path.with_suffix(".pt.tmp")
-                torch.save({
-                    "variant": variant, "model_state": state,
+                atomic_checkpoint(checkpoint_path, {
+                    "variant": variant, "model_state": cpu_model_state(model),
                     "score_scale_points": SCORE_SCALE, "epoch": epoch,
                     "training_manifest": str(manifest_path.resolve()),
                     "input_contract": "spatial float32 [B,22,19,19] from MSB packed; global float32 [B,19]",
-                }, temp_path)
-                temp_path.replace(checkpoint_path)
+                })
             model_info["best_epoch"] = best_epoch
             model_info["best_validation_total_loss"] = best_loss
             result["models"][variant] = model_info
+            atomic_checkpoint(last_path, {
+                "schema": RESUME_SCHEMA, "identity": resume_identity,
+                "variant": variant, "epoch": epoch, "model_state": cpu_model_state(model),
+                "optimizer_state": optimizer.state_dict(), "scaler_state": scaler.state_dict(),
+                "order_rng_state": order_rng.bit_generator.state,
+                "torch_rng_state": torch.get_rng_state(),
+                "cuda_rng_state": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
+                "best_epoch": best_epoch, "best_validation_total_loss": best_loss,
+                "best_checkpoint_sha256": sha256_file(checkpoint_path), "model_info": model_info,
+                "best_checkpoint": torch.load(checkpoint_path, map_location="cpu", weights_only=True),
+            })
             atomic_json(manifest_path, result)
         selected = torch.load(checkpoint_path, map_location=device, weights_only=True)
         model.load_state_dict(selected["model_state"])
-        model_info["test"] = evaluate(model, data, indices["test"], args.batch_size, device)
+        model_info["test"] = evaluate(model, data, indices["test"], args.batch_size, device, precision)
         model_info["checkpoint"] = str(checkpoint_path.resolve())
         model_info["checkpoint_sha256"] = sha256_file(checkpoint_path)
+        model_info["resume_checkpoint"] = str(last_path.resolve())
+        model_info["resume_checkpoint_sha256"] = sha256_file(last_path)
+        engine_model_path = args.out_dir / f"{variant}.rgmodel"
+        export_receipt = export_checkpoint(checkpoint_path, engine_model_path)
+        model_info["engine_model"] = str(engine_model_path.resolve())
+        model_info["engine_model_sha256"] = sha256_file(engine_model_path)
+        model_info["engine_model_bytes"] = export_receipt["bytes"]
+        model_info["engine_export_receipt"] = str(engine_model_path.with_suffix(engine_model_path.suffix + ".receipt.json").resolve())
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+            model_info["cuda_peak_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
         model_info["training_seconds"] = time.perf_counter() - model_started
         result["models"][variant] = model_info
         atomic_json(manifest_path, result)
@@ -380,7 +588,13 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cache-dir", type=Path, required=True)
     p.add_argument("--out-dir", type=Path, required=True)
-    p.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
+    p.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="cuda",
+                   help="default CUDA; unavailable CUDA is an error, never a CPU fallback")
+    p.add_argument("--precision", choices=("auto", "fp32", "fp16", "bf16"), default="auto",
+                   help="auto uses scaled FP16 on CUDA and FP32 elsewhere; losses remain FP32")
+    p.add_argument("--variants", nargs="+", choices=("dense", "compact"), default=["dense", "compact"])
+    p.add_argument("--resume", action="store_true", help="restore last complete epoch in out-dir; epochs is the new total")
+    p.add_argument("--max-grad-norm", type=float, default=10.0)
     p.add_argument("--train-rows", type=int, default=200000, help="0 means all")
     p.add_argument("--val-rows", type=int, default=20000, help="0 means all")
     p.add_argument("--test-rows", type=int, default=20000, help="0 means all")
@@ -389,6 +603,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--lr", type=float, default=0.001)
+    p.add_argument("--lr-schedule", choices=("constant", "cosine"), default="constant",
+                   help="constant preserves existing behavior; cosine fixes the full epoch budget for resume")
+    p.add_argument("--min-lr", type=float, default=0.00001,
+                   help="final epoch learning rate for cosine (positive and <= lr)")
     return p
 
 

@@ -16,6 +16,7 @@ _probe/
 *.trtplan.io
 
 # 模型与大数据文件（不入库）
+/train-datas/
 *.onnx
 *.bin.gz
 *.txt.gz

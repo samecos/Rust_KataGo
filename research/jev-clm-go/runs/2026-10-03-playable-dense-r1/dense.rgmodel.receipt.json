@@ -1,0 +1,24 @@
+{
+  "schema": "rust_go_student_export_receipt_v1",
+  "status": "validated",
+  "model": "D:\\code\\Rust_KataGo\\research\\jev-clm-go\\runs\\2026-10-03-playable-dense-r1\\dense.rgmodel",
+  "sha256": "fb3b77e796db158d3fb6a836291f7efa0fb33bc5b7ac0f0f5f9e45ae8061721a",
+  "bytes": 1855154,
+  "magic_bytes": 16,
+  "header_bytes": 3126,
+  "payload_bytes": 1852008,
+  "tensor_count": 40,
+  "parameters": 463002,
+  "format_version": 1,
+  "input_version": 7,
+  "variant": "dense",
+  "width": 64,
+  "blocks": 6,
+  "score_scale": 20.0,
+  "source": {
+    "kind": "training checkpoint",
+    "path": "D:\\code\\Rust_KataGo\\research\\jev-clm-go\\runs\\2026-10-03-playable-dense-r1\\dense.pt",
+    "sha256": "15760f941085ed037fea18549e393d7e24045d8b35a6ebef1b353ab642e91bb5"
+  },
+  "validation": "exact parameter names/shapes, finite FP32 weights, contiguous payload, exact readback"
+}

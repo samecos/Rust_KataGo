@@ -17,6 +17,7 @@ pub mod output_postprocess;
 pub mod quantization_plan;
 pub mod score_value;
 pub mod sgf_meta;
+pub mod student_model;
 pub mod tactic_plan;
 pub mod version;
 

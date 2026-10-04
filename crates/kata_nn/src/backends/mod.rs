@@ -14,6 +14,12 @@ pub mod cuda;
 pub mod cuda_exec;
 
 #[cfg(feature = "cuda")]
+pub mod student_cuda;
+
+#[cfg(feature = "cuda")]
+pub mod student_backend;
+
+#[cfg(feature = "cuda")]
 pub mod int8;
 
 // Pure CPU artifact validation is available without loading CUDA.

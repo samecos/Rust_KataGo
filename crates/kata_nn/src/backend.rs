@@ -297,6 +297,13 @@ pub trait Backend: Send + Sync {
         false
     }
 
+    /// Whether this actual handle supports nonblocking submission. Backends
+    /// with mixed synchronous/asynchronous handles can override this without
+    /// changing the legacy backend-wide capability of their other models.
+    fn supports_async_pipeline_for_handle(&self, _handle: &dyn ComputeHandle) -> bool {
+        self.supports_async_pipeline()
+    }
+
     /// 非阻塞提交一批推理（填 pinned 输入 → 异步上传 → 启动前向 → 异步回传
     /// → record 完成事件），返回批次令牌（供 finish/query 使用）。
     /// 不会等待 GPU 完成；`input_bufs` 仅在本调用内被读取。

@@ -1,0 +1,5 @@
+# Windows / NVIDIA CUDA training and export. Install in .venv-cuda.
+# Official wheel index; CUDA 13 requires a compatible NVIDIA driver.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.12.0+cu130
+numpy==2.4.4

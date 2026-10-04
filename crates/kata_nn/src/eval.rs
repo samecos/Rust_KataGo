@@ -252,12 +252,13 @@ impl SharedState {
     ) {
         // 事件门控流水线（fork `cudaAsyncInferPipeline`）：后端支持时走
         // submit/finish 分离的流水线循环，消除批间 GPU 空闲。
-        let use_pipeline = self
-            .backend
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|b| b.supports_async_pipeline())
+        let backend = self.backend.lock().unwrap().clone();
+        let use_pipeline = backend
+            .as_deref()
+            .map(|b| {
+                let handle = handle.lock().unwrap();
+                b.supports_async_pipeline_for_handle(handle.as_ref())
+            })
             .unwrap_or(false);
         if use_pipeline {
             self.serve_pipelined(handle);
@@ -3233,6 +3234,132 @@ mod worker_failure_tests {
                 "max_batch={max_batch}, submitted batches={batches:?}");
             assert_eq!(batches.iter().sum::<usize>(), request_count);
             assert_eq!(completed, request_count, "burst lost a request");
+        }
+    }
+
+    // A backend-wide async implementation can host a synchronously executing
+    // handle. Keep the existing legacy mock unchanged to cover default routing.
+    struct HandleSynchronousBackend {
+        inner: FailsOnceBackend,
+        batches: Mutex<Vec<usize>>,
+        submissions: AtomicU64,
+    }
+
+    impl Backend for HandleSynchronousBackend {
+        fn global_initialize(&self) { self.inner.global_initialize(); }
+        fn global_cleanup(&self) { self.inner.global_cleanup(); }
+        fn print_devices(&self) { self.inner.print_devices(); }
+
+        fn load_model_file(&self, file: &str, sha: &str) -> Result<Box<dyn LoadedModel>, NeuralNetError> {
+            self.inner.load_model_file(file, sha)
+        }
+        fn create_compute_context(
+            &self, gpu_idxs: &[i32], logger: &Logger, x: i32, y: i32,
+            home: &str, fp16: Enabled, model: &dyn LoadedModel, cfg: &Config,
+        ) -> Result<Box<dyn ComputeContext>, NeuralNetError> {
+            self.inner.create_compute_context(gpu_idxs, logger, x, y, home, fp16, model, cfg)
+        }
+        fn create_compute_handle(
+            &self, ctx: &dyn ComputeContext, model: &dyn LoadedModel, logger: &Logger,
+            max_batch: i32, exact: bool, nhwc: bool, gpu: i32, thread: i32,
+        ) -> Result<Box<dyn ComputeHandle>, NeuralNetError> {
+            self.inner.create_compute_handle(ctx, model, logger, max_batch, exact, nhwc, gpu, thread)
+        }
+        fn is_using_fp16(&self, handle: &dyn ComputeHandle) -> bool {
+            self.inner.is_using_fp16(handle)
+        }
+        fn set_is_warmup(&self, handle: &mut dyn ComputeHandle, warmup: bool) -> bool {
+            self.inner.set_is_warmup(handle, warmup)
+        }
+        fn create_input_buffers(
+            &self, model: &dyn LoadedModel, max_batch: i32, x: i32, y: i32,
+        ) -> Result<Box<dyn InputBuffers>, NeuralNetError> {
+            self.inner.create_input_buffers(model, max_batch, x, y)
+        }
+        fn get_output(
+            &self, handle: &dyn ComputeHandle, buffers: &dyn InputBuffers, rows: i32,
+            inputs: &mut [&mut NNResultBuf], outputs: &mut [&mut NNOutput],
+        ) -> Result<(), NeuralNetError> {
+            self.batches.lock().unwrap().push(rows as usize);
+            self.inner.get_output(handle, buffers, rows, inputs, outputs)
+        }
+        fn supports_async_pipeline(&self) -> bool { true }
+        fn supports_async_pipeline_for_handle(&self, _handle: &dyn ComputeHandle) -> bool { false }
+        fn submit_output(
+            &self, handle: &dyn ComputeHandle, buffers: &dyn InputBuffers, rows: i32,
+            inputs: &mut [&mut NNResultBuf],
+        ) -> Result<usize, NeuralNetError> {
+            self.submissions.fetch_add(1, Ordering::SeqCst);
+            self.inner.submit_output(handle, buffers, rows, inputs)
+        }
+        fn query_output_done(&self, handle: &dyn ComputeHandle, token: usize) -> bool {
+            self.inner.query_output_done(handle, token)
+        }
+        fn finish_output(
+            &self, handle: &dyn ComputeHandle, buffers: &dyn InputBuffers, token: usize,
+            rows: i32, inputs: &mut [&mut NNResultBuf], outputs: &mut [&mut NNOutput],
+        ) -> Result<(), NeuralNetError> {
+            self.inner.finish_output(handle, buffers, token, rows, inputs, outputs)
+        }
+    }
+
+    #[test]
+    fn handle_async_capability_preserves_legacy_backend_default() {
+        let handle = DummyComputeHandle::new();
+        for (stage, expected) in [(FailureStage::Get, false), (FailureStage::Submit, true)] {
+            let backend = FailsOnceBackend { stage, attempts: AtomicU64::new(1), probe: None };
+            assert_eq!(backend.supports_async_pipeline(), expected);
+            assert_eq!(backend.supports_async_pipeline_for_handle(&handle), expected);
+        }
+    }
+
+    #[test]
+    fn synchronous_handle_selects_bounded_batch_aggregation() {
+        for max_batch in [2, 4] {
+            let request_count = max_batch as usize * 8;
+            let backend = Arc::new(HandleSynchronousBackend {
+                inner: FailsOnceBackend { stage: FailureStage::Submit, attempts: AtomicU64::new(1), probe: None },
+                batches: Mutex::new(Vec::new()), submissions: AtomicU64::new(0),
+            });
+            assert!(backend.supports_async_pipeline());
+            let mut eval = evaluator_with_max_batch(max_batch);
+            eval.set_backend(backend.clone());
+            eval.load_model().unwrap();
+            let board = Board::new(19, 19);
+            let history = BoardHistory::new(board.clone(), P_BLACK, Rules::default(), 0);
+            let requests: Vec<_> = (0..request_count).map(|id| {
+                Arc::new(EvalRequest {
+                    buf: AsyncMutex::new(NNResultBuf::new()), result_ready: Condvar::new(),
+                    board: board.clone(), history: history.clone(), next_player: P_BLACK,
+                    sgf_meta: None, nn_input_params: MiscNNInputParams::default(),
+                    include_owner_map: false, nn_hash: Hash128::new(id as u64 + 1, 2),
+                    result_without_owner_map: None,
+                })
+            }).collect();
+            // Queue the burst before starting the consumer. No arrival timing or
+            // artificial sleep is needed to demonstrate aggregation.
+            for request in &requests {
+                assert!(eval.shared.query_queue.wait_push(request.clone()));
+            }
+            eval.spawn_server_threads();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut completed = 0;
+            for request in &requests {
+                let mut buf = request.buf.lock();
+                while buf.result.is_none() && buf.error.is_none() && Instant::now() < deadline {
+                    request.result_ready.wait_for(&mut buf, deadline.saturating_duration_since(Instant::now()));
+                }
+                completed += usize::from(buf.result.is_some() && buf.error.is_none());
+            }
+            eval.kill_server_threads();
+            let batches = backend.batches.lock().unwrap();
+            assert_eq!(completed, request_count, "synchronous handle lost a queued request");
+            assert_eq!(backend.submissions.load(Ordering::SeqCst), 0, "synchronous handle used async submission");
+            assert!(batches.iter().any(|&n| n > 1), "prequeued burst was dispatched only as singletons");
+            assert!(batches.iter().all(|&n| n > 0 && n <= max_batch as usize), "batch capacity exceeded: {batches:?}");
+            assert_eq!(batches.iter().sum::<usize>(), request_count);
+            assert_eq!(eval.num_rows_processed(), request_count as u64);
+            assert_eq!(eval.num_batches_processed(), batches.len() as u64);
         }
     }
 }
