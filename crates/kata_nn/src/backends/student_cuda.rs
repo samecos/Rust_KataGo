@@ -61,9 +61,9 @@ mod execution_reuse {
     }
     impl WorkspaceLayout {
         pub fn new(batch: usize, width: usize) -> Result<Self, String> {
-            if batch == 0 || !matches!(width, 48 | 64) {
+            if batch == 0 || !matches!(width, 48 | 64 | 96) {
                 return Err(
-                    "student CUDA workspace requires positive batch and width 48 or 64".into(),
+                    "student CUDA workspace requires positive batch and width 48, 64, or 96".into(),
                 );
             }
             Ok(Self {
@@ -174,7 +174,7 @@ mod execution_reuse {
 
         #[test]
         fn geometric_growth_stops_at_signed_index_limit() {
-            for width in [48, 64] {
+            for width in [48, 64, 96] {
                 let maximum = i32::MAX as usize / (width * 9 * AREA);
                 assert_eq!(growth_capacity(0, maximum, width).unwrap(), maximum);
                 assert!(growth_capacity(0, maximum + 1, width).is_err());
@@ -188,7 +188,7 @@ mod execution_reuse {
 
         #[test]
         fn every_active_tensor_fits_its_retained_prefix() {
-            for width in [48, 64] {
+            for width in [48, 64, 96] {
                 let retained = WorkspaceLayout::new(32, width).unwrap();
                 for batch in [1, 3, 8, 31, 32] {
                     let active = WorkspaceLayout::new(batch, width).unwrap();
@@ -498,10 +498,11 @@ impl StudentCudaModel {
         let valid_architecture = match model.manifest.variant.as_str() {
             "compact" => width == 48 && blocks == 4,
             "dense" => width == 64 && blocks == 6,
+            "large" => width == 96 && blocks == 10,
             _ => false,
         };
         if !valid_architecture {
-            return Err("student CUDA requires compact (48/4) or dense (64/6) architecture".into());
+            return Err("student CUDA requires compact (48/4), dense (64/6), or large (96/10) architecture".into());
         }
         if model.manifest.format_version != 1
             || model.manifest.input_version != 7

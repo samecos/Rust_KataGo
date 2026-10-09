@@ -1,5 +1,7 @@
 # 学生模型 CUDA 支持
 
+2026-10-08：`large`（96 通道、10 个残差块，1,689,818 参数）规格已合入主仓库；2026-10-07 训练的权重副本位于 `models/student-large-20261007/large.rgmodel`（SHA `1e7db19107eefed6cdd20a84ed3a4cf8e5c6dd0039528830bfbb9e1f20a1b11b`），训练与评测证据在 `C:\Users\Administrator\Documents\Codex\2026-10-07\task\clm-expanded-20261007`。2026-10-04 及更早的已构建程序不含该规格，加载 large 权重需要用合入后的源码重新构建。
+
 2026-10-03：合并 `origin/main` 的研究提交 `71dc36ab11deda063d9d2bbd0b5f4ad03c95fe47`，保留本地两条推理/精度提交。新的工程支持对象是 `research/jev-clm-go/student_models.py` 中两个已定义的四头网络：`compact`（48 通道、4 个残差块）和 `dense`（64 通道、6 个残差块）。原始研究和 M5 结果仍保留。
 
 三份新官方档案的 dense 模型现已完成 200 万条训练数据、20 轮 CUDA 训练和实际 GTP 验收。当前可用权重、程序与 Sabaki 接入步骤见 [学生模型试玩](学生模型试玩.md)，训练及质量指标见 [CUDA 训练与原型权重](../research/jev-clm-go/09-CUDA训练与原型权重.md)。

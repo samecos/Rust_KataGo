@@ -85,6 +85,7 @@ impl StudentModel {
         let spec = match manifest.variant.as_str() {
             "compact" => (48, 4),
             "dense" => (64, 6),
+            "large" => (96, 10),
             _ => return Err("unsupported student variant".into()),
         };
         if manifest.format_version != 1
@@ -157,8 +158,11 @@ impl StudentModel {
 mod tests {
     use super::*;
     fn fixture() -> Vec<u8> {
+        fixture_for("compact", 48, 4)
+    }
+    fn fixture_for(variant: &str, width: usize, blocks: usize) -> Vec<u8> {
         let mut offset = 0;
-        let tensors = expected_shapes(48, 4)
+        let tensors = expected_shapes(width, blocks)
             .into_iter()
             .map(|(name, shape)| {
                 let length = shape.iter().product::<usize>();
@@ -175,9 +179,9 @@ mod tests {
         let m = StudentManifest {
             format_version: 1,
             input_version: 7,
-            variant: "compact".into(),
-            width: 48,
-            blocks: 4,
+            variant: variant.into(),
+            width,
+            blocks,
             score_scale: 20.0,
             tensors,
         };
@@ -187,6 +191,15 @@ mod tests {
         out.extend(header);
         out.resize(out.len() + offset, 0);
         out
+    }
+    #[test]
+    fn validates_large_and_rejects_mislabeled_dimensions() {
+        let bytes = fixture_for("large", 96, 10);
+        let parsed = StudentModel::parse(&bytes).unwrap();
+        assert_eq!(parsed.tensors.len(), 56);
+        assert_eq!(parsed.tensors["blocks.9.conv2.weight"].shape, vec![96,96,3,3]);
+        assert!(StudentModel::parse(&fixture_for("large", 64, 6)).is_err());
+        assert!(StudentModel::parse(&fixture_for("dense", 96, 10)).is_err());
     }
     #[test]
     fn validates_complete_model_and_descriptor() {
